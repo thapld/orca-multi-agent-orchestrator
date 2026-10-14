@@ -1,0 +1,34 @@
+{
+  "name": "orca-multi-agent-orchestrator",
+  "version": "1.0.0",
+  "description": "Full-Spectrum Multi-Agent Engineering Orchestrator on Orca ADE",
+  "main": "scripts/orca-project-init",
+  "bin": {
+    "orca-multi-agent-orchestrator": "./scripts/orca-project-init",
+    "orca-project-init": "./scripts/orca-project-init",
+    "orca-init": "./scripts/orca-project-init"
+  },
+  "scripts": {
+    "init": "./scripts/orca-project-init"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thapld/orca-multi-agent-orchestrator.git"
+  },
+  "keywords": [
+    "orca",
+    "ade",
+    "multi-agent",
+    "orchestrator",
+    "claude",
+    "kimi",
+    "codex",
+    "antigravity"
+  ],
+  "author": "thapld",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/thapld/orca-multi-agent-orchestrator/issues"
+  },
+  "homepage": "https://github.com/thapld/orca-multi-agent-orchestrator#readme"
+}

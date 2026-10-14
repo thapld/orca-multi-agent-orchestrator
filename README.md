@@ -59,17 +59,35 @@ orca-multi-agent-orchestrator/
 
 ## 🚀 Khởi Đầu Nhanh (Quick Start)
 
-### 1. Cài đặt script điều phối toàn cục
-Script khởi tạo đã được đặt tại `/Users/macbook/.local/bin/orca-project-init` (đã nằm trong `PATH`).
+### Cách 1: Chạy trực tiếp qua `npx` (Khuyên dùng — Không cần clone hay tải về)
+Bạn có thể khởi tạo orchestrator cho bất kỳ dự án nào chỉ bằng 1 dòng lệnh `npx`:
 
-### 2. Gắn Orchestrator vào một dự án
-Mở terminal và trỏ đến dự án mục tiêu của bạn (ví dụ repo `gem76`):
+```bash
+# Khởi tạo cho dự án hiện tại:
+npx github:thapld/orca-multi-agent-orchestrator
 
+# Hoặc truyền trực tiếp đường dẫn dự án mục tiêu:
+npx github:thapld/orca-multi-agent-orchestrator /Users/macbook/work/gem76
+```
+
+---
+
+### Cách 2: Chạy trực tiếp qua `curl` (Không cần Node.js)
+```bash
+curl -fsSL https://raw.githubusercontent.com/thapld/orca-multi-agent-orchestrator/main/scripts/orca-project-init | zsh -s -- /Users/macbook/work/gem76
+```
+
+---
+
+### Cách 3: Sử dụng script cục bộ đã cài đặt
+Script đã được cài sẵn vào PATH tại `/Users/macbook/.local/bin/orca-project-init`:
 ```bash
 orca-project-init /Users/macbook/work/gem76
 ```
 
-Script sẽ mở menu tương tác từng bước:
+---
+
+### Các bước wizard sẽ hướng dẫn:
 1. Chọn agent làm **Lead Coordinator** (ví dụ: `claude`).
 2. Chọn agent & số lượng song song cho **Developers** (ví dụ: 2 agents `kimi`).
 3. Chọn agent & số lượng song song cho **QA Testers** (ví dụ: 1 agent `kimi`).
@@ -78,8 +96,8 @@ Script sẽ mở menu tương tác từng bước:
 6. Bật/tắt các vai trò mở rộng: **UI/UX Designer** (Design Mode) và **DevOps** (SSH Worktrees).
 7. Chọn môi trường thực thi: **Local** hoặc **SSH (`orb`)**.
 
-### 3. Vận hành
-Sau khi cài đặt, bạn mở dự án trong Antigravity hoặc Orca. Bất kỳ yêu cầu nào bạn đưa ra đều được tự động vận hành theo đúng quy trình 5 pha và chính sách đa luồng đã thiết lập.
+### Vận hành:
+Sau khi khởi tạo, bạn mở dự án trong Antigravity, Claude Code (`claude`), hoặc Orca. Bất kỳ yêu cầu nào bạn đưa ra đều được tự động vận hành theo đúng quy trình 6 bước và chính sách đa luồng đã thiết lập mà không cần dán prompt.
 
 ---
 

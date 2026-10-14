@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # orca-project-init: Cấu hình hệ thống Multi-Agent Orchestration toàn diện trên nền tảng Orca ADE
 # Bao gồm: Core Roles, Git Lifecycle Roles (PR Review & Issue Resolver), và Specialized Extensions.
 # Dùng: orca-project-init [/path/to/project]
