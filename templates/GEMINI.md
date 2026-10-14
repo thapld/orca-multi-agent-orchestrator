@@ -67,7 +67,7 @@ Whenever a PR is opened or requested for review:
   --setup run \
   --json
 
-/usr/local/bin/orca file diff --worktree active --staged --json
+/usr/local/bin/orca file open-changed --mode diff --worktree active --json
 ```
 
 ### 4. UI Bug Fix with Design Mode & Browser
@@ -89,11 +89,12 @@ Nếu trong lúc Leader đang điều phối / review Feature mà có **GitHub I
 1. **Nguyên tắc Không Can thiệp (Zero Interference):**
    - TUYỆT ĐỐI KHÔNG dừng luồng Feature đang chạy, không chuyển branch, không stash code.
 2. **Kích hoạt nhánh song song tức thì (Parallel Fork qua Native Issue Linking):**
-   - Leader khởi chạy ngay `{{ISSUE_AGENT}}` bằng cờ `--issue <id>` để Orca tự động kéo toàn bộ context, mô tả lỗi từ GitHub về worktree mới:
+   - Leader khởi chạy ngay `{{ISSUE_AGENT}}` bằng cờ `--issue <id>` và `--no-parent` để Orca tự động tạo worktree độc lập với context từ GitHub:
      ```bash
      /usr/local/bin/orca worktree create \
        --name "hotfix-issue-<id>" \
        --issue <id> \
+       --no-parent \
        --agent {{ISSUE_AGENT}} \
        --setup run \
        --json
@@ -131,6 +132,20 @@ Nếu một Issue đang được `{{ISSUE_AGENT}}` sửa mà bị **gỡ assign 
    - Giải phóng terminal: `/usr/local/bin/orca orchestration worker-release --dispatch <dispatch_id> --json`
    - Xóa hoặc archive worktree: `/usr/local/bin/orca worktree rm --worktree active --json`
    - Leader quay trở về tiếp tục 100% tài nguyên cho luồng Feature chính.
+
+---
+
+## 🚨 Worker Escalation & Blocker Handling Policy (Chính sách Xử lý Bế tắc & Sự cố Worker)
+
+Khi một worker (Dev hoặc QA) gặp vấn đề không tự giải quyết được:
+1. **Worker gửi câu hỏi/escalation:**
+   - Worker gửi typed message: `orca orchestration send --type ask --text "<Nội dung vướng mắc>"`
+2. **Leader kiểm tra định kỳ (Check Mailbox):**
+   - Leader chạy `orca orchestration check --json` để đọc tin nhắn từ workers.
+3. **Leader phân loại và xử lý:**
+   - **Tự giải quyết được:** Leader gửi chỉ đạo trực tiếp: `orca orchestration send --to <worker> --type steer --text "<Hướng giải quyết>"`
+   - **Cần ý kiến người dùng:** Leader tạm dừng và hỏi người dùng (Human Gate), sau đó chuyển tiếp kết luận cho worker.
+   - **Worker bị crash hoặc lặp vô tận:** Leader đọc log bằng `orca terminal read --terminal <handle>`, sau đó dừng bằng `orca orchestration worker-stop --dispatch <id>` và điều phối lại.
 
 ---
 

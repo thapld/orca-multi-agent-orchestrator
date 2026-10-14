@@ -13,6 +13,7 @@ echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_N
 RECEIPT=$(/usr/local/bin/orca worktree create \
   --name "$WORKTREE_NAME" \
   --pr "$PR_NUM" \
+  --no-parent \
   --agent "$AGENT" \
   --setup run \
   --json)

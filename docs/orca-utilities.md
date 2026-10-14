@@ -16,11 +16,14 @@ orca worktree ps --json
 # Tạo một worktree con mới từ nhánh hiện tại
 orca worktree create --repo id:<repoId> --name "feature-auth" --parent-worktree active --json
 
-# Tạo worktree gắn liền với GitHub Issue
-orca worktree create --repo id:<repoId> --name "fix-login" --issue 42 --agent kimi --setup run --json
+# Tạo worktree gắn liền với GitHub Issue (độc lập, không kế thừa context dở dang)
+orca worktree create --repo id:<repoId> --name "fix-login" --issue 42 --no-parent --agent kimi --setup run --json
 
-# Tạo worktree để review GitHub PR
-orca worktree create --repo id:<repoId> --name "review-pr-123" --pr 123 --agent claude --json
+# Tạo worktree để review GitHub PR (độc lập)
+orca worktree create --repo id:<repoId> --name "review-pr-123" --pr 123 --no-parent --agent claude --json
+
+# Mở toàn bộ diff thay đổi của worktree để review
+orca file open-changed --mode diff --worktree active --json
 
 # Cập nhật ghi chú tiến độ vào worktree
 orca worktree set --worktree active --comment "Đã tái hiện lỗi; đang viết patch" --json

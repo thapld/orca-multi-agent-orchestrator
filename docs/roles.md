@@ -111,7 +111,7 @@ Tài liệu này định nghĩa chi tiết từng vai trò trong hệ sinh thái
 * **Mục tiêu:** Tự động sửa bug được gán trên GitHub/GitLab.
 * **Lệnh khởi tạo:**
   ```bash
-  orca worktree create --name "hotfix-issue-<id>" --issue <id> --agent kimi --setup run --json
+  orca worktree create --name "hotfix-issue-<id>" --issue <id> --no-parent --agent kimi --setup run --json
   ```
 * **Task Prompt Template:**
   ```text
@@ -131,15 +131,54 @@ Tài liệu này định nghĩa chi tiết từng vai trò trong hệ sinh thái
 * **Mục tiêu:** Soi diff PR độc lập, kiểm tra CI và đưa ra nhận xét.
 * **Lệnh khởi tạo:**
   ```bash
-  orca worktree create --name "review-pr-<id>" --pr <id> --agent claude --setup run --json
+  orca worktree create --name "review-pr-<id>" --pr <id> --no-parent --agent claude --setup run --json
   ```
 * **Task Prompt Template:**
   ```text
   [ROLE: PR REVIEWER]
   Task: Thẩm định Pull Request #<id>.
   Requirements:
-  - Đọc toàn bộ code diff qua `orca file diff --worktree active`.
+  - Đọc toàn bộ code diff qua `orca file open-changed --mode diff --worktree active`.
   - Chạy thử test suite nội bộ trong worktree PR.
   - Đánh giá kiến trúc, độ sạch của code, tính bao phủ của test.
   - Tổng hợp nhận xét rõ ràng, chỉ ra số dòng cụ thể cần cải thiện nếu có.
+  ```
+
+---
+
+### 2.7. UI/UX Specialist
+* **Mục tiêu:** Tinh chỉnh giao diện, sửa lỗi responsive và styling bằng công cụ trực quan.
+* **Lệnh khởi tạo / điều hướng:**
+  ```bash
+  orca goto --url http://localhost:3000 --worktree active --json
+  orca snapshot --worktree active --json
+  ```
+* **Task Prompt Template:**
+  ```text
+  [ROLE: UI/UX SPECIALIST]
+  Task: Chỉnh sửa giao diện và styling component <Component>.
+  Requirements:
+  - Sử dụng Orca Design Mode để trích xuất chính xác CSS computed và DOM element bị lỗi.
+  - Đảm bảo giao diện responsive hoàn hảo trên Mobile, Tablet và Desktop.
+  - Xác nhận kết quả trực quan bằng `orca screenshot --worktree active`.
+  - Đảm bảo không làm vỡ style của các màn hình/component dùng chung.
+  ```
+
+---
+
+### 2.8. DevOps & Infra Specialist
+* **Mục tiêu:** Chạy DB migration, cấu hình container Docker/Orb, quản lý remote environment.
+* **Lệnh khởi tạo (Remote SSH Worktree):**
+  ```bash
+  orca worktree create --name "devops-infra" --host "ssh:orb" --agent codex --json
+  ```
+* **Task Prompt Template:**
+  ```text
+  [ROLE: DEVOPS & INFRA SPECIALIST]
+  Task: Quản trị môi trường, hạ tầng và database migrations.
+  Requirements:
+  - Thực thi các lệnh nặng/containerized bên trong host được chỉ định (`--host`).
+  - Kiểm tra tính tương thích của Docker compose và biến môi trường (`.env`).
+  - Đảm bảo database migration có thể rollback an toàn (up/down migration script).
+  - Ghi log rõ ràng từng bước thực thi và báo cáo kết quả cho Lead Coordinator.
   ```

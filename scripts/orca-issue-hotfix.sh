@@ -13,6 +13,7 @@ echo "🐋 [Orca Hotfix] Đang khởi tạo worktree song song cho Issue #$ISSUE
 RECEIPT=$(/usr/local/bin/orca worktree create \
   --name "$WORKTREE_NAME" \
   --issue "$ISSUE_NUM" \
+  --no-parent \
   --agent "$AGENT" \
   --setup run \
   --json)

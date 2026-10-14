@@ -44,8 +44,8 @@ sequenceDiagram
     Lead->>Orca: worker-start Security Auditor
     Sec->>Orca: send --type worker_done (0 Critical)
 
-    Lead->>Orca: orca file diff (Soi diff tổng thể)
-    Lead->>Orca: orca review commit-push (Tạo PR / Merge vào main)
+    Lead->>Orca: orca file open-changed --mode diff (Soi diff tổng thể)
+    Lead->>Orca: git push & gh pr create (Tạo PR / Merge vào main)
     Lead->>Orca: orca orchestration worker-release (Dọn dẹp terminal)
     Lead-->>User: Báo cáo hoàn tất
 ```
@@ -69,7 +69,7 @@ flowchart TD
     Triage -- "P0 Hotfix / Cần sửa gấp" --> Fork["TÁCH NHÁNH SONG SONG NGAY LẬP TỨC\n(Zero Interference)"]
     
     subgraph Track2 ["LUỒNG 2: ISSUE HOTFIX (CÔ LẬP TRÊN WORKTREE MỚI)"]
-        Fork --> CreateWorktree["orca worktree create --name hotfix-issue-42 --issue 42 --agent $ISSUE_AGENT"]
+        Fork --> CreateWorktree["orca worktree create --name hotfix-issue-42 --issue 42 --no-parent --agent $ISSUE_AGENT"]
         CreateWorktree --> AutoPull["Orca tự động kéo mô tả Issue từ GitHub vào làm context"]
         AutoPull --> IssueWorker["Issue Resolver Agent tái hiện lỗi & viết patch"]
         IssueWorker --> TestFix["Chạy test kiểm thử bản vá"]
@@ -147,3 +147,41 @@ sequenceDiagram
     Agent->>Browser: Hot-reload trang web
     Dev->>Browser: orca screenshot (Xác nhận giao diện đã chuẩn)
 ```
+
+---
+
+## 6. Quy Trình Xử Lý Sự Cố & Chỉ Đạo Khi Bế Tắc (Worker Escalation & Blocker Handling)
+
+Tình huống: Worker (Dev/QA) gặp lỗi không vượt qua được (thiếu dependency, API contract không khớp, test fail liên tục) hoặc cần quyết định kiến trúc từ Leader.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 👤 Người dùng
+    participant Lead as 🏛️ Lead Coordinator
+    participant Orca as 🐋 Orca Mailbox & CLI
+    participant Worker as 🤖 Worker (Dev/QA)
+
+    Worker->>Worker: Gặp lỗi / Bế tắc (Blocker)
+    Worker->>Orca: orca orchestration send --type ask --text "Cần làm rõ format JWT header"
+    
+    loop Kiểm tra định kỳ (Mailbox Poll)
+        Lead->>Orca: orca orchestration check
+    end
+
+    Note over Lead,Orca: Leader phát hiện tin nhắn 'ask' / 'escalation'
+    
+    alt Leader tự xử lý được theo spec
+        Lead->>Orca: orca orchestration send --to <worker> --type steer --text "Dùng Authorization: Bearer <token>"
+        Worker->>Worker: Nhận chỉ đạo & Tiếp tục công việc
+    else Vấn đề kiến trúc lớn cần ý kiến con người
+        Lead-->>User: Tham vấn người dùng (Human Gate)
+        User->>Lead: Phản hồi giải pháp
+        Lead->>Orca: orca orchestration send --to <worker> --type steer --text "<Giải pháp từ User>"
+    else Worker bị loop vô tận / Crash
+        Lead->>Orca: orca terminal read --terminal <handle> (Đọc log phân tích)
+        Lead->>Orca: orca orchestration worker-stop --dispatch <id>
+        Lead->>Orca: orca orchestration worker-start --task <id> (Khởi động lại với prompt bổ sung)
+    end
+```
+
