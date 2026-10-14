@@ -201,8 +201,8 @@ sequenceDiagram
     participant Orca as 🐋 Orca Runtime & Watchdog
     participant Worker as 🤖 Worker (Dev)
 
-    Note over Lead,Worker: Giao task có chốt chặn trên (--timeout-ms 900000 / 15 phút)
-    Lead->>Orca: worker-start --task <id> --timeout-ms 900000
+    Note over Lead,Worker: Giao task có chốt chặn trên (--timeout-ms 300000 / 5 phút)
+    Lead->>Orca: worker-start --task <id> --timeout-ms 300000
 
     Worker->>Worker: Đang code... Bất ngờ dừng (Cạn token / Kẹt prompt [y/n] / Lặp lỗi)
     
@@ -210,7 +210,7 @@ sequenceDiagram
         Lead->>Orca: orca orchestration check (Kiểm tra tin nhắn & Heartbeat)
     end
 
-    Note over Lead,Orca: Phát hiện worker im tiếng > 3 phút hoặc timeout
+    Note over Lead,Orca: Phát hiện worker im tiếng > 1-2 phút hoặc timeout
     Lead->>Orca: orca orchestration worker-show --dispatch <id>
     
     alt Trường hợp 1: Kẹt câu hỏi xác nhận (observation.agentWait != null)
@@ -222,7 +222,7 @@ sequenceDiagram
         Note over Lead,Orca: Toàn bộ code viết dở vẫn nằm nguyên vẹn trên worktree con
         Lead->>Orca: worker-start --task <id> --retry-of <id> --worktree current --agent <agent> [--model <model>]
         Note over Worker: Worker mới kế thừa worktree, đọc git log & viết tiếp phần dở dang đến khi xong
-    else Trường hợp 3: Quá thời gian timeout 15 phút
+    else Trường hợp 3: Quá thời gian timeout 5 phút
         Orca-->>Lead: Báo lỗi timeout (outcome: timed_out)
         Lead->>Orca: orca terminal read --terminal <handle>
         Lead->>Orca: Đổi model mạnh hơn hoặc chia nhỏ task DAG để worker tiếp quản

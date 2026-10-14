@@ -36,7 +36,7 @@ START_RECEIPT=$(/usr/local/bin/orca orchestration worker-start \
   --name "$WORKTREE_NAME" \
   --agent "$AGENT" \
   --setup run \
-  --timeout-ms 900000 \
+  --timeout-ms 300000 \
   --json)
 
 echo "🎉 Worker đã được khởi chạy thành công!"

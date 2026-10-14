@@ -457,7 +457,7 @@ Khi một worker (Dev hoặc QA) gặp vấn đề không tự giải quyết đ
 Khi khởi chạy worker (Dev, QA, Security), Leader phải chủ động kiểm soát nguy cơ agent bị dừng giữa chừng (hết token, kẹt câu hỏi [y/n], crash hoặc lặp lỗi):
 
 1. **Luôn đặt Timeout chặn trên khi khởi chạy:**
-   Mọi lệnh \`worker-start\` phải kèm cờ \`--timeout-ms 900000\` (15 phút) để tránh terminal chạy ngầm vĩnh viễn:
+   Mọi lệnh \`worker-start\` phải kèm cờ \`--timeout-ms 300000\` (5 phút) để tránh terminal chạy ngầm vĩnh viễn:
    \`\`\`bash
    /usr/local/bin/orca orchestration worker-start \\
      --task <taskId> \\
@@ -465,13 +465,13 @@ Khi khởi chạy worker (Dev, QA, Security), Leader phải chủ động kiểm
      --name "dev-worker" \\
      --agent $DEV_AGENT \\
      --setup run \\
-     --timeout-ms 900000 \\
+     --timeout-ms 300000 \\
      --json
    \`\`\`
 
 2. **Quy tắc Giám sát Nhịp tim (Watchdog Heartbeat & Mailbox):**
    - Định kỳ kiểm tra: \`/usr/local/bin/orca orchestration check --json\`
-   - Nếu quá 3 phút không nhận được tin nhắn heartbeat hoặc \`worker_done\`, Leader lập tức thanh tra:
+   - Nếu quá 1-2 phút không nhận được tin nhắn heartbeat hoặc \`worker_done\`, Leader lập tức thanh tra:
      \`\`\`bash
      /usr/local/bin/orca orchestration worker-show --dispatch <dispatch_id> --json
      \`\`\`
@@ -499,7 +499,7 @@ Khi khởi chạy worker (Dev, QA, Security), Leader phải chủ động kiểm
        --agent $DEV_AGENT \\
        --setup run \\
        --comment "Resume implementation after previous worker hit token limit" \\
-       --timeout-ms 900000 \\
+       --timeout-ms 300000 \\
        --json
      \`\`\`
      Worker mới sẽ tự động đọc \`git status\`/\`git log\` trong worktree, kế thừa phần việc dở dang và tiếp tục code đến khi hoàn thành.
