@@ -458,9 +458,15 @@ Khi một worker (Dev hoặc QA) gặp vấn đề không tự giải quyết đ
 - Clean up settled workers: \`orca orchestration worker-release --dispatch <dispatch_id> --json\`.
 RULE
 
+# ── Tạo symlinks để hỗ trợ Claude Code CLI và Codex/OpenCode auto-discovery ──
+ln -sf .agents/GEMINI.md "$PROJECT_PATH/CLAUDE.md"
+ln -sf .agents/GEMINI.md "$PROJECT_PATH/AGENTS.md"
+
 echo ""
 echo "🎉 [HOÀN TẤT] Đã tạo xong hệ thống Full-Spectrum Orchestrator cho project!"
-echo "   1. Directive Rule: $TARGET_RULE"
-echo "   2. Team Config:    $TARGET_CONFIG"
+echo "   1. Directive Rule:        $TARGET_RULE"
+echo "   2. Team Config:           $TARGET_CONFIG"
+echo "   3. Universal Auto-Links:  CLAUDE.md -> .agents/GEMINI.md"
+echo "                             AGENTS.md -> .agents/GEMINI.md"
 echo ""
-echo "👉 Mở Antigravity hoặc Orca tại '$PROJECT_PATH' để bắt đầu làm việc."
+echo "👉 Mở Antigravity, Claude Code (claude), Codex, hoặc Orca tại '$PROJECT_PATH' để bắt đầu làm việc."

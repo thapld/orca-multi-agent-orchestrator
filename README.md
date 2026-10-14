@@ -27,6 +27,8 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
    * Khi issue đang fix bị chuyển sang người khác: tự động dừng worker an toàn (`worker-stop`), đóng gói tiến độ nháp thành branch bàn giao `wip/issue-<id>-handover`, để lại comment trên GitHub và thu dọn worktree.
 7. **Xử Lý Sự Cố & Chỉ Đạo Khi Bế Tắc (Worker Escalation & Blocker Handling):**
    * Khi worker gặp blocker, tự động gửi `ask`/`escalation` lên Coordinator qua Orca Mailbox. Leader kiểm tra qua `orca orchestration check`, đưa ra chỉ đạo (`steer`), hoặc tham vấn Human Gate nếu cần quyết định kiến trúc lớn.
+8. **Universal Auto-Discovery (Khởi chạy tự động không cần dán prompt):**
+   * Tự động tạo symlink `CLAUDE.md` và `AGENTS.md` trỏ về `.agents/GEMINI.md`. Dù bạn mở Antigravity, Claude Code (`claude`), hay Codex CLI làm Leader, agent đều tự động đọc toàn bộ directive và quy trình điều phối ngay khi khởi động mà không cần dán prompt thủ công.
 
 ---
 
