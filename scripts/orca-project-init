@@ -1,0 +1,440 @@
+#!/bin/zsh
+# orca-project-init: Cấu hình hệ thống Multi-Agent Orchestration toàn diện trên nền tảng Orca ADE
+# Bao gồm: Core Roles, Git Lifecycle Roles (PR Review & Issue Resolver), và Specialized Extensions.
+# Dùng: orca-project-init [/path/to/project]
+
+set -e
+
+PROJECT_DIR="${1:-.}"
+PROJECT_PATH=$(cd "$PROJECT_DIR" 2>/dev/null && pwd || echo "$PROJECT_DIR")
+AGENTS_DIR="$PROJECT_PATH/.agents"
+TARGET_RULE="$AGENTS_DIR/GEMINI.md"
+TARGET_CONFIG="$PROJECT_PATH/orca-team.json"
+
+AVAILABLE_AGENTS=(
+  "kimi"
+  "claude"
+  "codex"
+  "cursor"
+  "antigravity"
+  "opencode"
+  "aider"
+  "goose"
+  "copilot"
+)
+
+print_agents() {
+  local default_idx="$1"
+  for i in {1..${#AVAILABLE_AGENTS[@]}}; do
+    local marker=""
+    [[ "$i" == "$default_idx" ]] && marker=" (khuyến nghị)"
+    echo "    $i) ${AVAILABLE_AGENTS[$i]}$marker"
+  done
+}
+
+choose_agent() {
+  local role_title="$1"
+  local default_idx="$2"
+  echo ""
+  echo "👉 [Chọn Agent] cho: $role_title"
+  print_agents "$default_idx"
+  printf "   Nhập số [1-${#AVAILABLE_AGENTS[@]}] (Enter = $default_idx [${AVAILABLE_AGENTS[$default_idx]}]): "
+  read -r choice
+  choice="${choice:-$default_idx}"
+  if (( choice < 1 || choice > ${#AVAILABLE_AGENTS[@]} )); then
+    choice=$default_idx
+  fi
+  SELECTED_AGENT="${AVAILABLE_AGENTS[$choice]}"
+  echo "   ➔ Đã chọn: $SELECTED_AGENT"
+}
+
+choose_count() {
+  local role_title="$1"
+  local default_count="$2"
+  printf "   Nhập số lượng agent song song cho $role_title [1-5] (Enter = $default_count): "
+  read -r count
+  count="${count:-$default_count}"
+  if ! [[ "$count" =~ ^[1-9][0-9]*$ ]]; then
+    count=$default_count
+  fi
+  SELECTED_COUNT="$count"
+  echo "   ➔ Số lượng: $SELECTED_COUNT agent(s)"
+}
+
+choose_utilities() {
+  local default_utils="$1"
+  echo "   Tiện ích Orca cấp quyền (1: Worktrees, 2: Browser/Design Mode, 3: SSH, 4: Computer Use, 5: Skills Registry)"
+  printf "   Nhập các số cách nhau bằng dấu phẩy (Enter = $default_utils): "
+  read -r utils_input
+  utils_input="${utils_input:-$default_utils}"
+  
+  SELECTED_UTILS=()
+  for u in ${(s:,:)utils_input}; do
+    u=$(echo "$u" | tr -d ' ')
+    case "$u" in
+      1) SELECTED_UTILS+=("git-worktrees") ;;
+      2) SELECTED_UTILS+=("browser-design-mode") ;;
+      3) SELECTED_UTILS+=("ssh-remote-execution") ;;
+      4) SELECTED_UTILS+=("desktop-computer-use") ;;
+      5) SELECTED_UTILS+=("orca-skills-registry") ;;
+    esac
+  done
+  echo "   ➔ Tiện ích: ${(j:, :)SELECTED_UTILS}"
+}
+
+ask_toggle() {
+  local feature_name="$1"
+  local default_val="$2"
+  printf "   Kích hoạt $feature_name? (Y/n, Enter = $default_val): "
+  read -r ans
+  ans="${ans:-$default_val}"
+  if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+    TOGGLE_RESULT=true
+  else
+    TOGGLE_RESULT=false
+  fi
+}
+
+echo ""
+echo "╔════════════════════════════════════════════════════════════════════════════╗"
+echo "║   🐋  ORCA FULL-SPECTRUM MULTI-AGENT ORCHESTRATOR — SETUP WIZARD          ║"
+echo "╚════════════════════════════════════════════════════════════════════════════╝"
+echo ""
+echo "📍 Thư mục dự án: $PROJECT_PATH"
+
+if [[ -f "$TARGET_RULE" ]]; then
+  echo ""
+  echo "⚠️  Đã tồn tại cấu hình $TARGET_RULE."
+  printf "Bạn có muốn cấu hình lại và ghi đè? (y/N): "
+  read -r overwrite
+  [[ "$overwrite" != "y" && "$overwrite" != "Y" ]] && echo "Đã huỷ." && exit 0
+fi
+
+# ── 1. CỐT LÕI: Lead Coordinator ──
+echo ""
+echo "=================================================================="
+echo "PHẦN 1: LEAD COORDINATOR (Nhạc trưởng điều phối)"
+echo "Nhiệm vụ: Lập Task DAG, quản lý Run, giao việc và điều phối các worker."
+choose_agent "Lead Coordinator" 2
+COORD_AGENT="$SELECTED_AGENT"
+
+# ── 2. CỐT LÕI: Full-Stack Dev Team ──
+echo ""
+echo "=================================================================="
+echo "PHẦN 2: FULL-STACK DEVELOPERS (Nhóm Lập trình viên)"
+echo "Nhiệm vụ: Trực tiếp viết code, unit test trên các child worktree độc lập."
+choose_agent "Full-Stack Devs" 1
+DEV_AGENT="$SELECTED_AGENT"
+choose_count "Developer" 2
+DEV_COUNT="$SELECTED_COUNT"
+choose_utilities "1,2,5"
+DEV_UTILS="${(j:, :)SELECTED_UTILS}"
+
+# ── 3. CỐT LÕI: QA & Test Team ──
+echo ""
+echo "=================================================================="
+echo "PHẦN 3: QA & TEST ENGINEERS (Nhóm Kiểm thử chất lượng)"
+echo "Nhiệm vụ: Viết integration tests, kiểm tra edge cases và acceptance criteria."
+choose_agent "QA & Testing" 1
+QA_AGENT="$SELECTED_AGENT"
+choose_count "QA Tester" 1
+QA_COUNT="$SELECTED_COUNT"
+choose_utilities "1,2,5"
+QA_UTILS="${(j:, :)SELECTED_UTILS}"
+
+# ── 4. CỐT LÕI: Bug Hunter & Security ──
+echo ""
+echo "=================================================================="
+echo "PHẦN 4: BUG HUNTER & SECURITY AUDITOR (Nhóm Săn lỗi & Bảo mật)"
+echo "Nhiệm vụ: Quét lỗ hổng OWASP, race conditions, memory leaks, rò rỉ secret."
+choose_agent "Security & Bug Hunter" 3
+SEC_AGENT="$SELECTED_AGENT"
+choose_count "Bug Hunter / Security" 1
+SEC_COUNT="$SELECTED_COUNT"
+choose_utilities "1,5"
+SEC_UTILS="${(j:, :)SELECTED_UTILS}"
+
+# ── 5. GIT LIFECYCLE: PR Reviewer & Issue Resolver ──
+echo ""
+echo "=================================================================="
+echo "PHẦN 5: GIT & GITHUB/GITLAB LIFECYCLE ROLES"
+echo "5.1. PR Reviewer (Chuyên gia thẩm định Pull Request & Line-by-line Diff)"
+choose_agent "PR Reviewer" 2
+PR_AGENT="$SELECTED_AGENT"
+
+echo ""
+echo "5.2. Git Issue Resolver (Chuyên gia xử lý bug được gán / assigned issues)"
+choose_agent "Git Issue Resolver" 1
+ISSUE_AGENT="$SELECTED_AGENT"
+
+# ── 6. SPECIALIZED EXTENSIONS ──
+echo ""
+echo "=================================================================="
+echo "PHẦN 6: CÁC VAI TRÒ MỞ RỘNG CHUYÊN BIỆT (Tùy chọn bật/tắt)"
+
+# 6.1 UI/UX Specialist
+echo ""
+echo "6.1. UI/UX Specialist (Khai thác tối đa Design Mode & Embedded Browser)"
+ask_toggle "UI/UX Specialist" "y"
+ENABLE_UI="$TOGGLE_RESULT"
+if [[ "$ENABLE_UI" == true ]]; then
+  choose_agent "UI/UX Specialist" 2
+  UI_AGENT="$SELECTED_AGENT"
+fi
+
+# 6.2 DevOps Specialist
+echo ""
+echo "6.2. DevOps / Infra Specialist (DB migration, Docker/Orb, SSH Worktrees)"
+ask_toggle "DevOps Specialist" "y"
+ENABLE_DEVOPS="$TOGGLE_RESULT"
+if [[ "$ENABLE_DEVOPS" == true ]]; then
+  choose_agent "DevOps Specialist" 3
+  DEVOPS_AGENT="$SELECTED_AGENT"
+fi
+
+# ── 7. Host Môi trường Thực thi ──
+echo ""
+echo "=================================================================="
+echo "PHẦN 7: MÔI TRƯỜNG THỰC THI CHÍNH (Execution Host)"
+echo "  1) local (Chạy trực tiếp trên máy macOS)"
+echo "  2) ssh:orb (Chạy remote qua SSH target 'orb')"
+printf "Chọn [1-2] (Enter = 1): "
+read -r host_choice
+host_choice="${host_choice:-1}"
+if [[ "$host_choice" == "2" ]]; then
+  EXEC_HOST="ssh:ssh-1791972097322-ckux63"
+  HOST_LABEL="SSH Target (orb)"
+else
+  EXEC_HOST="local"
+  HOST_LABEL="Local Machine"
+fi
+echo "➔ Môi trường: $HOST_LABEL"
+
+# ── Tổng kết xác nhận ──
+echo ""
+echo "┌──────────────────────────────────────────────────────────────────────────┐"
+echo "│                 TỔNG HỢP CẤU HÌNH ĐỘI NGŨ ORCA TOÀN DIỆN                 │"
+echo "├──────────────────────────────────────────────────────────────────────────┤"
+echo "│  Coordinator:     $COORD_AGENT (1 agent)"
+echo "│  Developers:      $DEV_AGENT ($DEV_COUNT agents song song) [$DEV_UTILS]"
+echo "│  QA Testers:      $QA_AGENT ($QA_COUNT agents song song) [$QA_UTILS]"
+echo "│  Security:        $SEC_AGENT ($SEC_COUNT agents song song) [$SEC_UTILS]"
+echo "│  PR Reviewer:     $PR_AGENT (Checkout PR, line-by-line diff, CI checks)"
+echo "│  Issue Resolver:  $ISSUE_AGENT (Checkout issue, auto-fix, commit & push)"
+if [[ "$ENABLE_UI" == true ]]; then
+echo "│  UI/UX Designer:  $UI_AGENT (Design Mode, DOM/CSS inspection)"
+fi
+if [[ "$ENABLE_DEVOPS" == true ]]; then
+echo "│  DevOps / Infra:  $DEVOPS_AGENT (Migrations, Docker/Orb, SSH Worktrees)"
+fi
+echo "│  Execution Host:  $HOST_LABEL"
+echo "└──────────────────────────────────────────────────────────────────────────┘"
+echo ""
+printf "Xác nhận tạo cấu hình cho project? (Y/n): "
+read -r confirm
+[[ "$confirm" == "n" || "$confirm" == "N" ]] && echo "Đã huỷ." && exit 0
+
+mkdir -p "$AGENTS_DIR"
+
+# ── Ghi file config JSON ──
+cat > "$TARGET_CONFIG" << JSON
+{
+  "projectPath": "$PROJECT_PATH",
+  "executionHost": "$EXEC_HOST",
+  "coordinator": {
+    "agent": "$COORD_AGENT"
+  },
+  "roles": {
+    "developer": {
+      "agent": "$DEV_AGENT",
+      "concurrency": $DEV_COUNT,
+      "utilities": ["git-worktrees", "browser-design-mode", "orca-skills-registry"]
+    },
+    "qa": {
+      "agent": "$QA_AGENT",
+      "concurrency": $QA_COUNT,
+      "utilities": ["git-worktrees", "browser-design-mode", "orca-skills-registry"]
+    },
+    "security": {
+      "agent": "$SEC_AGENT",
+      "concurrency": $SEC_COUNT,
+      "utilities": ["git-worktrees", "orca-skills-registry"]
+    },
+    "prReviewer": {
+      "agent": "$PR_AGENT",
+      "utilities": ["git-worktrees", "diff-viewer", "annotate-ai-diff"]
+    },
+    "issueResolver": {
+      "agent": "$ISSUE_AGENT",
+      "utilities": ["git-worktrees", "issue-metadata", "commit-push"]
+    },
+    "uiSpecialist": {
+      "enabled": $ENABLE_UI,
+      "agent": "${UI_AGENT:-none}",
+      "utilities": ["browser-design-mode", "per-worktree-browser"]
+    },
+    "devopsSpecialist": {
+      "enabled": $ENABLE_DEVOPS,
+      "agent": "${DEVOPS_AGENT:-none}",
+      "utilities": ["ssh-remote-execution", "orca-per-workspace-env"]
+    }
+  }
+}
+JSON
+
+# ── Ghi file Directive GEMINI.md ──
+cat > "$TARGET_RULE" << RULE
+# Orca Full-Spectrum Multi-Agent Orchestration Directive
+
+This project operates under the Orca Agent Development Environment (ADE) with a full-spectrum team topology.
+Follow this operational runbook for all feature development, bug fixing, and code review in this workspace.
+
+---
+
+## 👥 Configured Agent Team Topology
+
+| Role | Agent | Concurrency | Capabilities & Orca Utilities |
+| :--- | :--- | :--- | :--- |
+| **Lead Coordinator** | \`$COORD_AGENT\` | 1 | Task DAG, Run Mailbox, Decision Gates |
+| **Full-Stack Devs** | \`$DEV_AGENT\` | $DEV_COUNT parallel | Isolated child worktrees, code implementation, unit tests |
+| **QA & Testers** | \`$QA_AGENT\` | $QA_COUNT parallel | Integration test suites, browser verification, acceptance tests |
+| **Security & Bug Hunter** | \`$SEC_AGENT\` | $SEC_COUNT parallel | OWASP audit, concurrency checks, memory leak prevention |
+| **PR Reviewer** | \`$PR_AGENT\` | On-demand | PR checkout (\`--pr\`), line-by-line diff review, CI verification |
+| **Issue Resolver** | \`$ISSUE_AGENT\` | On-demand | Issue checkout (\`--issue\`), auto-reproduce, commit & push |
+$([[ "$ENABLE_UI" == true ]] && echo "| **UI/UX Specialist** | \`$UI_AGENT\` | On-demand | Design Mode (Click-to-code), DOM & CSS live inspection |")
+$([[ "$ENABLE_DEVOPS" == true ]] && echo "| **DevOps Specialist** | \`$DEVOPS_AGENT\` | On-demand | DB migrations, Docker/Orb, SSH worktrees (\`--host $EXEC_HOST\`) |")
+
+- **Default Execution Host:** \`$EXEC_HOST\` ($HOST_LABEL)
+- **Orca CLI Path:** \`/usr/local/bin/orca\`
+
+---
+
+## 🚀 Playbooks for Core Workflows
+
+### 1. Feature Development (DAG Orchestration)
+\`\`\`bash
+# 1. Initialize Run
+RUN_ID=\$(/usr/local/bin/orca orchestration run-create --objective "<Feature Objective>" --json)
+
+# 2. Create atomic tasks
+DEV_TASK=\$(/usr/local/bin/orca orchestration task-create --task-title "Dev: Implement Feature" --spec "<Spec>" --json)
+QA_TASK=\$(/usr/local/bin/orca orchestration task-create --task-title "QA: Verification" --spec "<Criteria>" --depends-on <devTaskId> --json)
+
+# 3. Dispatch workers (up to $DEV_COUNT devs in parallel)
+/usr/local/bin/orca orchestration worker-start \\
+  --task <devTaskId> \\
+  --worktree new-child \\
+  --name "feature-dev" \\
+  --agent $DEV_AGENT \\
+  --setup run \\
+  --json
+\`\`\`
+
+### 2. Fixing Assigned Git Issues (Issue Auto-Resolver)
+Whenever an issue is assigned (e.g. Issue #42):
+\`\`\`bash
+# Create dedicated issue worktree linked with GitHub/GitLab
+/usr/local/bin/orca worktree create \\
+  --name "issue-42-fix" \\
+  --issue 42 \\
+  --agent $ISSUE_AGENT \\
+  --setup run \\
+  --json
+
+# Log progress comment directly onto worktree
+/usr/local/bin/orca worktree set --worktree active --comment "Reproduced bug; implementing fix" --json
+\`\`\`
+
+### 3. Reviewing Pull Requests (PR Reviewer)
+Whenever a PR is opened or requested for review (e.g. PR #123):
+\`\`\`bash
+# Checkout PR into an isolated review worktree
+/usr/local/bin/orca worktree create \\
+  --name "review-pr-123" \\
+  --pr 123 \\
+  --agent $PR_AGENT \\
+  --setup run \\
+  --json
+
+# Inspect diffs line-by-line
+/usr/local/bin/orca file diff --worktree active --staged --json
+\`\`\`
+
+### 4. UI Bug Fix with Design Mode & Browser
+\`\`\`bash
+# Open internal browser to inspect UI element
+/usr/local/bin/orca goto --url "http://localhost:3000" --worktree active --json
+/usr/local/bin/orca snapshot --worktree active --json
+/usr/local/bin/orca screenshot --worktree active --json
+# Use Orca Design Mode toolbar toggle for click-to-code DOM inspection
+\`\`\`
+
+---
+
+## 🔀 Concurrent Dual-Track Policy (Chính sách Đa luồng Song song)
+
+Cơ chế phát hiện Issue chính thức: **Orca Native GitHub Integration (Settings → Integrations → GitHub) & Bell Inbox**.
+Khi tài khoản GitHub được kết nối trong Orca, app tự động đồng bộ Issues được gán vào Notification Bell và Activity Feed của workspace.
+
+Nếu trong lúc Leader đang điều phối / review Feature mà có **GitHub Issue mới được gán**:
+
+1. **Nguyên tắc Không Can thiệp (Zero Interference):**
+   - TUYỆT ĐỐI KHÔNG dừng luồng Feature đang chạy, không chuyển branch, không stash code.
+2. **Kích hoạt nhánh song song tức thì (Parallel Fork qua Native Issue Linking):**
+   - Leader khởi chạy ngay \`$ISSUE_AGENT\` bằng cờ \`--issue <id>\` để Orca tự động kéo toàn bộ context, mô tả lỗi từ GitHub về worktree mới:
+     \`\`\`bash
+     /usr/local/bin/orca worktree create \\
+       --name "hotfix-issue-<id>" \\
+       --issue <id> \\
+       --agent $ISSUE_AGENT \\
+       --setup run \\
+       --json
+     \`\`\`
+3. **Theo dõi đa luồng độc lập (Dual Monitoring):**
+   - Leader tiếp tục vòng review Feature hiện tại.
+   - Nhánh Issue tự động nhân bản, reproduce bug, sửa code và test riêng.
+   - Trạng thái tiến độ tự động gắn vào Issue qua \`orca worktree set --comment "..."\`.
+   - Thông báo ngắn gọn cho User: *"Đã nhận diện Issue #<id> từ Orca GitHub Inbox, khởi tạo nhánh song song hotfix-issue-<id>. Luồng review Feature vẫn tiếp diễn bình thường."*
+4. **Merge độc lập:**
+   - Luồng nào hoàn thành và pass test trước thì Leader review và tạo PR merge trước, không đợi nhau.
+
+---
+
+## 🛑 Issue Reassignment & Handoff Policy (Chính sách Đổi người & Bàn giao)
+
+Nếu một Issue đang được \`$ISSUE_AGENT\` sửa mà bị **gỡ assign hoặc gán cho người khác** (human dev hoặc team khác):
+
+1. **Dừng worker an toàn (Stop to Save Compute):**
+   - Dừng ngay tiến trình agent để tiết kiệm token và tránh xung đột code:
+     \`\`\`bash
+     /usr/local/bin/orca orchestration worker-stop --dispatch <dispatch_id> --json
+     \`\`\`
+2. **Commit bàn giao (Handoff Branch):**
+   - Nếu đã có code phác thảo hoặc tài liệu tái hiện lỗi (reproduction steps):
+     - Tạo branch bàn giao: \`git checkout -b wip/issue-<id>-handover\`
+     - Commit toàn bộ thay đổi dở dang và push lên remote:
+       \`\`\`bash
+       git add . && git commit -m "wip: draft fix and reproduction notes before reassignment"
+       git push origin wip/issue-<id>-handover
+       \`\`\`
+     - Gửi comment tóm tắt lên GitHub Issue:
+       *"Issue đã được chuyển giao cho assignee mới. AI agent đã lưu tiến độ dở dang và ghi chú tái hiện lỗi tại branch \`wip/issue-<id>-handover\`."*
+3. **Giải phóng tài nguyên Worktree:**
+   - Giải phóng terminal: \`/usr/local/bin/orca orchestration worker-release --dispatch <dispatch_id> --json\`
+   - Xóa hoặc archive worktree: \`/usr/local/bin/orca worktree rm --worktree active --json\`
+   - Leader quay trở về tiếp tục 100% tài nguyên cho luồng Feature chính.
+
+---
+
+### 5. Quality Gate & Release
+- All workers must send: \`orca orchestration send --type worker_done --outcome succeeded\`.
+- Security audit (\`$SEC_AGENT\`) must report 0 Critical/High issues.
+- Clean up settled workers: \`orca orchestration worker-release --dispatch <dispatch_id> --json\`.
+RULE
+
+echo ""
+echo "🎉 [HOÀN TẤT] Đã tạo xong hệ thống Full-Spectrum Orchestrator cho project!"
+echo "   1. Directive Rule: $TARGET_RULE"
+echo "   2. Team Config:    $TARGET_CONFIG"
+echo ""
+echo "👉 Mở Antigravity hoặc Orca tại '$PROJECT_PATH' để bắt đầu làm việc."
