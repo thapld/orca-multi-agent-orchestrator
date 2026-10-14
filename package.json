@@ -6,7 +6,8 @@
   "bin": {
     "orca-multi-agent-orchestrator": "./scripts/orca-project-init",
     "orca-project-init": "./scripts/orca-project-init",
-    "orca-init": "./scripts/orca-project-init"
+    "orca-init": "./scripts/orca-project-init",
+    "orca-team": "./scripts/orca-team"
   },
   "scripts": {
     "init": "./scripts/orca-project-init"

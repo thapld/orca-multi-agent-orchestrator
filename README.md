@@ -29,6 +29,8 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
    * Khi worker gặp blocker, tự động gửi `ask`/`escalation` lên Coordinator qua Orca Mailbox. Leader kiểm tra qua `orca orchestration check`, đưa ra chỉ đạo (`steer`), hoặc tham vấn Human Gate nếu cần quyết định kiến trúc lớn.
 8. **Universal Auto-Discovery (Khởi chạy tự động không cần dán prompt):**
    * Tự động tạo symlink `CLAUDE.md` và `AGENTS.md` trỏ về `.agents/GEMINI.md`. Dù bạn mở Antigravity, Claude Code (`claude`), hay Codex CLI làm Leader, agent đều tự động đọc toàn bộ directive và quy trình điều phối ngay khi khởi động mà không cần dán prompt thủ công.
+9. **Điều Chỉnh Model & Agent Năng Động Ngay Khi Ở Leader (`orca-team` CLI):**
+   * Cung cấp công cụ dòng lệnh `orca-team` để xem và thay đổi agent, model provider, reasoning effort hoặc số lượng concurrency của bất kỳ vai trò nào ngay trong lúc làm việc mà không cần sửa file thủ công.
 
 ---
 
@@ -43,6 +45,7 @@ orca-multi-agent-orchestrator/
 │   ├── roles.md                   # Ma trận vai trò, nhiệm vụ & prompt templates
 │   └── orca-utilities.md          # Hướng dẫn chi tiết từng tiện ích độc quyền của Orca
 ├── scripts/
+│   ├── orca-team                  # CLI quản lý, chuyển đổi model/agent cho từng role
 │   ├── orca-project-init          # Wizard tương tác cài đặt framework vào bất kỳ project nào
 │   ├── orca-dispatch-task.sh      # Script tiện ích giao nhanh task vào Orca DAG
 │   ├── orca-issue-hotfix.sh       # Script tiện ích fork nhánh fix issue song song
@@ -98,6 +101,35 @@ orca-project-init /Users/macbook/work/gem76
 
 ### Vận hành:
 Sau khi khởi tạo, bạn mở dự án trong Antigravity, Claude Code (`claude`), hoặc Orca. Bất kỳ yêu cầu nào bạn đưa ra đều được tự động vận hành theo đúng quy trình 6 bước và chính sách đa luồng đã thiết lập mà không cần dán prompt.
+
+---
+
+## 🎛️ Thay Đổi Agent & Model Khi Ở Leader (`orca-team` CLI)
+
+Trong quá trình làm việc, nếu bạn muốn đổi sang model mạnh hơn cho Developer, đổi agent cho QA hay tăng/giảm số worker song song:
+
+```bash
+# 1. Xem đội hình và model hiện tại:
+orca-team status
+
+# 2. Đổi agent & model cho Developer (ví dụ sang Claude 3.5 Sonnet với reasoning high):
+orca-team set dev --agent claude --model claude-3-5-sonnet --effort high --concurrency 3
+
+# 3. Đổi agent cho QA & Tester:
+orca-team set qa --agent antigravity
+
+# 4. Đổi agent cho Security Auditor:
+orca-team set sec --agent codex --model gpt-4o
+
+# 5. Bật/tắt vai trò mở rộng:
+orca-team set ui --enable --agent claude
+orca-team set devops --disable
+
+# 6. Chế độ tương tác từng bước:
+orca-team set dev
+```
+
+> **Ghi chú:** Khi chạy `orca-team set`, công cụ sẽ **tự động cập nhật `orca-team.json` đồng thời đồng bộ lại bảng vai trò trong `.agents/GEMINI.md`**, giúp Leader agent lập tức nhận biết cấu hình mới mà không cần khởi động lại.
 
 ---
 
