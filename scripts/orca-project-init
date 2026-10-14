@@ -452,6 +452,62 @@ Khi một worker (Dev hoặc QA) gặp vấn đề không tự giải quyết đ
 
 ---
 
+## 🩺 Worker Health Watchdog & Hung Agent Recovery Policy (Chính sách Giám Sát & Phục Hồi Agent Bị Treo)
+
+Khi khởi chạy worker (Dev, QA, Security), Leader phải chủ động kiểm soát nguy cơ agent bị dừng giữa chừng (hết token, kẹt câu hỏi [y/n], crash hoặc lặp lỗi):
+
+1. **Luôn đặt Timeout chặn trên khi khởi chạy:**
+   Mọi lệnh \`worker-start\` phải kèm cờ \`--timeout-ms 900000\` (15 phút) để tránh terminal chạy ngầm vĩnh viễn:
+   \`\`\`bash
+   /usr/local/bin/orca orchestration worker-start \\
+     --task <taskId> \\
+     --worktree new-child \\
+     --name "dev-worker" \\
+     --agent $DEV_AGENT \\
+     --setup run \\
+     --timeout-ms 900000 \\
+     --json
+   \`\`\`
+
+2. **Quy tắc Giám sát Nhịp tim (Watchdog Heartbeat & Mailbox):**
+   - Định kỳ kiểm tra: \`/usr/local/bin/orca orchestration check --json\`
+   - Nếu quá 3 phút không nhận được tin nhắn heartbeat hoặc \`worker_done\`, Leader lập tức thanh tra:
+     \`\`\`bash
+     /usr/local/bin/orca orchestration worker-show --dispatch <dispatch_id> --json
+     \`\`\`
+
+3. **Chẩn đoán & Xử lý 3 kịch bản dừng:**
+   - **Kịch bản A: Agent bị kẹt câu hỏi xác nhận (\`observation.agentWait != null\`):**
+     Agent đang đợi trả lời \`[y/N]\` hoặc xin cấp quyền trong terminal. Leader gửi phím xác nhận tự động:
+     \`\`\`bash
+     /usr/local/bin/orca terminal send --terminal <handle> --text "y" --enter
+     \`\`\`
+   - **Kịch bản B: Agent cạn Token / Tràn Context Window / Bị ngắt câu trả lời:**
+     Leader đọc 50 dòng log cuối bằng:
+     \`\`\`bash
+     /usr/local/bin/orca orchestration worker-read --dispatch <dispatch_id> --source auto --limit 50 --json
+     \`\`\`
+     Nếu thấy dấu hiệu token limit:
+     a. Dừng worker cũ an toàn: \`/usr/local/bin/orca orchestration worker-stop --dispatch <dispatch_id> --json\`
+     b. Bảo toàn worktree hiện tại (mã nguồn dở dang đã lưu trên worktree).
+     c. Khởi chạy worker mới tiếp quản ngay trên worktree đó bằng cờ \`--retry-of\` và \`--worktree current\`:
+     \`\`\`bash
+     /usr/local/bin/orca orchestration worker-start \\
+       --task <taskId> \\
+       --retry-of <dispatch_id> \\
+       --worktree current \\
+       --agent $DEV_AGENT \\
+       --setup run \\
+       --comment "Resume implementation after previous worker hit token limit" \\
+       --timeout-ms 900000 \\
+       --json
+     \`\`\`
+     Worker mới sẽ tự động đọc \`git status\`/\`git log\` trong worktree, kế thừa phần việc dở dang và tiếp tục code đến khi hoàn thành.
+   - **Kịch bản C: Vòng lặp lỗi không dứt (Deadlock / Linter loop > 5 lần):**
+     Leader dừng worker bằng \`worker-stop\`, thông báo tóm tắt lỗi cho Người dùng (Human Gate), đề xuất giải pháp (như đổi thư viện, nới lỏng linter) trước khi tái kích hoạt.
+
+---
+
 ### 5. Quality Gate & Release
 - All workers must send: \`orca orchestration send --type worker_done --outcome succeeded\`.
 - Security audit (\`$SEC_AGENT\`) must report 0 Critical/High issues.

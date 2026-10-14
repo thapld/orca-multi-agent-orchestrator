@@ -365,6 +365,78 @@ def cmd_get(root: Path, config: dict, args: list):
         val = target.get(field)
         print(val if val is not None else "")
 
+def cmd_watchdog(root: Path):
+    import subprocess
+    print("\n🩺 [ORCA AGENT WATCHDOG] Đang quét trạng thái toàn bộ worker...")
+    orca_bin = "/usr/local/bin/orca"
+    if not os.path.exists(orca_bin):
+        print(f"❌ Không tìm thấy orca CLI tại {orca_bin}", file=sys.stderr)
+        return
+
+    try:
+        res = subprocess.run([orca_bin, "orchestration", "worker-list", "--json"], capture_output=True, text=True)
+        if res.returncode != 0:
+            try:
+                err_data = json.loads(res.stdout)
+                msg = err_data.get("error", {}).get("message", "Lỗi kết nối Orca Runtime")
+                print(f"⚠️ {msg}")
+                print("💡 Hãy đảm bảo Orca đang mở hoặc chạy lệnh trực tiếp trên terminal máy host.\n")
+                return
+            except:
+                print(f"⚠️ Không thể kết nối Orca Runtime (mã lỗi: {res.returncode}).\n")
+                return
+
+        data = json.loads(res.stdout)
+        workers = data.get("workers", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        
+        if not workers:
+            print("✨ Hiện không có worker nào đang chạy ngầm cần xử lý.\n")
+            return
+
+        print(f"{'DISPATCH ID':<28} | {'TERMINAL':<14} | {'STATE':<14} | {'GHI CHÚ / TRẠNG THÁI'}")
+        print("-" * 82)
+        
+        hung_count = 0
+        for w in workers:
+            d_id = str(w.get("dispatchId") or w.get("id") or "-")
+            term = str(w.get("terminalHandle") or "-")
+            state = str(w.get("terminalState") or w.get("state") or "-")
+            
+            note = ""
+            if d_id != "-":
+                show_res = subprocess.run([orca_bin, "orchestration", "worker-show", "--dispatch", d_id, "--json"], capture_output=True, text=True)
+                if show_res.returncode == 0:
+                    try:
+                        s_data = json.loads(show_res.stdout)
+                        obs = s_data.get("observation", {})
+                        if obs.get("agentWait"):
+                            note = "⚠️ ĐANG KẸT CÂU HỎI XÁC NHẬN [Y/N]"
+                            hung_count += 1
+                    except:
+                        pass
+
+            if not note:
+                if state == "active":
+                    note = "🟢 Đang thực thi"
+                elif state == "reclaimable":
+                    note = "⚪ Đã xong / Sẵn sàng giải phóng"
+                elif state == "retained":
+                    note = "🟡 Đang giữ để debug"
+                else:
+                    note = state
+
+            print(f"{d_id:<28} | {term:<14} | {state:<14} | {note}")
+
+        print("-" * 82)
+        if hung_count > 0:
+            print(f"⚠️ Phát hiện {hung_count} worker đang bị treo chờ input!")
+            print("👉 Để tự động duyệt [y]: orca terminal send --terminal <handle> --text 'y' --enter")
+            print("👉 Để dừng worker cạn token: orca orchestration worker-stop --dispatch <id>\n")
+        else:
+            print("✅ Toàn bộ worker đều hoạt động trơn tru.\n")
+    except Exception as e:
+        print(f"⚠️ Lỗi quét worker: {e}\n")
+
 def main():
     root = find_project_root()
     config = load_config(root)
@@ -376,6 +448,8 @@ def main():
         cmd_set(root, config, args[1:])
     elif args[0] == "get":
         cmd_get(root, config, args[1:])
+    elif args[0] in ["watchdog", "workers", "health"]:
+        cmd_watchdog(root)
     elif args[0] in ["agents", "list-agents"]:
         print("🐋 Các Agent chính thức được Orca ADE hỗ trợ:")
         for ag in KNOWN_AGENTS:

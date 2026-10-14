@@ -185,3 +185,48 @@ sequenceDiagram
     end
 ```
 
+---
+
+## 7. Quy Trình Giám Sát Sức Khỏe & Xử Lý Agent Bị Treo / Cạn Token (Watchdog & Hung Worker Recovery Policy)
+
+Tình huống: Dev hoặc QA đang làm việc thì đột ngột dừng lại giữa chừng do:
+* **Hết token / Tràn context window:** Model bị cắt cụt câu trả lời hoặc provider báo lỗi giới hạn token.
+* **Kẹt câu hỏi xác nhận:** Agent đang chờ xác nhận `[y/N]` hoặc xin quyền chạy lệnh từ người dùng.
+* **Treo vô tận / Vòng lặp lỗi:** Agent bị kẹt trong vòng lặp linter/test hoặc script chạy ngầm không hồi kết.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Lead as 🏛️ Lead Coordinator
+    participant Orca as 🐋 Orca Runtime & Watchdog
+    participant Worker as 🤖 Worker (Dev)
+
+    Note over Lead,Worker: Giao task có chốt chặn trên (--timeout-ms 900000 / 15 phút)
+    Lead->>Orca: worker-start --task <id> --timeout-ms 900000
+
+    Worker->>Worker: Đang code... Bất ngờ dừng (Cạn token / Kẹt prompt [y/n] / Lặp lỗi)
+    
+    loop Giám sát định kỳ (Watchdog Loop)
+        Lead->>Orca: orca orchestration check (Kiểm tra tin nhắn & Heartbeat)
+    end
+
+    Note over Lead,Orca: Phát hiện worker im tiếng > 3 phút hoặc timeout
+    Lead->>Orca: orca orchestration worker-show --dispatch <id>
+    
+    alt Trường hợp 1: Kẹt câu hỏi xác nhận (observation.agentWait != null)
+        Lead->>Orca: orca terminal send --terminal <handle> --text "y" --enter
+        Worker->>Worker: Nhận input tự động và tiếp tục hoàn thiện
+    else Trường hợp 2: Cạn Token / Tràn Context / Tiến trình đã thoát
+        Lead->>Orca: orca orchestration worker-read --dispatch <id> (Đọc log cuối xác nhận cạn token)
+        Lead->>Orca: orca orchestration worker-stop --dispatch <id> (Dừng worker cũ an toàn)
+        Note over Lead,Orca: Toàn bộ code viết dở vẫn nằm nguyên vẹn trên worktree con
+        Lead->>Orca: worker-start --task <id> --retry-of <id> --worktree current --agent <agent> [--model <model>]
+        Note over Worker: Worker mới kế thừa worktree, đọc git log & viết tiếp phần dở dang đến khi xong
+    else Trường hợp 3: Quá thời gian timeout 15 phút
+        Orca-->>Lead: Báo lỗi timeout (outcome: timed_out)
+        Lead->>Orca: orca terminal read --terminal <handle>
+        Lead->>Orca: Đổi model mạnh hơn hoặc chia nhỏ task DAG để worker tiếp quản
+    end
+```
+
+
