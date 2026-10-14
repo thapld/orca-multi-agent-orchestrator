@@ -482,27 +482,31 @@ Khi khởi chạy worker (Dev, QA, Security), Leader phải chủ động kiểm
      \`\`\`bash
      /usr/local/bin/orca terminal send --terminal <handle> --text "y" --enter
      \`\`\`
-   - **Kịch bản B: Agent cạn Token / Tràn Context Window / Bị ngắt câu trả lời:**
+   - **Kịch bản B: Agent cạn Token / Tràn Context Window / Rate Limit 429:**
      Leader đọc 50 dòng log cuối bằng:
      \`\`\`bash
      /usr/local/bin/orca orchestration worker-read --dispatch <dispatch_id> --source auto --limit 50 --json
      \`\`\`
-     Nếu thấy dấu hiệu token limit:
-     a. Dừng worker cũ an toàn: \`/usr/local/bin/orca orchestration worker-stop --dispatch <dispatch_id> --json\`
-     b. Bảo toàn worktree hiện tại (mã nguồn dở dang đã lưu trên worktree).
-     c. Khởi chạy worker mới tiếp quản ngay trên worktree đó bằng cờ \`--retry-of\` và \`--worktree current\`:
-     \`\`\`bash
-     /usr/local/bin/orca orchestration worker-start \\
-       --task <taskId> \\
-       --retry-of <dispatch_id> \\
-       --worktree current \\
-       --agent $DEV_AGENT \\
-       --setup run \\
-       --comment "Resume implementation after previous worker hit token limit" \\
-       --timeout-ms 300000 \\
-       --json
-     \`\`\`
-     Worker mới sẽ tự động đọc \`git status\`/\`git log\` trong worktree, kế thừa phần việc dở dang và tiếp tục code đến khi hoàn thành.
+     Phân loại nguồn gốc lỗi:
+     1. *Nếu chỉ tràn Context Window phiên:* Dừng worker cũ an toàn bằng \`worker-stop\`. Khởi chạy worker mới cùng agent trên worktree hiện tại (\`--retry-of <dispatch_id> --worktree current\`) với context mới sạch 100%.
+     2. *Nếu lỗi Account Rate Limit / HTTP 429 / Insufficient Quota:* TUYỆT ĐỐI KHÔNG spawn lại cùng nhà cung cấp. Leader tự động kích hoạt **Cross-Provider Failover**:
+        - Chuyển sang agent dự phòng: Claude ➔ Kimi, Kimi ➔ Codex, hoặc Codex ➔ Claude:
+          \`\`\`bash
+          orca-team set dev --agent <failover_agent>
+          \`\`\`
+        - Khởi chạy worker tiếp quản bằng agent mới:
+          \`\`\`bash
+          /usr/local/bin/orca orchestration worker-start \\
+            --task <taskId> \\
+            --retry-of <dispatch_id> \\
+            --worktree current \\
+            --agent <failover_agent> \\
+            --setup run \\
+            --comment "Resume implementation with failover agent after rate limit" \\
+            --timeout-ms 300000 \\
+            --json
+          \`\`\`
+     3. *Nếu toàn bộ providers đều cạn hạn ngạch:* Dừng toàn bộ worker an toàn, bảo toàn worktree và kích hoạt Human Gate hỏi người dùng.
    - **Kịch bản C: Vòng lặp lỗi không dứt (Deadlock / Linter loop > 5 lần):**
      Leader dừng worker bằng \`worker-stop\`, thông báo tóm tắt lỗi cho Người dùng (Human Gate), đề xuất giải pháp (như đổi thư viện, nới lỏng linter) trước khi tái kích hoạt.
 

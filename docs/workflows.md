@@ -229,4 +229,28 @@ sequenceDiagram
     end
 ```
 
+### 7.1. Phân Biệt Giới Hạn Token & Chiến Lược Chuyển Nhà Cung Cấp (Cross-Provider Failover)
+
+Khi phát hiện worker bị dừng, Leader phân tích chính xác bản chất lỗi qua `worker-read`:
+
+1. **Tràn Context Window Phiên (Session Context Overflow):**
+   * *Hiện tượng:* Agent đọc quá nhiều file hoặc log test quá dài vượt quá context window (128k/200k tokens).
+   * *Giải pháp:* Khởi tạo worker mới (kể cả cùng model) với context sạch (`fresh context`), tiếp quản worktree dang dở (`--retry-of <dispatch_id> --worktree current`).
+
+2. **Khóa Hạn Ngạch Toàn Tài Khoản (Account Rate Limit / HTTP 429 / Insufficient Quota):**
+   * *Hiện tượng:* Tài khoản nhà cung cấp bị cạn tiền hoặc dính giới hạn request/phút (429).
+   * *Nguyên tắc sống còn:* **TUYỆT ĐỐI KHÔNG spawn lại cùng nhà cung cấp** (vì sẽ lập tức thất bại tiếp).
+   * *Cơ chế Cầu Dao Ngắt (Circuit Breaker):* Gắn nhãn Cooldown cho provider đó (tạm dừng 15–30 phút).
+   * *Chuyển Nhà Cung Cấp Tức Thì (Cross-Provider Failover):*
+     * Đang dùng **Claude** (Anthropic) ➔ Chuyển sang **Kimi** (Moonshot) hoặc **Codex** (OpenAI).
+     * Đang dùng **Kimi** (Moonshot) ➔ Chuyển sang **Codex** (OpenAI) hoặc **Claude** (Anthropic).
+     * Đang dùng **Codex** (OpenAI) ➔ Chuyển sang **Claude** (Anthropic) hoặc **Kimi** (Moonshot).
+   * *Cập nhật cấu hình:* `orca-team set dev --agent <failover_agent>` rồi cho worker mới tiếp quản worktree hiện tại.
+
+3. **Toàn Bộ Nhà Cung Cấp Đồng Loạt Cạn Hạn Ngạch:**
+   * Bảo toàn 100% mã nguồn trên Git Worktree con.
+   * Dừng an toàn mọi worker: `orca orchestration worker-stop`.
+   * Báo cáo Human Gate lên giao diện chat để người dùng nạp thêm quota hoặc can thiệp.
+
+
 
