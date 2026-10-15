@@ -328,7 +328,7 @@ echo "PHẦN 2: FULL-STACK DEVELOPERS (Nhóm Lập trình viên)"
 echo "Nhiệm vụ: Trực tiếp viết code, unit test trên các child worktree độc lập."
 choose_agent "Full-Stack Devs" 5
 DEV_AGENT="$SELECTED_AGENT"
-choose_model "$DEV_AGENT" "Full-Stack Devs" "high" "tier2"
+choose_model "$DEV_AGENT" "Full-Stack Devs" "high" "tier3"
 DEV_MODEL="$SELECTED_MODEL"
 DEV_EFFORT="$SELECTED_EFFORT"
 choose_count "Developer" 2
@@ -360,7 +360,7 @@ echo "PHẦN 4: BUG HUNTER & SECURITY AUDITOR (Nhóm Săn lỗi & Bảo mật)"
 echo "Nhiệm vụ: Quét lỗ hổng OWASP, race conditions, memory leaks, rò rỉ secret."
 choose_agent "Security & Bug Hunter" 5
 SEC_AGENT="$SELECTED_AGENT"
-choose_model "$SEC_AGENT" "Security & Bug Hunter" "high" "tier1"
+choose_model "$SEC_AGENT" "Security & Bug Hunter" "high" "tier2"
 SEC_MODEL="$SELECTED_MODEL"
 SEC_EFFORT="$SELECTED_EFFORT"
 choose_count "Bug Hunter / Security" 1
@@ -414,7 +414,7 @@ ENABLE_DEVOPS="$TOGGLE_RESULT"
 if [[ "$ENABLE_DEVOPS" == true ]]; then
   choose_agent "DevOps Specialist" 5
   DEVOPS_AGENT="$SELECTED_AGENT"
-  choose_model "$DEVOPS_AGENT" "DevOps Specialist" "medium" "tier2"
+  choose_model "$DEVOPS_AGENT" "DevOps Specialist" "high" "tier3"
   DEVOPS_MODEL="$SELECTED_MODEL"
   DEVOPS_EFFORT="$SELECTED_EFFORT"
 fi
