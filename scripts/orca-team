@@ -17,6 +17,7 @@ import sys
 import os
 import json
 import re
+import shutil
 from pathlib import Path
 
 ROLE_ALIASES = {
@@ -35,16 +36,16 @@ ROLE_ALIASES = {
     "security": "security",
     "bughunter": "security",
     "pr": "prReviewer",
-    "prReviewer": "prReviewer",
+    "prreviewer": "prReviewer",
     "reviewer": "prReviewer",
     "issue": "issueResolver",
-    "issueResolver": "issueResolver",
+    "issueresolver": "issueResolver",
     "hotfix": "issueResolver",
     "ui": "uiSpecialist",
-    "uiSpecialist": "uiSpecialist",
+    "uispecialist": "uiSpecialist",
     "design": "uiSpecialist",
     "devops": "devopsSpecialist",
-    "devopsSpecialist": "devopsSpecialist",
+    "devopsspecialist": "devopsSpecialist",
     "infra": "devopsSpecialist"
 }
 
@@ -185,7 +186,7 @@ def sync_gemini_directive(root: Path, config: dict):
         re.MULTILINE
     )
     if pattern.search(content):
-        new_content = pattern.sub(r"\1" + table_text + "\n", content)
+        new_content = pattern.sub(lambda m: m.group(1) + table_text + "\n", content)
         gemini_file.write_text(new_content, encoding="utf-8")
 
 def cmd_status(root: Path, config: dict):
@@ -413,6 +414,18 @@ def cmd_link(root: Path, args: list):
 
 def cmd_uninstall_project(root: Path, args: list):
     """Gỡ bỏ toàn bộ cấu hình Orchestrator khỏi project hiện tại."""
+    # Bảo vệ: Không bao giờ tự gỡ bỏ chính kho mã nguồn của framework
+    if (root / "templates").is_dir() and (root / "package.json").is_file():
+        try:
+            pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+            if pkg.get("name") == "orca-multi-agent-orchestrator":
+                print("\n🚫 Đây là thư mục gốc của bộ công cụ 'orca-multi-agent-orchestrator'.")
+                print("   Không thể tự gỡ bỏ chính kho mã nguồn framework!")
+                print("   Để gỡ bỏ các CLI khỏi máy: hãy chạy './uninstall.sh'.\n")
+                return
+        except Exception:
+            pass
+
     print(f"\n⚠️  [ORCA UNINSTALL PROJECT] Bạn sắp gỡ bỏ cấu hình Multi-Agent Orchestrator khỏi:")
     print(f"   📁 {root}")
     
@@ -507,13 +520,13 @@ def cmd_watchdog(root: Path, args: list = None):
     if auto_unblock:
         print("⚡ Chế độ Auto-Unblock: Đang tự động gửi 'y' mở khóa các worker bị kẹt...")
 
-    orca_bin = "/usr/local/bin/orca"
+    orca_bin = os.environ.get("ORCA_BIN") or shutil.which("orca") or "/usr/local/bin/orca"
     if not os.path.exists(orca_bin):
         print(f"❌ Không tìm thấy orca CLI tại {orca_bin}", file=sys.stderr)
         return
 
     try:
-        res = subprocess.run([orca_bin, "orchestration", "worker-list", "--json"], capture_output=True, text=True)
+        res = subprocess.run([orca_bin, "orchestration", "worker-list", "--json"], capture_output=True, text=True, timeout=10)
         if res.returncode != 0:
             try:
                 err_data = json.loads(res.stdout)
@@ -538,29 +551,43 @@ def cmd_watchdog(root: Path, args: list = None):
         hung_count = 0
         for w in workers:
             d_id = str(w.get("dispatchId") or w.get("id") or "-")
-            term = str(w.get("terminalHandle") or "-")
+            term = str(w.get("terminalHandle") or w.get("agentTerminalHandle") or "-")
             state = str(w.get("terminalState") or w.get("state") or "-")
             
             note = ""
             if d_id != "-":
-                show_res = subprocess.run([orca_bin, "orchestration", "worker-show", "--dispatch", d_id, "--json"], capture_output=True, text=True)
-                if show_res.returncode == 0:
-                    try:
+                try:
+                    show_res = subprocess.run([orca_bin, "orchestration", "worker-show", "--dispatch", d_id, "--json"], capture_output=True, text=True, timeout=10)
+                    if show_res.returncode == 0:
                         s_data = json.loads(show_res.stdout)
                         obs = s_data.get("observation", {})
                         if obs.get("agentWait"):
                             if auto_unblock and term != "-":
-                                send_res = subprocess.run([orca_bin, "terminal", "send", "--terminal", term, "--text", "y", "--enter"], capture_output=True, text=True)
-                                if send_res.returncode == 0:
-                                    note = "🔓 ĐÃ TỰ ĐỘNG GỬI [y] MỞ KHÓA"
+                                # An toàn: Kiểm tra nội dung terminal trước khi gửi 'y'
+                                is_safe = True
+                                try:
+                                    t_read = subprocess.run([orca_bin, "terminal", "read", "--terminal", term, "--lines", "10"], capture_output=True, text=True, timeout=5)
+                                    out_low = t_read.stdout.lower()
+                                    if any(danger in out_low for danger in ["rm -rf", "drop table", "push --force", "format disk", "sudo"]):
+                                        is_safe = False
+                                except Exception:
+                                    pass
+
+                                if is_safe:
+                                    send_res = subprocess.run([orca_bin, "terminal", "send", "--terminal", term, "--text", "y", "--enter"], capture_output=True, text=True, timeout=5)
+                                    if send_res.returncode == 0:
+                                        note = "🔓 ĐÃ TỰ ĐỘNG GỬI [y] MỞ KHÓA"
+                                    else:
+                                        note = "⚠️ KẸT CÂU HỎI (Mở khóa lỗi)"
+                                        hung_count += 1
                                 else:
-                                    note = "⚠️ KẸT CÂU HỎI (Mở khóa lỗi)"
+                                    note = "⚠️ CẦN DUYỆT THỦ CÔNG (Lệnh nhạy cảm)"
                                     hung_count += 1
                             else:
                                 note = "⚠️ ĐANG KẸT CÂU HỎI XÁC NHẬN [Y/N]"
                                 hung_count += 1
-                    except:
-                        pass
+                except Exception:
+                    pass
 
             if not note:
                 if state == "active":

@@ -80,7 +80,7 @@ orca host list --json
 orca worktree create \
   --repo id:<repoId> \
   --name "remote-build" \
-  --host "ssh:ssh-1791972097322-ckux63" \
+  --host "ssh:orb" \
   --agent codex \
   --json
 ```

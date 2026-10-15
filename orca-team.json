@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "OrcaTeamConfig",
   "description": "Configuration schema for Orca Multi-Agent Orchestration Team",
-  "projectPath": "/Users/macbook/.gemini/antigravity/scratch/orca-multi-agent-orchestrator",
+  "projectPath": ".",
   "executionHost": "local",
   "coordinator": {
     "agent": "antigravity",

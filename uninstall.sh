@@ -20,7 +20,7 @@ for bin in "${BINARIES[@]}"; do
   if [[ -f "$target" || -L "$target" ]]; then
     rm -f "$target"
     echo "  🗑️  Đã xóa: $target"
-    ((removed_count++))
+    removed_count=$((removed_count + 1))
   fi
 done
 
@@ -30,7 +30,7 @@ for bin in "${BINARIES[@]}"; do
   if [[ -L "$target" ]]; then
     if rm -f "$target" 2>/dev/null; then
       echo "  🗑️  Đã xóa: $target"
-      ((removed_count++))
+      removed_count=$((removed_count + 1))
     fi
   fi
 done

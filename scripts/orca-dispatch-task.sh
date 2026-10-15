@@ -26,15 +26,18 @@ if [[ -n "$REQ_AGENT" && "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|
   AGENT="$REQ_AGENT"
 fi
 
+ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
+TIMEOUT_MS="${TIMEOUT_MS:-300000}"
+
 echo "🐋 [Orca Dispatch] Đang khởi tạo task: '$TASK_TITLE' cho agent: $AGENT..."
 
 # 1. Tạo task trong Orca
-TASK_JSON=$(/usr/local/bin/orca orchestration task-create \
+TASK_JSON=$($ORCA_BIN orchestration task-create \
   --task-title "$TASK_TITLE" \
   --spec "$SPEC" \
-  --json)
+  --json 2>&1) || true
 
-TASK_ID=$(echo "$TASK_JSON" | grep -o '"id": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+TASK_ID=$(python3 -c "import sys, json; print(json.loads(sys.stdin.read()).get('id', ''))" <<< "$TASK_JSON" 2>/dev/null || echo "$TASK_JSON" | grep -o '"id": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
 
 if [[ -z "$TASK_ID" ]]; then
   echo "❌ Không thể tạo task trong Orca. Kết quả: $TASK_JSON"
@@ -44,23 +47,31 @@ fi
 echo "✅ Đã tạo task ID: $TASK_ID"
 
 # 2. Khởi chạy worker trong child worktree
-WORKTREE_NAME="task-$(echo "$TASK_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')"
+SAFE_SLUG=$(echo "$TASK_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
+[[ -z "$SAFE_SLUG" ]] && SAFE_SLUG="task"
+SHORT_ID=$(echo "$TASK_ID" | tail -c 7)
+WORKTREE_NAME="wt-${SAFE_SLUG}-${SHORT_ID}"
 
 echo "🚀 Đang khởi chạy worker trong worktree: $WORKTREE_NAME..."
 
-START_RECEIPT=$(/usr/local/bin/orca orchestration worker-start \
+START_RECEIPT=$($ORCA_BIN orchestration worker-start \
   --task "$TASK_ID" \
   --worktree new-child \
   --name "$WORKTREE_NAME" \
   --agent "$AGENT" \
   --setup run \
-  --timeout-ms 300000 \
-  --json)
+  --timeout-ms "$TIMEOUT_MS" \
+  --json 2>&1) || true
 
-DISPATCH_ID=$(echo "$START_RECEIPT" | grep -o '"dispatchId": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
-TERM_HANDLE=$(echo "$START_RECEIPT" | grep -o '"agentTerminalHandle": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+DISPATCH_ID=$(python3 -c "import sys, json; print(json.loads(sys.stdin.read()).get('dispatchId', ''))" <<< "$START_RECEIPT" 2>/dev/null || echo "$START_RECEIPT" | grep -o '"dispatchId": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+TERM_HANDLE=$(python3 -c "import sys, json; print(json.loads(sys.stdin.read()).get('agentTerminalHandle', ''))" <<< "$START_RECEIPT" 2>/dev/null || echo "$START_RECEIPT" | grep -o '"agentTerminalHandle": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+
+if [[ -z "$DISPATCH_ID" ]]; then
+  echo "❌ Khởi chạy worker thất bại: $START_RECEIPT"
+  exit 1
+fi
 
 echo "🎉 Worker đã được khởi chạy thành công!"
 echo "   • Worktree: $WORKTREE_NAME"
-[[ -n "$DISPATCH_ID" ]] && echo "   • Dispatch: $DISPATCH_ID"
+echo "   • Dispatch: $DISPATCH_ID"
 [[ -n "$TERM_HANDLE" ]] && echo "   • Terminal: $TERM_HANDLE"

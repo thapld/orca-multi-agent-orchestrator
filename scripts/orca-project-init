@@ -241,8 +241,10 @@ printf "Chọn [1-2] (Enter = 1): "
 read -r host_choice
 host_choice="${host_choice:-1}"
 if [[ "$host_choice" == "2" ]]; then
-  EXEC_HOST="ssh:ssh-1791972097322-ckux63"
-  HOST_LABEL="SSH Target (orb)"
+  printf "   Nhập tên SSH host target trong Orca (Enter = ssh:orb): "
+  read -r ssh_target_input
+  EXEC_HOST="${ssh_target_input:-ssh:orb}"
+  HOST_LABEL="SSH Target ($EXEC_HOST)"
 else
   EXEC_HOST="local"
   HOST_LABEL="Local Machine"
@@ -321,6 +323,11 @@ cat > "$TARGET_CONFIG" << JSON
 }
 JSON
 
+# Chuẩn bị các dòng bảng tùy chọn (tránh dòng trống làm vỡ bảng Markdown)
+EXTRA_TABLE_ROWS=""
+[[ "$ENABLE_UI" == true ]] && EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | \`$UI_AGENT\` | On-demand | Design Mode (Click-to-code), live inspection |"$'\n'
+[[ "$ENABLE_DEVOPS" == true ]] && EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **DevOps Specialist** | \`$DEVOPS_AGENT\` | On-demand | DB migrations, Docker/Orb, SSH worktrees |"$'\n'
+
 # ── Ghi file Directive GEMINI.md (Token-Optimized) ──
 cat > "$TARGET_RULE" << RULE
 # Orca Multi-Agent Orchestration Directive
@@ -339,9 +346,7 @@ cat > "$TARGET_RULE" << RULE
 | **Security & Bug Hunter** | \`$SEC_AGENT\` | $SEC_COUNT parallel | OWASP audit, security scan, diff review |
 | **PR Reviewer** | \`$PR_AGENT\` | On-demand | PR checkout (\`--pr\`), diff audit (\`open-changed\`) |
 | **Issue Resolver** | \`$ISSUE_AGENT\` | On-demand | Issue checkout (\`--issue\`), auto-fix, commit & push |
-$([[ "$ENABLE_UI" == true ]] && echo "| **UI/UX Specialist** | \`$UI_AGENT\` | On-demand | Design Mode (Click-to-code), live inspection |")
-$([[ "$ENABLE_DEVOPS" == true ]] && echo "| **DevOps Specialist** | \`$DEVOPS_AGENT\` | On-demand | DB migrations, Docker/Orb, SSH worktrees |")
-
+${EXTRA_TABLE_ROWS}
 - **Execution Host:** \`$EXEC_HOST\` ($HOST_LABEL) | **Orca CLI:** \`/usr/local/bin/orca\`
 
 ---
@@ -382,23 +387,42 @@ If an issue is reassigned: stop worker (\`worker-stop\`), commit WIP branch \`wi
 - For extended workflows and diagrams, refer to \`docs/workflows.md\` and \`docs/roles.md\`.
 RULE
 
-# ── Quản lý symlink thông minh: Tránh nạp trùng lặp context ──
+# ── Quản lý symlink thông minh: Tránh nạp trùng lặp context & bảo vệ file thật ──
+safe_link() {
+  local target="$1"
+  local link="$2"
+  if [[ -f "$link" && ! -L "$link" ]]; then
+    echo "   ⚠️  $(basename "$link") đã tồn tại dưới dạng file thật của người dùng, không ghi đè."
+  else
+    ln -sf "$target" "$link"
+  fi
+}
+
+safe_rm_symlink() {
+  local link="$1"
+  if [[ -L "$link" ]]; then
+    rm -f "$link"
+  fi
+}
+
 case "$COORD_AGENT" in
   "claude")
-    ln -sf .agents/GEMINI.md "$PROJECT_PATH/CLAUDE.md"
-    rm -f "$PROJECT_PATH/AGENTS.md"
+    safe_link .agents/GEMINI.md "$PROJECT_PATH/CLAUDE.md"
+    safe_rm_symlink "$PROJECT_PATH/AGENTS.md"
     LINK_MSG="CLAUDE.md -> .agents/GEMINI.md"
     ;;
   "codex"|"cursor"|"opencode")
-    ln -sf .agents/GEMINI.md "$PROJECT_PATH/AGENTS.md"
-    rm -f "$PROJECT_PATH/CLAUDE.md"
+    safe_link .agents/GEMINI.md "$PROJECT_PATH/AGENTS.md"
+    safe_rm_symlink "$PROJECT_PATH/CLAUDE.md"
     LINK_MSG="AGENTS.md -> .agents/GEMINI.md"
     ;;
   *)
-    # Với Antigravity / Gemini: Natively đọc .agents/GEMINI.md, xóa bỏ symlink root để tránh ăn 2 lần token
-    rm -f "$PROJECT_PATH/CLAUDE.md" "$PROJECT_PATH/AGENTS.md"
+    # Với Antigravity / Gemini: Natively đọc .agents/GEMINI.md, chỉ dọn symlink nếu có
+    safe_rm_symlink "$PROJECT_PATH/CLAUDE.md"
+    safe_rm_symlink "$PROJECT_PATH/AGENTS.md"
     LINK_MSG="Native (.agents/GEMINI.md, không trùng lặp)"
     ;;
+esac
 # ── Đảm bảo .gitignore bỏ qua runtime của Orca (Chống tràn token) ──
 GITIGNORE_FILE="$PROJECT_PATH/.gitignore"
 if [[ -f "$GITIGNORE_FILE" ]]; then
