@@ -60,8 +60,8 @@
         "issue-metadata",
         "commit-push"
       ],
-      "model": "gemini-3.8-flash",
-      "effort": "low"
+      "model": "gemini-4-argon",
+      "effort": "high"
     },
     "uiSpecialist": {
       "enabled": true,
