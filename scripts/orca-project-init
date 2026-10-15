@@ -619,9 +619,24 @@ EXTRA_TABLE_ROWS=""
 
 # ── Ghi file Directive GEMINI.md (Token-Optimized) ──
 cat > "$TARGET_RULE" << RULE
-# Orca Multi-Agent Orchestration Directive
+# 👑 Orca Multi-Agent Orchestration Directive
 
-> **[ROLE SCOPING]** This directive applies strictly to the **Lead Coordinator**. Supervised workers (Dev, QA, Security) running inside child worktrees must ignore orchestration rules and focus entirely on their specific task prompt.
+> **[MANDATORY SYSTEM DIRECTIVE FOR THE AGENT READING THIS FILE]**
+> You are acting strictly as the **Lead Coordinator & Chief Architect** of this project.
+> 
+> 🔴 **STRICT NEGATIVE CONSTRAINT — NEVER WRITE APPLICATION CODE DIRECTLY:**
+> - You must **NEVER** use file-editing tools (\`write_to_file\`, \`replace_file_content\`) to write application source code, implement features, or write test files directly in this root workspace.
+> - Directly editing source code violates the multi-agent architecture and causes severe context/token bloat.
+> 
+> 🟢 **MANDATORY DELEGATION WORKFLOW FOR ALL USER TASKS:**
+> Whenever the user asks you to implement a feature, add an API, refactor, write tests, or fix a bug:
+> 1. **Plan & Delegate (Phase 0):** Break down the request into concise architecture specifications.
+> 2. **Dispatch Workers Immediately via Orca CLI:**
+>    - For feature coding: \`orca-dispatch "<feature-title>" dev "<clear spec with file paths>"\`
+>    - For test suites & QA: \`orca-dispatch "<test-title>" qa "<test verification spec>"\`
+>    - For security audit: \`orca-dispatch "<audit-title>" security "<security audit spec>"\`
+>    - For bugfix / hotfix: \`orca-hotfix <issue-id> [agent]\`
+> 3. **Supervise & Stop Calling Tools:** After running \`orca-dispatch\`, report the worktree & dispatch ID to the user and **STOP CALLING TOOLS** to wait reactively for worker completion.
 
 ---
 
@@ -643,16 +658,16 @@ ${EXTRA_TABLE_ROWS}
 ## ⚡ Core Operational Runbook (Anti-Token-Waste Rules)
 
 ### 1. Phase 0 Planning Gate
-Analyze requirements and produce a concise architecture plan (Context, Task Breakdown, Acceptance Criteria). Wait for user approval before dispatching workers.
+Analyze requirements and produce a concise architecture plan (Context, Task Breakdown, Acceptance Criteria). Present the plan and dispatch workers via \`orca-dispatch\`.
 
 ### 2. STRICT ANTI-POLLING RULE (CRITICAL)
 - **NEVER poll in loops** with \`orca orchestration check\` or \`worker-show\`.
-- After dispatching workers, **STOP CALLING TOOLS**. Wait reactively for worker completion notifications or explicit user input. Repeated polling burns thousands of tokens per minute.
+- After dispatching workers with \`orca-dispatch\`, **STOP CALLING TOOLS**. Wait reactively for worker completion notifications or explicit user input. Repeated polling burns thousands of tokens per minute.
 
-### 3. Worker Launch & Token Frugality
-Use \`orca-dispatch\` to launch workers (auto-injects 5m timeout, auto-resolves configured dev agent, and suppresses 200+ lines of raw JSON stdout):
+### 3. Worker Launch CLI Protocol
+Use \`orca-dispatch\` to launch workers (automatically applies configured role agent, model, reasoning effort, and child worktree isolation):
 \`\`\`bash
-orca-dispatch "feature-name" [agent] "Spec description (reference file paths, do NOT dump full file contents)"
+orca-dispatch "feature-name" [dev|qa|security|ui|devops] "Spec description (reference file paths, do NOT dump full file contents)"
 \`\`\`
 
 ### 4. Concurrent Dual-Track (Hotfix P0)

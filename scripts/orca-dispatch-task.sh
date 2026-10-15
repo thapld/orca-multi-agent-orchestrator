@@ -4,25 +4,37 @@
 
 set -e
 
-TASK_TITLE="${1:?Thiếu tiêu đề task. Dùng: $0 <title> [agent|role] <spec>}"
-
-if [[ $# -eq 2 ]]; then
-  SPEC="$2"
-  REQ_AGENT=""
-else
-  REQ_AGENT="${2:-}"
-  SPEC="${3:?Thiếu mô tả spec. Dùng: $0 <title> [agent|role] <spec>}"
+if [[ "$1" == "-h" || "$1" == "--help" || "$1" == "help" || $# -lt 2 ]]; then
+  echo "🐋 [Orca Dispatch] Điều phối và giao việc cho worker trong child worktree độc lập"
+  echo "Sử dụng:"
+  echo "  orca-dispatch <task-title> [role|agent] \"<spec-description>\""
+  echo "  orca-dispatch <task-title> \"<spec-description>\" (mặc định giao cho role developer)"
+  echo ""
+  echo "Ví dụ:"
+  echo "  orca-dispatch \"feature-auth\" dev \"Thêm API login JWT vào src/auth.ts\""
+  echo "  orca-dispatch \"test-auth\" qa \"Viết test suite kiểm thử auth API\""
+  echo "  orca-dispatch \"audit-sec\" security \"Kiểm tra lỗ hổng OWASP và leak token\""
+  exit 0
 fi
 
-# Tự động lấy agent của dev từ orca-team nếu không truyền agent cụ thể
+TASK_TITLE="$1"
+if [[ $# -eq 2 ]]; then
+  SPEC="$2"
+  REQ_AGENT="dev"
+else
+  REQ_AGENT="$2"
+  SPEC="$3"
+fi
+
+# Tự động lấy agent của dev/qa/sec từ orca-team nếu truyền role name
+ROLE_QUERY="${REQ_AGENT:-dev}"
 CONFIG_AGENT=""
 if command -v orca-team &>/dev/null; then
-  ROLE_QUERY="${REQ_AGENT:-dev}"
   CONFIG_AGENT=$(orca-team get "$ROLE_QUERY" 2>/dev/null || true)
 fi
 
-AGENT="${CONFIG_AGENT:-${REQ_AGENT:-kimi}}"
-if [[ -n "$REQ_AGENT" && "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot)$ ]]; then
+AGENT="${CONFIG_AGENT:-${REQ_AGENT:-antigravity}}"
+if [[ "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot)$ ]]; then
   AGENT="$REQ_AGENT"
 fi
 
