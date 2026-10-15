@@ -6,41 +6,80 @@
   "executionHost": "local",
   "coordinator": {
     "agent": "antigravity",
-    "description": "Lead Architect & DAG Coordinator"
+    "description": "Lead Architect & DAG Coordinator",
+    "model": "gemini-2.5-pro",
+    "effort": "high"
   },
   "roles": {
     "developer": {
-      "agent": "kimi",
+      "agent": "antigravity",
       "concurrency": 2,
-      "utilities": ["git-worktrees", "browser-design-mode", "orca-skills-registry"]
+      "utilities": [
+        "git-worktrees",
+        "browser-design-mode",
+        "orca-skills-registry"
+      ],
+      "model": "gemini-2.5-pro",
+      "effort": "medium"
     },
     "qa": {
-      "agent": "kimi",
+      "agent": "antigravity",
       "concurrency": 1,
-      "utilities": ["git-worktrees", "browser-design-mode", "orca-skills-registry"]
+      "utilities": [
+        "git-worktrees",
+        "browser-design-mode",
+        "orca-skills-registry"
+      ],
+      "model": "gemini-2.5-flash",
+      "effort": "low"
     },
     "security": {
-      "agent": "codex",
+      "agent": "antigravity",
       "concurrency": 1,
-      "utilities": ["git-worktrees", "orca-skills-registry"]
+      "utilities": [
+        "git-worktrees",
+        "orca-skills-registry"
+      ],
+      "model": "gemini-2.5-pro",
+      "effort": "high"
     },
     "prReviewer": {
-      "agent": "claude",
-      "utilities": ["git-worktrees", "diff-viewer", "annotate-ai-diff"]
+      "agent": "antigravity",
+      "utilities": [
+        "git-worktrees",
+        "diff-viewer",
+        "annotate-ai-diff"
+      ],
+      "model": "gemini-2.5-pro",
+      "effort": "medium"
     },
     "issueResolver": {
-      "agent": "kimi",
-      "utilities": ["git-worktrees", "issue-metadata", "commit-push"]
+      "agent": "antigravity",
+      "utilities": [
+        "git-worktrees",
+        "issue-metadata",
+        "commit-push"
+      ],
+      "model": "gemini-2.5-flash",
+      "effort": "low"
     },
     "uiSpecialist": {
       "enabled": true,
-      "agent": "claude",
-      "utilities": ["browser-design-mode", "per-worktree-browser"]
+      "agent": "antigravity",
+      "utilities": [
+        "browser-design-mode",
+        "per-worktree-browser"
+      ],
+      "model": "gemini-2.5-flash"
     },
     "devopsSpecialist": {
       "enabled": true,
-      "agent": "codex",
-      "utilities": ["ssh-remote-execution", "orca-per-workspace-env"]
+      "agent": "antigravity",
+      "utilities": [
+        "ssh-remote-execution",
+        "orca-per-workspace-env"
+      ],
+      "model": "gemini-2.5-flash"
     }
   }
 }
