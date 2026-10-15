@@ -8,6 +8,17 @@ set -e
 if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "--clean" ]]; then
   TARGET_DIR="${2:-.}"
   TARGET_PATH=$(cd "$TARGET_DIR" 2>/dev/null && pwd || echo "$TARGET_DIR")
+
+  # Bảo vệ: Không bao giờ tự gỡ bỏ chính kho mã nguồn của framework
+  if [[ -d "$TARGET_PATH/templates" && -f "$TARGET_PATH/package.json" ]]; then
+    if grep -q '"name": *"orca-multi-agent-orchestrator"' "$TARGET_PATH/package.json" 2>/dev/null; then
+      echo "🚫 Đây là thư mục gốc của bộ công cụ 'orca-multi-agent-orchestrator'."
+      echo "   Không thể tự gỡ bỏ chính kho mã nguồn framework!"
+      echo "   Để gỡ bỏ các CLI khỏi máy: hãy chạy './uninstall.sh'."
+      exit 1
+    fi
+  fi
+
   echo "🐋 [Orca Orchestrator Uninstaller] Đang gỡ bỏ cấu hình khỏi: $TARGET_PATH..."
   
   if [[ -f "$TARGET_PATH/orca-team.json" ]]; then
@@ -23,7 +34,8 @@ if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "--clean" ]]; then
     echo "  🗑️  Đã xóa symlink: AGENTS.md"
   fi
   if [[ -f "$TARGET_PATH/.agents/GEMINI.md" ]]; then
-    if grep -q "Orca Multi-Agent" "$TARGET_PATH/.agents/GEMINI.md" 2>/dev/null; then
+    FIRST_LINE=$(head -n 1 "$TARGET_PATH/.agents/GEMINI.md" 2>/dev/null || true)
+    if [[ "$FIRST_LINE" == "# Orca Multi-Agent Orchestration Directive" ]]; then
       rm -f "$TARGET_PATH/.agents/GEMINI.md"
       echo "  🗑️  Đã xóa: .agents/GEMINI.md"
       rmdir "$TARGET_PATH/.agents" 2>/dev/null || true
@@ -69,7 +81,7 @@ choose_agent() {
   printf "   Nhập số [1-${#AVAILABLE_AGENTS[@]}] (Enter = $default_idx [${AVAILABLE_AGENTS[$default_idx]}]): "
   read -r choice
   choice="${choice:-$default_idx}"
-  if (( choice < 1 || choice > ${#AVAILABLE_AGENTS[@]} )); then
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#AVAILABLE_AGENTS[@]} )); then
     choice=$default_idx
   fi
   SELECTED_AGENT="${AVAILABLE_AGENTS[$choice]}"
@@ -82,7 +94,7 @@ choose_count() {
   printf "   Nhập số lượng agent song song cho $role_title [1-5] (Enter = $default_count): "
   read -r count
   count="${count:-$default_count}"
-  if ! [[ "$count" =~ ^[1-9][0-9]*$ ]]; then
+  if ! [[ "$count" =~ ^[1-5]$ ]]; then
     count=$default_count
   fi
   SELECTED_COUNT="$count"

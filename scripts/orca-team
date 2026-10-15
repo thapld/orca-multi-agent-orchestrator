@@ -441,19 +441,12 @@ def cmd_uninstall_project(root: Path, args: list):
             return
 
     deleted = []
-    # 1. Xóa symlinks
+    # 1. Xóa symlinks (TUYỆT ĐỐI CHỈ XÓA SYMLINK, KHÔNG BAO GIỜ XÓA FILE THẬT CỦA USER)
     for f in ["CLAUDE.md", "AGENTS.md"]:
         target = root / f
         if target.is_symlink():
             target.unlink(missing_ok=True)
             deleted.append(f)
-        elif target.exists():
-            try:
-                if "Orca Multi-Agent" in target.read_text(encoding="utf-8", errors="ignore"):
-                    target.unlink(missing_ok=True)
-                    deleted.append(f)
-            except:
-                pass
 
     # 2. Xóa orca-team.json
     cfg = root / "orca-team.json"
@@ -461,18 +454,19 @@ def cmd_uninstall_project(root: Path, args: list):
         cfg.unlink(missing_ok=True)
         deleted.append("orca-team.json")
 
-    # 3. Xóa .agents/GEMINI.md nếu do orchestrator tạo ra
+    # 3. Xóa .agents/GEMINI.md nếu đúng là do orchestrator tạo ra (khớp dòng đầu chuẩn xác)
     gemini_md = root / ".agents" / "GEMINI.md"
     if gemini_md.exists():
         try:
-            if "Orca Multi-Agent" in gemini_md.read_text(encoding="utf-8", errors="ignore"):
+            first_line = gemini_md.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if first_line == "# Orca Multi-Agent Orchestration Directive":
                 gemini_md.unlink(missing_ok=True)
                 deleted.append(".agents/GEMINI.md")
                 agents_dir = root / ".agents"
                 if agents_dir.exists() and not any(agents_dir.iterdir()):
                     agents_dir.rmdir()
                     deleted.append(".agents/ (thư mục rỗng)")
-        except:
+        except Exception:
             pass
 
     print("\n🎉 Đã gỡ bỏ thành công cấu hình Orchestrator:")
@@ -526,7 +520,7 @@ def cmd_watchdog(root: Path, args: list = None):
         return
 
     try:
-        res = subprocess.run([orca_bin, "orchestration", "worker-list", "--json"], capture_output=True, text=True, timeout=10)
+        res = subprocess.run([orca_bin, "orchestration", "worker-list", "--terminal-state", "active", "--json"], capture_output=True, text=True, timeout=10)
         if res.returncode != 0:
             try:
                 err_data = json.loads(res.stdout)
@@ -534,12 +528,13 @@ def cmd_watchdog(root: Path, args: list = None):
                 print(f"⚠️ {msg}")
                 print("💡 Hãy đảm bảo Orca đang mở hoặc chạy lệnh trực tiếp trên terminal máy host.\n")
                 return
-            except:
+            except Exception:
                 print(f"⚠️ Không thể kết nối Orca Runtime (mã lỗi: {res.returncode}).\n")
                 return
 
         data = json.loads(res.stdout)
-        workers = data.get("workers", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        res_obj = data.get("result", data) if isinstance(data, dict) else {}
+        workers = res_obj.get("workers", []) if isinstance(res_obj, dict) else (data if isinstance(data, list) else [])
         
         if not workers:
             print("✨ Hiện không có worker nào đang chạy ngầm cần xử lý.\n")
@@ -560,18 +555,32 @@ def cmd_watchdog(root: Path, args: list = None):
                     show_res = subprocess.run([orca_bin, "orchestration", "worker-show", "--dispatch", d_id, "--json"], capture_output=True, text=True, timeout=10)
                     if show_res.returncode == 0:
                         s_data = json.loads(show_res.stdout)
-                        obs = s_data.get("observation", {})
+                        s_res = s_data.get("result", s_data) if isinstance(s_data, dict) else {}
+                        obs = s_res.get("observation", {})
                         if obs.get("agentWait"):
                             if auto_unblock and term != "-":
-                                # An toàn: Kiểm tra nội dung terminal trước khi gửi 'y'
-                                is_safe = True
+                                # An toàn (Fail-Closed): Phân tích màn hình terminal, chỉ duyệt khi an toàn
+                                is_safe = False
                                 try:
-                                    t_read = subprocess.run([orca_bin, "terminal", "read", "--terminal", term, "--lines", "10"], capture_output=True, text=True, timeout=5)
-                                    out_low = t_read.stdout.lower()
-                                    if any(danger in out_low for danger in ["rm -rf", "drop table", "push --force", "format disk", "sudo"]):
-                                        is_safe = False
+                                    t_read = subprocess.run([orca_bin, "terminal", "read", "--terminal", term, "--limit", "15", "--screen", "--json"], capture_output=True, text=True, timeout=5)
+                                    if t_read.returncode == 0:
+                                        t_data = json.loads(t_read.stdout)
+                                        t_res = t_data.get("result", t_data) if isinstance(t_data, dict) else {}
+                                        out_low = str(t_res.get("content") or t_res.get("screen") or t_read.stdout).lower()
+
+                                        deny_list = [
+                                            "rm -r", "rm -fr", "rm -rf", "git reset --hard", "git clean", 
+                                            "push -f", "push --force", "drop database", "drop table", 
+                                            "truncate", "delete from", "kubectl delete", "terraform destroy", 
+                                            "chmod -r", "| sh", "| bash", "sudo"
+                                        ]
+                                        has_danger = any(danger in out_low for danger in deny_list)
+                                        has_confirm = any(c in out_low for c in ["[y/n]", "(y/n)", "[y/n", "[y/N]", "[Y/n]", "continue?"])
+                                        
+                                        if not has_danger and has_confirm:
+                                            is_safe = True
                                 except Exception:
-                                    pass
+                                    is_safe = False
 
                                 if is_safe:
                                     send_res = subprocess.run([orca_bin, "terminal", "send", "--terminal", term, "--text", "y", "--enter"], capture_output=True, text=True, timeout=5)
@@ -581,7 +590,7 @@ def cmd_watchdog(root: Path, args: list = None):
                                         note = "⚠️ KẸT CÂU HỎI (Mở khóa lỗi)"
                                         hung_count += 1
                                 else:
-                                    note = "⚠️ CẦN DUYỆT THỦ CÔNG (Lệnh nhạy cảm)"
+                                    note = "⚠️ CẦN DUYỆT THỦ CÔNG (Lệnh nhạy cảm hoặc không phải [y/n])"
                                     hung_count += 1
                             else:
                                 note = "⚠️ ĐANG KẸT CÂU HỎI XÁC NHẬN [Y/N]"
@@ -604,7 +613,10 @@ def cmd_watchdog(root: Path, args: list = None):
         print("-" * 82)
         if hung_count > 0:
             print(f"⚠️ Phát hiện {hung_count} worker đang bị treo chờ input!")
-            print("👉 Tự động mở khóa tất cả: orca-team watchdog --unblock")
+            if not auto_unblock:
+                print("👉 Tự động mở khóa các worker an toàn: orca-team watchdog --unblock")
+            else:
+                print("👉 Các worker còn lại đang chờ duyệt lệnh nhạy cảm. Hãy vào Orca Terminal để duyệt thủ công.")
             print("👉 Để dừng worker cạn token: orca orchestration worker-stop --dispatch <id>\n")
         else:
             print("✅ Toàn bộ worker đều hoạt động trơn tru.\n")

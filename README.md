@@ -70,22 +70,21 @@ Bạn có thể khởi tạo orchestrator cho bất kỳ dự án nào chỉ b�
 npx github:thapld/orca-multi-agent-orchestrator
 
 # Hoặc truyền trực tiếp đường dẫn dự án mục tiêu:
-npx github:thapld/orca-multi-agent-orchestrator /Users/macbook/work/gem76
+npx github:thapld/orca-multi-agent-orchestrator /path/to/project
 ```
 
 ---
 
 ### Cách 2: Chạy trực tiếp qua `curl` (Không cần Node.js)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thapld/orca-multi-agent-orchestrator/main/scripts/orca-project-init | zsh -s -- /Users/macbook/work/gem76
+zsh <(curl -fsSL https://raw.githubusercontent.com/thapld/orca-multi-agent-orchestrator/main/scripts/orca-project-init) /path/to/project
 ```
 
 ---
 
-### Cách 3: Sử dụng script cục bộ đã cài đặt
-Script đã được cài sẵn vào PATH tại `/Users/macbook/.local/bin/orca-project-init`:
+### Cách 3: Sử dụng script cục bộ đã cài đặt (sau khi chạy `./install.sh`)
 ```bash
-orca-project-init /Users/macbook/work/gem76
+orca-project-init /path/to/project
 ```
 
 ---

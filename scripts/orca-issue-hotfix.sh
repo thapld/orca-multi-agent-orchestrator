@@ -5,6 +5,11 @@
 set -e
 
 ISSUE_NUM="${1:?Thiếu số Issue. Dùng: $0 <issue-number> [agent]}"
+if ! [[ "$ISSUE_NUM" =~ ^[0-9]+$ ]]; then
+  echo "❌ Số Issue phải là số nguyên dương (ví dụ: 42). Giá trị nhận được: '$ISSUE_NUM'"
+  exit 1
+fi
+
 CONFIG_AGENT=""
 if command -v orca-team &>/dev/null; then
   CONFIG_AGENT=$(orca-team get issue 2>/dev/null || true)
@@ -24,6 +29,23 @@ RECEIPT=$($ORCA_BIN worktree create \
   --setup run \
   --json 2>&1) || true
 
-WT_NAME=$(python3 -c "import sys, json; print(json.loads(sys.stdin.read()).get('name', ''))" <<< "$RECEIPT" 2>/dev/null || echo "$RECEIPT" | grep -o '"name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
-echo "✅ Đã tạo thành công worktree độc lập: ${WT_NAME:-$WORKTREE_NAME}"
+WT_NAME=$(python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+    if d.get('ok') is False:
+        sys.exit(1)
+    res = d.get('result', d)
+    name = res.get('name') or (res.get('worktree', {}).get('name') if isinstance(res.get('worktree'), dict) else '')
+    print(name or '')
+except Exception:
+    sys.exit(1)
+" <<< "$RECEIPT" 2>/dev/null || true)
+
+if [[ -z "$WT_NAME" ]]; then
+  echo "❌ Khởi tạo worktree cho Issue #$ISSUE_NUM thất bại: $RECEIPT"
+  exit 1
+fi
+
+echo "✅ Đã tạo thành công worktree độc lập: $WT_NAME"
 echo "👉 Mã nguồn Issue #$ISSUE_NUM đã được kéo về tự động và cô lập trong worktree."
