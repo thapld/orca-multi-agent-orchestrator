@@ -1130,6 +1130,7 @@ def cmd_set(root: Path, config: dict, args: list):
 
     if role_key == "coordinator" and new_agent:
         gemini_md = root / ".agents" / "GEMINI.md"
+        root_gemini_md = root / "GEMINI.md"
         claude_md = root / "CLAUDE.md"
         agents_md = root / "AGENTS.md"
         c_low = new_agent.lower()
@@ -1146,9 +1147,13 @@ def cmd_set(root: Path, config: dict, args: list):
             if claude_md.is_symlink(): claude_md.unlink(missing_ok=True)
             changes.append(f"Leader Discovery Link: Kích hoạt AGENTS.md ({new_agent})")
         elif c_low in ["antigravity", "gemini"]:
-            if claude_md.is_symlink(): claude_md.unlink(missing_ok=True)
-            if agents_md.is_symlink(): agents_md.unlink(missing_ok=True)
-            changes.append("Leader Discovery Link: Native .agents/GEMINI.md (Antigravity)")
+            if not root_gemini_md.exists() and gemini_md.exists():
+                try: os.symlink(".agents/GEMINI.md", root_gemini_md)
+                except: pass
+            if not agents_md.exists() and gemini_md.exists():
+                try: os.symlink(".agents/GEMINI.md", agents_md)
+                except: pass
+            changes.append("Leader Discovery Link: Kích hoạt GEMINI.md & AGENTS.md ở root (Antigravity)")
 
     save_config(root, config)
     sync_gemini_directive(root, config)
@@ -1160,30 +1165,36 @@ def cmd_set(root: Path, config: dict, args: list):
 
 def cmd_link(root: Path, args: list):
     gemini_md = root / ".agents" / "GEMINI.md"
+    root_gemini_md = root / "GEMINI.md"
     claude_md = root / "CLAUDE.md"
     agents_md = root / "AGENTS.md"
 
     mode = args[0] if args else "status"
     if mode in ["all", "--all"]:
+        if not root_gemini_md.exists() and gemini_md.exists():
+            try: os.symlink(".agents/GEMINI.md", root_gemini_md)
+            except: pass
         if not claude_md.exists() and gemini_md.exists():
             try: os.symlink(".agents/GEMINI.md", claude_md)
             except: pass
         if not agents_md.exists() and gemini_md.exists():
             try: os.symlink(".agents/GEMINI.md", agents_md)
             except: pass
-        print("🔗 Đã kích hoạt cả 2 symlink CLAUDE.md và AGENTS.md (sẵn sàng mở bất kỳ AI CLI nào).\n")
+        print("🔗 Đã kích hoạt các symlink GEMINI.md, CLAUDE.md và AGENTS.md (sẵn sàng mở bất kỳ AI CLI nào).\n")
     elif mode in ["clean", "--clean"]:
+        if root_gemini_md.is_symlink(): root_gemini_md.unlink(missing_ok=True)
         if claude_md.is_symlink(): claude_md.unlink(missing_ok=True)
         if agents_md.is_symlink(): agents_md.unlink(missing_ok=True)
-        print("🧹 Đã dọn dẹp các symlink ở root (chỉ giữ .agents/GEMINI.md cho Antigravity).\n")
+        print("🧹 Đã dọn dẹp các symlink ở root (chỉ giữ .agents/GEMINI.md).\n")
     else:
         print("\n🔍 Trạng thái Discovery Links:")
         print(f"   • .agents/GEMINI.md: {'✅ Tồn tại' if gemini_md.exists() else '❌ Không có'}")
+        print(f"   • GEMINI.md (root):  {'🔗 Symlink active' if root_gemini_md.is_symlink() else ('✅ File riêng' if root_gemini_md.exists() else '⚪ Không có')}")
         print(f"   • CLAUDE.md:         {'🔗 Symlink active' if claude_md.is_symlink() else ('✅ File riêng' if claude_md.exists() else '⚪ Không có')}")
         print(f"   • AGENTS.md:         {'🔗 Symlink active' if agents_md.is_symlink() else ('✅ File riêng' if agents_md.exists() else '⚪ Không có')}")
         print("\n💡 Tùy chọn:")
-        print("   • orca-team link all   : Kích hoạt cả 2 link để mở tự do Claude/Codex")
-        print("   • orca-team link clean : Dọn dẹp link nếu chỉ dùng Antigravity\n")
+        print("   • orca-team link all   : Kích hoạt tất cả symlink để mở tự do Antigravity/Claude/Codex")
+        print("   • orca-team link clean : Dọn dẹp symlink ở root\n")
 
 def cmd_uninstall_project(root: Path, args: list):
     """Gỡ bỏ toàn bộ cấu hình Orchestrator khỏi project hiện tại."""
