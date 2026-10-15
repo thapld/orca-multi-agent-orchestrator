@@ -135,9 +135,26 @@ orca-team link status   # Xem trạng thái liên kết
 # 8. Watchdog kiểm tra & tự động giải cứu worker bị kẹt:
 orca-team watchdog           # Quét trạng thái, phát hiện worker cạn token hoặc kẹt prompt [y/n]
 orca-team watchdog --unblock # Tự động gửi 'y' mở khóa toàn bộ worker đang chờ câu hỏi
+
+# 9. Giám sát & Bóc tách nguyên nhân tiêu tốn Token (Token Monitor & Forensic Debugger):
+orca-monitor                 # hoặc: orca-team monitor
+orca-team monitor --verbose  # Xem chi tiết từng thông điệp và buffer màn hình
+orca-team monitor --fix      # Tự động sửa các bẫy token (gitignore, symlink, release worker)
 ```
 
 > **Ghi chú:** Khi chạy `orca-team set`, công cụ sẽ **tự động cập nhật `orca-team.json` đồng thời đồng bộ lại bảng vai trò trong `.agents/GEMINI.md`**, giúp Leader agent lập tức nhận biết cấu hình mới mà không cần khởi động lại.
+
+---
+
+## 🔬 Chế Độ Giám Sát Token & Khắc Phục Rò Rỉ (Token Monitor)
+
+Nếu bạn hoặc AI Leader thấy **tiêu tốn quá nhiều token** mà không rõ nguyên nhân, công cụ `orca-monitor` (hoặc `orca-team monitor`) sẽ tiến hành rà soát pháp y 5 tầng:
+
+1. **Chỉ dẫn hệ thống nạp mỗi turn (Per-Turn System Prompt):** Đo lường chính xác dung lượng byte và ước tính token của `.agents/GEMINI.md`, `CLAUDE.md`, `AGENTS.md`. Phát hiện trường hợp file bị copy độc lập thay vì symlink (gây x2 token mỗi turn).
+2. **Bẫy đường dẫn chết (Dead Reference Traps):** Tự động phát hiện các file template/doc được nhắc đến trong chỉ dẫn nhưng không tồn tại trong project — nguyên nhân khiến AI Agent rơi vào vòng lặp tìm file bất tận (`view_file` / `glob`) đốt 1.500 - 3.000 tokens ngay khi mở màn.
+3. **Vệ sinh Workspace & Git Status:** Kiểm tra `.gitignore` xem đã chặn log rác và receipt của Orca (`.orca/`, `.orca-cache/`, `*.orca.log`) chưa. Đếm số lượng file untracked làm phình output của `git status`.
+4. **Orca Runtime Telemetry:** Kiểm tra bộ nhớ màn hình terminal của các worker đang chạy (`orca terminal read`), phát hiện worker bị kẹt loop và cảnh báo các worker đã xong việc (`reclaimable`) nhưng chưa được release.
+5. **Auto-Fix Thông Minh (`--fix`):** Tự động thêm luật vào `.gitignore`, tự động chuyển file trùng lặp sang symlink và tự động gọi `worker-release` để giải phóng bộ nhớ.
 
 ---
 

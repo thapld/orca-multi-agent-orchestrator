@@ -391,6 +391,7 @@ If an issue is reassigned: stop worker (\`worker-stop\`), commit WIP branch \`wi
 - **Worker waiting on prompt (\`[y/n]\`):** Auto-unblock via: \`orca-team watchdog --unblock\`.
 - **Session context overflow:** Spawn fresh worker on same worktree: \`worker-start --task <taskId> --retry-of <id> --worktree current\`.
 - **Account Rate Limit (429):** Do not respawn same provider! Switch provider via \`orca-team set dev --agent <fallback_agent>\` (e.g. Claude ➔ Kimi, Kimi ➔ Codex).
+- **Token Bloat & Leak Diagnosis:** Audit token hotspots and auto-fix anytime via: \`orca-monitor\` (or \`orca-team monitor --fix\`).
 - **All providers exhausted:** Halt all workers cleanly and report to user (Human Gate).
 
 ### 7. Quality Gate & Release

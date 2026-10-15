@@ -7,6 +7,7 @@ BINARIES=(
   "orca-project-init"
   "orca-init"
   "orca-team"
+  "orca-monitor"
   "orca-dispatch"
   "orca-hotfix"
   "orca-review"

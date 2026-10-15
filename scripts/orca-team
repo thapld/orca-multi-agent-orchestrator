@@ -9,6 +9,7 @@ Usage:
   orca-team get <role> [--field agent|model|effort|concurrency]
   orca-team link [all|clean|status]
   orca-team watchdog [--unblock]
+  orca-team monitor [--fix] [--verbose]
   orca-team uninstall [-y|--force]
   orca-team agents
 """
@@ -623,9 +624,336 @@ def cmd_watchdog(root: Path, args: list = None):
     except Exception as e:
         print(f"⚠️ Lỗi quét worker: {e}\n")
 
+def estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    non_ascii = sum(1 for c in text if ord(c) > 127)
+    ascii_chars = len(text) - non_ascii
+    return max(1, int(round((ascii_chars / 3.8) + (non_ascii / 2.0))))
+
+def cmd_monitor(root: Path, config: dict, args: list = None):
+    import subprocess
+    args = args or []
+    verbose = any(a in args for a in ["-v", "--verbose", "--full"])
+    auto_fix = any(a in args for a in ["--fix", "-f"])
+
+    print("\n╔═══════════════════════════════════════════════════════════════════════════════════╗")
+    print("║             🔬 ORCA TOKEN AUDITOR & CONTEXT LEAK MONITOR                          ║")
+    print("╚═══════════════════════════════════════════════════════════════════════════════════╝")
+    print(f"📍 Dự án: {root}")
+    if auto_fix:
+        print("⚡ Chế độ Auto-Fix: Đang tự động xử lý các bẫy rò rỉ token...")
+    print("")
+
+    critical_issues = []
+    warning_issues = []
+    passed_items = []
+    actions_taken = []
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PHẦN 1: PHÂN TÍCH DIRECTIVES & CONTEXT TIÊU TỐN MỖI LƯỢT (PER-TURN OVERHEAD)
+    # ─────────────────────────────────────────────────────────────────────────────
+    print("📋 1. CHỈ DẪN HỆ THỐNG & CONTEXT TIÊU TỐN MỖI LƯỢT (PER-TURN SYSTEM PROMPT)")
+    print(f"{'FILE / NGUỒN':<26} | {'LOẠI':<12} | {'KÍCH THƯỚC':<12} | {'ƯỚC TÍNH TOKENS':<16} | {'TRẠNG THÁI'}")
+    print("-" * 85)
+
+    base_tokens = 0
+    target_files = [
+        (".agents/GEMINI.md", root / ".agents" / "GEMINI.md"),
+        ("CLAUDE.md", root / "CLAUDE.md"),
+        ("AGENTS.md", root / "AGENTS.md"),
+        ("orca-team.json", root / "orca-team.json"),
+        ("plan.md", root / "plan.md"),
+    ]
+
+    for rel_name, path in target_files:
+        if not path.exists() and not path.is_symlink():
+            continue
+
+        is_link = path.is_symlink()
+        try:
+            raw_text = path.read_text(encoding="utf-8", errors="ignore")
+            size_b = len(raw_text.encode("utf-8"))
+            tokens = estimate_tokens(raw_text)
+        except Exception:
+            raw_text = ""
+            size_b = 0
+            tokens = 0
+
+        if is_link:
+            status = "🟢 Symlink (0 extra)"
+            type_str = "Symlink"
+            size_str = f"{size_b} B"
+            tokens_str = f"~{tokens} (shared)"
+        else:
+            type_str = "File thật"
+            size_str = f"{size_b/1024:.1f} KB" if size_b > 1024 else f"{size_b} B"
+            tokens_str = f"~{tokens} tokens"
+            base_tokens += tokens
+            if tokens > 2500:
+                status = "⚠️ Quá lớn (>2.5k tok)"
+                warning_issues.append(f"File '{rel_name}' có kích thước lớn (~{tokens} tokens). Sẽ bị nạp lại vào context của AI Leader trên MỖI turn.")
+            else:
+                status = "🟢 Gọn gàng"
+
+        # Kiểm tra nếu CLAUDE.md hoặc AGENTS.md là file độc lập trùng lặp với GEMINI.md
+        if rel_name in ["CLAUDE.md", "AGENTS.md"] and not is_link and path.exists():
+            gemini_p = root / ".agents" / "GEMINI.md"
+            if gemini_p.exists():
+                status = "🚨 Trùng lặp (x2 token)"
+                critical_issues.append(
+                    f"File '{rel_name}' là file độc lập thay vì symlink tới '.agents/GEMINI.md'. "
+                    f"Một số AI IDE (như Cursor/Claude/Codex) nạp cả hai file cùng lúc, gây lãng phí ~{tokens} tokens mỗi turn!"
+                )
+                if auto_fix:
+                    try:
+                        path.unlink()
+                        os.symlink(".agents/GEMINI.md", path)
+                        actions_taken.append(f"Đã chuyển '{rel_name}' thành symlink trỏ về '.agents/GEMINI.md'.")
+                        status = "✅ Đã sửa thành Symlink"
+                    except Exception as e:
+                        actions_taken.append(f"Lỗi khi chuyển '{rel_name}' thành symlink: {e}")
+
+        print(f"{rel_name:<26} | {type_str:<12} | {size_str:<12} | {tokens_str:<16} | {status}")
+
+    print("-" * 85)
+    print(f"👉 Tổng token cơ sở (Base Context Tokens) nạp mỗi turn: ~{base_tokens:,} tokens")
+    if base_tokens < 2000:
+        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn).")
+    elif base_tokens < 4000:
+        warning_issues.append(f"Context chỉ dẫn ban đầu ở mức trung bình (~{base_tokens:,} tokens/turn).")
+    else:
+        critical_issues.append(f"Context chỉ dẫn ban đầu quá lớn (~{base_tokens:,} tokens/turn). Cần tinh gọn lại các file chỉ dẫn.")
+    print("")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PHẦN 2: QUÉT BẪY VÒNG LẶP & ĐƯỜNG DẪN CHẾT (DEAD REFERENCE TRAPS)
+    # ─────────────────────────────────────────────────────────────────────────────
+    print("🕵️ 2. QUÉT BẪY VÒNG LẶP & ĐƯỜNG DẪN CHẾT (DEAD REFERENCE TRAPS)")
+    scanned_directives = [p for _, p in target_files if p.exists()]
+    dead_refs_found = []
+
+    for path in scanned_directives:
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        raw_matches = re.findall(r'(?:[\s\(\[\`\"\'\:]|^)([a-zA-Z0-9_\-\./]+\.[a-zA-Z0-9]{1,5})(?:[\s\)\]\`\"\'\:]|$)', content)
+        for p_str in raw_matches:
+            if p_str.startswith(('http://', 'https://', 'git://', 'ssh://')):
+                continue
+            if re.match(r'^\d+\.\d+$', p_str):
+                continue
+            if p_str in ['e.g.', 'i.e.', 'etc.', 'example.com']:
+                continue
+            if '/' in p_str or p_str.endswith(('.md', '.json', '.sh', '.py', '.ts', '.js', '.yml', '.yaml', '.txt')):
+                if p_str in ["plan.md", "orca-team.json"]:
+                    continue
+                if "github.com" in content[max(0, content.find(p_str)-30):content.find(p_str)+len(p_str)+30]:
+                    continue
+
+                target_p = root / p_str
+                if not target_p.exists():
+                    dead_refs_found.append((p_str, path.name))
+
+    if dead_refs_found:
+        print(f"🚨 Phát hiện {len(dead_refs_found)} đường dẫn chết trong file chỉ dẫn:")
+        for ref, source in dead_refs_found:
+            print(f"   ❌ '{ref}' (trong {source}) ➔ KHÔNG TỒN TẠI trên đĩa!")
+            critical_issues.append(
+                f"Đường dẫn chết '{ref}' trong file '{source}'. Khi AI đọc thấy đường dẫn này, nó sẽ liên tục "
+                f"gọi tool view_file / glob để tìm file, nhận lỗi File Not Found và lặp lại tìm kiếm (đốt 1.500 - 3.000 tokens/lần)!"
+            )
+    else:
+        print("✅ Tuyệt vời! Không phát hiện đường dẫn chết nào trong file chỉ dẫn.")
+        passed_items.append("Không có bẫy đường dẫn chết trong các file chỉ dẫn AI.")
+    print("")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PHẦN 3: VỆ SINH WORKSPACE & BẪY GIT STATUS (WORKSPACE HYGIENE)
+    # ─────────────────────────────────────────────────────────────────────────────
+    print("🧹 3. VỆ SINH WORKSPACE & BẪY GIT STATUS (WORKSPACE HYGIENE)")
+    gitignore_path = root / ".gitignore"
+    if not gitignore_path.exists():
+        print("⚠️ Dự án chưa có file '.gitignore'!")
+        warning_issues.append("Chưa có file '.gitignore'. Lệnh git status của AI có thể bị ngập trong file rác.")
+        if auto_fix:
+            gitignore_path.write_text(".orca/\n.orca-cache/\n*.orca.log\nnode_modules/\n.venv/\n", encoding="utf-8")
+            actions_taken.append("Đã tự động tạo file '.gitignore' chuẩn với các luật bỏ qua rác Orca.")
+            print("  ✅ Đã tự động tạo file '.gitignore' mới.")
+    else:
+        gi_content = gitignore_path.read_text(encoding="utf-8", errors="ignore")
+        missing_ignores = []
+        for pat in [".orca", ".orca-cache", "*.orca.log"]:
+            if pat not in gi_content:
+                missing_ignores.append(pat)
+
+        if missing_ignores:
+            print(f"⚠️ '.gitignore' đang thiếu các quy tắc: {', '.join(missing_ignores)}")
+            critical_issues.append(
+                f"Thiếu '{', '.join(missing_ignores)}' trong .gitignore! Các file log/receipt của Orca sẽ bị đưa vào "
+                f"'git status' và 'git diff', làm tràn hàng chục ngàn tokens vào ngữ cảnh AI!"
+            )
+            if auto_fix:
+                with open(gitignore_path, "a", encoding="utf-8") as f:
+                    f.write("\n# Orca Orchestrator Runtime Logs & Receipts\n")
+                    for m in missing_ignores:
+                        f.write(f"{m}\n")
+                actions_taken.append(f"Đã bổ sung '{', '.join(missing_ignores)}' vào .gitignore.")
+                print(f"  ✅ Đã tự động bổ sung {', '.join(missing_ignores)} vào .gitignore.")
+        else:
+            print("✅ '.gitignore' đã chặn đầy đủ các thư mục và log rác của Orca (.orca/, .orca-cache/).")
+            passed_items.append(".gitignore đã cấu hình chuẩn chống rò rỉ receipt Orca.")
+
+    try:
+        git_res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=str(root), timeout=5)
+        if git_res.returncode == 0:
+            lines = [l for l in git_res.stdout.splitlines() if l.strip()]
+            untracked = [l for l in lines if l.startswith("??")]
+            modified = [l for l in lines if not l.startswith("??")]
+            
+            git_tokens = estimate_tokens(git_res.stdout)
+            print(f"📊 Git Status: {len(modified)} file thay đổi, {len(untracked)} file untracked (Kích thước ~{git_tokens} tokens).")
+            if len(untracked) > 25:
+                print(f"⚠️ Có tới {len(untracked)} file untracked chưa được gitignore!")
+                warning_issues.append(
+                    f"Có {len(untracked)} file untracked trong workspace (~{git_tokens} tokens). "
+                    f"Mỗi lần AI chạy 'git status' hoặc liệt kê file sẽ tiêu tốn lượng token này."
+                )
+            else:
+                passed_items.append("Git workspace gọn gàng, không bị ngập file untracked.")
+    except Exception:
+        pass
+    print("")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PHẦN 4: RUNTIME ORCA TELEMETRY: WORKER TERMINALS & MAILBOX
+    # ─────────────────────────────────────────────────────────────────────────────
+    print("⚡ 4. RUNTIME ORCA TELEMETRY: WORKER TERMINALS & MAILBOX")
+    orca_bin = os.environ.get("ORCA_BIN") or shutil.which("orca") or "/usr/local/bin/orca"
+    
+    runtime_ok = False
+    try:
+        w_res = subprocess.run([orca_bin, "orchestration", "worker-list", "--json"], capture_output=True, text=True, timeout=5)
+        if w_res.returncode == 0:
+            w_data = json.loads(w_res.stdout)
+            w_obj = w_data.get("result", w_data) if isinstance(w_data, dict) else {}
+            workers = w_obj.get("workers", []) if isinstance(w_obj, dict) else (w_data if isinstance(w_data, list) else [])
+            runtime_ok = True
+            
+            print(f"👥 Đang có {len(workers)} worker trong lịch sử / runtime.")
+            reclaimable_dispatches = []
+            
+            for w in workers:
+                d_id = str(w.get("dispatchId") or w.get("id") or "-")
+                term = str(w.get("terminalHandle") or w.get("agentTerminalHandle") or "-")
+                state = str(w.get("terminalState") or w.get("state") or "-")
+                
+                term_tokens = 0
+                if term != "-":
+                    try:
+                        t_read = subprocess.run([orca_bin, "terminal", "read", "--terminal", term, "--limit", "30", "--screen", "--json"], capture_output=True, text=True, timeout=5)
+                        if t_read.returncode == 0:
+                            t_json = json.loads(t_read.stdout)
+                            t_res = t_json.get("result", t_json) if isinstance(t_json, dict) else {}
+                            screen_text = str(t_res.get("content") or t_res.get("screen") or "")
+                            term_tokens = estimate_tokens(screen_text)
+                    except Exception:
+                        pass
+                
+                if state == "reclaimable":
+                    reclaimable_dispatches.append(d_id)
+                    print(f"   • Dispatch {d_id} [{term}]: ⚪ Đã xong (Reclaimable) - Terminal buffer: ~{term_tokens} tokens.")
+                    warning_issues.append(f"Worker '{d_id}' đã hoàn thành nhưng chưa được release! Terminal đang chiếm ~{term_tokens} tokens trong bộ nhớ Orca.")
+                elif state == "active":
+                    print(f"   • Dispatch {d_id} [{term}]: 🟢 Đang chạy - Terminal screen: ~{term_tokens} tokens.")
+                    if term_tokens > 4000:
+                        warning_issues.append(f"Worker '{d_id}' có màn hình terminal rất lớn (~{term_tokens} tokens). Cần cẩn trọng khi Leader đọc lại terminal.")
+                else:
+                    if verbose:
+                        print(f"   • Dispatch {d_id} [{term}]: State={state}, Screen=~{term_tokens} tokens.")
+
+            if auto_fix and reclaimable_dispatches:
+                for did in reclaimable_dispatches:
+                    rel_res = subprocess.run([orca_bin, "orchestration", "worker-release", "--dispatch", did, "--json"], capture_output=True, text=True, timeout=5)
+                    if rel_res.returncode == 0:
+                        actions_taken.append(f"Đã giải phóng worker đã xong: {did}")
+                print(f"  ✅ Đã tự động release {len(reclaimable_dispatches)} worker xong việc.")
+            elif reclaimable_dispatches:
+                print(f"  💡 Giải phóng ngay các worker đã xong: orca orchestration worker-release --dispatch <id>")
+
+        else:
+            print("ℹ️ Không thể kết nối Orca Runtime qua CLI (EPERM hoặc Orca đang đóng).")
+            print("  (Hãy chạy lệnh 'orca-team monitor' trực tiếp trên Terminal máy host để xem telemetry runtime chi tiết).")
+    except Exception as e:
+        print(f"ℹ️ Bỏ qua kiểm tra runtime do: {e}")
+
+    if runtime_ok:
+        try:
+            inbox_res = subprocess.run([orca_bin, "orchestration", "inbox", "--limit", "20", "--json"], capture_output=True, text=True, timeout=5)
+            if inbox_res.returncode == 0:
+                inbox_data = json.loads(inbox_res.stdout)
+                inbox_obj = inbox_data.get("result", inbox_data) if isinstance(inbox_data, dict) else {}
+                msgs = inbox_obj.get("messages", []) if isinstance(inbox_obj, dict) else (inbox_data if isinstance(inbox_data, list) else [])
+                print(f"📬 Mailbox: Đang có {len(msgs)} thông điệp giữa các agent.")
+                for m in msgs:
+                    m_text = json.dumps(m)
+                    m_tok = estimate_tokens(m_text)
+                    if m_tok > 3000:
+                        warning_issues.append(f"Thông điệp Mailbox từ {m.get('from', '?')} tới {m.get('to', '?')} quá lớn (~{m_tok} tokens). Cần yêu cầu agent tóm tắt trước khi gửi.")
+        except Exception:
+            pass
+    print("")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PHẦN 5: TỔNG KẾT & HƯỚNG DẪN TỐI ƯU CỤ THỂ (ACTIONABLE CHECKLIST)
+    # ─────────────────────────────────────────────────────────────────────────────
+    print("🎯 5. BẢNG TỔNG KẾT & HƯỚNG DẪN TỐI ƯU TOKEN (ACTIONABLE AUDIT)")
+    print("═" * 85)
+
+    if actions_taken:
+        print("🛠️ CÁC HÀNH ĐỘNG AUTO-FIX ĐÃ THỰC HIỆN:")
+        for act in actions_taken:
+            print(f"   ✅ {act}")
+        print("")
+
+    if critical_issues:
+        print("🔴 NGUY CƠ CAO (GÂY RÒ RỈ TOKEN NGHIÊM TRỌNG):")
+        for idx, iss in enumerate(critical_issues, 1):
+            print(f"   {idx}. {iss}")
+        print("")
+
+    if warning_issues:
+        print("🟡 ĐIỂM CẦN TỐI ƯU (TIẾT KIỆM THÊM TOKEN):")
+        for idx, iss in enumerate(warning_issues, 1):
+            print(f"   {idx}. {iss}")
+        print("")
+
+    if passed_items:
+        print("🟢 CÁC ĐIỂM ĐÃ TỐI ƯU RẤT TỐT:")
+        for idx, item in enumerate(passed_items, 1):
+            print(f"   {idx}. {item}")
+        print("")
+
+    print("💡 LỜI KHUYÊN & LỆNH KHẮC PHỤC NHANH:")
+    if critical_issues or warning_issues:
+        print("   1. Tự động sửa nhanh các bẫy token thông dụng: orca-team monitor --fix")
+        print("   2. Giữ context tinh gọn cho Antigravity:        orca-team link clean")
+        print("   3. Đảm bảo symlink chuẩn cho Claude/Codex:     orca-team link all")
+        print("   4. Dừng worker kẹt prompt hoặc cạn token:      orca-team watchdog --unblock\n")
+    else:
+        print("   🎉 Dự án của bạn đang ở trạng thái tối ưu token tuyệt vời! Không có rò rỉ nào được phát hiện.\n")
+
 def main():
     root = find_project_root()
     config = load_config(root)
+
+    # Nếu được gọi trực tiếp qua alias 'orca-monitor'
+    prog_name = Path(sys.argv[0]).name
+    if prog_name == "orca-monitor":
+        cmd_monitor(root, config, sys.argv[1:])
+        return
 
     args = sys.argv[1:]
     if not args or args[0] in ["status", "list", "show"]:
@@ -636,6 +964,8 @@ def main():
         cmd_get(root, config, args[1:])
     elif args[0] in ["watchdog", "workers", "health"]:
         cmd_watchdog(root, args[1:])
+    elif args[0] in ["monitor", "debug", "tokens", "token", "audit-tokens"]:
+        cmd_monitor(root, config, args[1:])
     elif args[0] in ["link", "discovery"]:
         cmd_link(root, args[1:])
     elif args[0] in ["uninstall", "remove", "clean-all", "purge"]:
