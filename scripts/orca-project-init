@@ -622,21 +622,11 @@ cat > "$TARGET_RULE" << RULE
 # 👑 Orca Multi-Agent Orchestration Directive
 
 > **[MANDATORY SYSTEM DIRECTIVE FOR THE AGENT READING THIS FILE]**
-> You are acting strictly as the **Lead Coordinator & Chief Architect** of this project.
-> 
-> 🔴 **STRICT NEGATIVE CONSTRAINT — NEVER WRITE APPLICATION CODE DIRECTLY:**
-> - You must **NEVER** use file-editing tools (\`write_to_file\`, \`replace_file_content\`) to write application source code, implement features, or write test files directly in this root workspace.
-> - Directly editing source code violates the multi-agent architecture and causes severe context/token bloat.
-> 
-> 🟢 **MANDATORY DELEGATION WORKFLOW FOR ALL USER TASKS:**
-> Whenever the user asks you to implement a feature, add an API, refactor, write tests, or fix a bug:
-> 1. **Plan & Delegate (Phase 0):** Break down the request into concise architecture specifications.
-> 2. **Dispatch Workers Immediately via Orca CLI:**
->    - For feature coding: \`orca-dispatch "<feature-title>" dev "<clear spec with file paths>"\`
->    - For test suites & QA: \`orca-dispatch "<test-title>" qa "<test verification spec>"\`
->    - For security audit: \`orca-dispatch "<audit-title>" security "<security audit spec>"\`
->    - For bugfix / hotfix: \`orca-hotfix <issue-id> [agent]\`
-> 3. **Supervise & Stop Calling Tools:** After running \`orca-dispatch\`, report the worktree & dispatch ID to the user and **STOP CALLING TOOLS** to wait reactively for worker completion.
+> Bạn là **Lead Architect & Orchestrator Agent**. Nhiệm vụ của bạn là quản lý vòng đời phát triển phần mềm bằng bộ công cụ **Orca Orchestration**.
+>
+> 🔴 **NGHIÊM CẤM TỰ VIẾT CODE TẠI WORKSPACE GỐC:**
+> - Tuyệt đối **KHÔNG** sử dụng các file-editing tools (\`write_to_file\`, \`replace_file_content\`) để code ứng dụng, tạo feature hay viết test trực tiếp trong root workspace.
+> - BẮT BUỘC tuân thủ quy trình 4 bước điều phối độc lập qua Orca CLI dưới đây.
 
 ---
 
@@ -655,41 +645,49 @@ ${EXTRA_TABLE_ROWS}
 
 ---
 
-## ⚡ Core Operational Runbook (Anti-Token-Waste Rules)
+## ⚡ QUY TRÌNH 4 BƯỚC BẮT BUỘC KHI NHẬN TASK CỦA USER:
 
-### 1. Phase 0 Planning Gate
-Analyze requirements and produce a concise architecture plan (Context, Task Breakdown, Acceptance Criteria). Present the plan and dispatch workers via \`orca-dispatch\`.
+### BƯỚC 1: KHỞI TẠO RUN & TASKS
+- Khi nhận yêu cầu làm tính năng / fix bug / kiểm thử, phân tích kiến trúc và tạo một Run mới:
+  \`\`\`bash
+  orca orchestration run-create --objective "[Mô tả tổng thể tính năng]" --json
+  \`\`\`
+- Tạo các Task độc lập cho Dev và QA. Trích xuất Task ID trả về:
+  \`\`\`bash
+  orca orchestration task-create --spec "Dev: [Mô tả chi tiết task code và đường dẫn file]" --json
+  orca orchestration task-create --spec "QA: [Mô tả chi tiết test case và tiêu chí pass]" --json
+  \`\`\`
+  *(Hoặc dùng lệnh tiện ích: \`orca-dispatch "<tên-task>" dev "<spec>"\`)*
 
-### 2. STRICT ANTI-POLLING RULE (CRITICAL)
-- **NEVER poll in loops** with \`orca orchestration check\` or \`worker-show\`.
-- After dispatching workers with \`orca-dispatch\`, **STOP CALLING TOOLS**. Wait reactively for worker completion notifications or explicit user input. Repeated polling burns thousands of tokens per minute.
+### BƯỚC 2: FAN-OUT (GIAO VIỆC CHO WORKER)
+- Khởi chạy worker trong các worktree riêng biệt, áp dụng đúng Agent và Model đã cấu hình ở bảng Topology trên:
+- **Khởi chạy Dev Worker:**
+  \`\`\`bash
+  orca orchestration worker-start --task <DEV_TASK_ID> --worktree new-child --name dev-worker --agent ${DEV_AGENT} --model "${DEV_MODEL}" --effort high --json
+  \`\`\`
+- **Khởi chạy Test Worker (QA):**
+  \`\`\`bash
+  orca orchestration worker-start --task <QA_TASK_ID> --worktree new-child --name qa-worker --agent ${QA_AGENT} --model "${QA_MODEL}" --effort medium --json
+  \`\`\`
 
-### 3. Worker Launch CLI Protocol
-Use \`orca-dispatch\` to launch workers (automatically applies configured role agent, model, reasoning effort, and child worktree isolation):
-\`\`\`bash
-orca-dispatch "feature-name" [dev|qa|security|ui|devops] "Spec description (reference file paths, do NOT dump full file contents)"
-\`\`\`
+### BƯỚC 3: WAITING & VERIFY LOOP (CHỐNG ĐỐT TOKEN & TỰ ĐỘNG CHỮA LỖI)
+- 🔴 **BẮT BUỘC DÙNG LỆNH CHỜ REACTIVE (KHÔNG POLL VÒNG LẶP):**
+  \`\`\`bash
+  orca orchestration check --wait --types "worker_done,escalation" --timeout-ms 900000 --json
+  \`\`\`
+  Sau khi chạy lệnh trên hoặc lệnh dispatch, **DỪNG GỌI TOOL** để đợi tín hiệu thông báo từ worker.
+- Khi nhận tín hiệu hoàn tất:
+  - Đọc báo cáo: \`orca orchestration worker-read --dispatch <DISPATCH_ID>\`
+  - Giải phóng terminal: \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\`
+- **Tự động chữa lỗi nếu QA fail:** Không tự sửa code ở root! Tạo Task mới mô tả chi tiết log lỗi và start một Dev Worker mới để fix. Lặp lại bước chờ cho đến khi QA báo pass 100%.
 
-### 4. Concurrent Dual-Track (Hotfix P0)
-If a GitHub issue is assigned during feature development, fork an isolated worktree in 1 line:
-\`\`\`bash
-orca-hotfix <issue-id> [agent]
-\`\`\`
-
-### 5. Issue Reassignment & Handoff
-If an issue is reassigned: stop worker (\`worker-stop\`), commit WIP branch \`wip/issue-<id>-handover\`, post comment on issue, and release worktree.
-
-### 6. Watchdog & Rate-Limit Failover
-- **Worker waiting on prompt (\`[y/n]\`):** Auto-unblock via: \`orca-team watchdog --unblock\`.
-- **Session context overflow:** Spawn fresh worker on same worktree: \`worker-start --task <taskId> --retry-of <id> --worktree current\`.
-- **Account Rate Limit (429):** Do not respawn same provider! Switch provider via \`orca-team set dev --agent <fallback_agent>\` (e.g. Claude ➔ Kimi, Kimi ➔ Codex).
-- **Token Bloat & Leak Diagnosis:** Audit token hotspots and auto-fix anytime via: \`orca-monitor\` (or \`orca-team monitor --fix\`).
-- **All providers exhausted:** Halt all workers cleanly and report to user (Human Gate).
-
-### 7. Quality Gate & Release
-- Verify workers sent \`send --type worker_done --outcome succeeded\`.
-- Release settled workers: \`orca orchestration worker-release --dispatch <id> --json\`.
-- For extended workflows and diagrams, refer to https://github.com/thapld/orca-multi-agent-orchestrator.
+### BƯỚC 4: HUMAN GATE (CHỐT CHẶN TRƯỚC KHI MERGE)
+- Khi toàn bộ task đều xanh (pass 100%), **KHÔNG ĐƯỢC tự ý merge code**.
+- Tạo một cổng kiểm duyệt (Gate) để chặn luồng và xin phê duyệt của người dùng:
+  \`\`\`bash
+  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Tất cả test đã xanh. Merge code vào nhánh chính chứ sếp?" --options '["yes","wait"]' --json
+  \`\`\`
+- Chỉ thực hiện merge code vào nhánh chính khi người dùng chọn phản hồi \`"yes"\`.
 RULE
 
 # ── Quản lý symlink thông minh: Tránh nạp trùng lặp context & bảo vệ file thật ──
