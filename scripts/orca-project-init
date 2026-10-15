@@ -88,6 +88,138 @@ choose_agent() {
   echo "   ➔ Đã chọn: $SELECTED_AGENT"
 }
 
+choose_model() {
+  local agent="$1"
+  local role_title="$2"
+  
+  SELECTED_MODEL=""
+  SELECTED_EFFORT=""
+  
+  local options=()
+  case "$agent" in
+    claude)
+      options=(
+        "claude-3-7-sonnet"
+        "claude-3-5-sonnet"
+        "claude-3-5-haiku"
+      )
+      ;;
+    codex)
+      options=(
+        "o3-mini"
+        "o1"
+        "gpt-4o"
+        "gpt-4o-mini"
+      )
+      ;;
+    kimi)
+      options=(
+        "k1.5"
+        "kimi-k3"
+      )
+      ;;
+    gemini|antigravity)
+      options=(
+        "gemini-2.5-pro"
+        "gemini-2.5-flash"
+        "gemini-2.0-flash"
+      )
+      ;;
+    cursor)
+      options=(
+        "claude-3-7-sonnet"
+        "claude-3-5-sonnet"
+        "gpt-4o"
+      )
+      ;;
+    opencode)
+      options=(
+        "deepseek-r1"
+        "deepseek-v3"
+        "claude-3-5-sonnet"
+      )
+      ;;
+    *)
+      options=()
+      ;;
+  esac
+
+  echo "👉 [Chọn Model] cho agent '$agent' ($role_title):"
+  if (( ${#options[@]} > 0 )); then
+    for i in {1..${#options[@]}}; do
+      local marker=""
+      [[ "$i" == 1 ]] && marker=" (khuyến nghị)"
+      echo "    $i) ${options[$i]}$marker"
+    done
+    local custom_idx=$(( ${#options[@]} + 1 ))
+    local default_idx=$(( ${#options[@]} + 2 ))
+    echo "    $custom_idx) Nhập model ID tùy chỉnh"
+    echo "    $default_idx) Dùng mặc định của Orca ADE"
+    printf "   Nhập số [1-$default_idx] (Enter = 1 [${options[1]}]): "
+    read -r m_choice
+    m_choice="${m_choice:-1}"
+    
+    if [[ "$m_choice" =~ ^[0-9]+$ ]] && (( m_choice >= 1 && m_choice <= ${#options[@]} )); then
+      SELECTED_MODEL="${options[$m_choice]}"
+    elif [[ "$m_choice" == "$custom_idx" ]]; then
+      printf "   Nhập model ID (ví dụ: claude-3-7-sonnet, gpt-4.5-preview): "
+      read -r custom_model
+      SELECTED_MODEL="$custom_model"
+    else
+      SELECTED_MODEL=""
+    fi
+  else
+    printf "   Nhập model ID (Enter = dùng mặc định của $agent): "
+    read -r custom_model
+    SELECTED_MODEL="$custom_model"
+  fi
+
+  if [[ -n "$SELECTED_MODEL" ]]; then
+    echo "   ➔ Đã chọn Model: $SELECTED_MODEL"
+    # Hỏi Reasoning Effort nếu model hỗ trợ
+    if [[ "$SELECTED_MODEL" =~ (o1|o3|r1|sonnet|thinking|reasoning) ]]; then
+      printf "   Mức độ suy luận (Reasoning Effort)? [1: low, 2: medium, 3: high, Enter = bỏ qua]: "
+      read -r eff_choice
+      case "$eff_choice" in
+        1|low) SELECTED_EFFORT="low" ;;
+        2|med|medium) SELECTED_EFFORT="medium" ;;
+        3|high) SELECTED_EFFORT="high" ;;
+        *) SELECTED_EFFORT="" ;;
+      esac
+      [[ -n "$SELECTED_EFFORT" ]] && echo "   ➔ Reasoning Effort: $SELECTED_EFFORT"
+    fi
+  else
+    echo "   ➔ Model: (mặc định Orca ADE)"
+  fi
+}
+
+fmt_agent_model() {
+  local agent="$1"
+  local model="$2"
+  local effort="$3"
+  local out="$agent"
+  if [[ -n "$model" ]]; then
+    out="$out ($model"
+    if [[ -n "$effort" ]]; then
+      out="$out, effort: $effort"
+    fi
+    out="$out)"
+  else
+    out="$out (model: default)"
+  fi
+  echo "$out"
+}
+
+fmt_md_cell() {
+  local agent="$1"
+  local model="$2"
+  if [[ -n "$model" ]]; then
+    echo "\`$agent\` ($model)"
+  else
+    echo "\`$agent\`"
+  fi
+}
+
 choose_count() {
   local role_title="$1"
   local default_count="$2"
@@ -165,6 +297,9 @@ echo "PHẦN 1: LEAD COORDINATOR (Nhạc trưởng điều phối)"
 echo "Nhiệm vụ: Lập Task DAG, quản lý Run, giao việc và điều phối các worker."
 choose_agent "Lead Coordinator" 2
 COORD_AGENT="$SELECTED_AGENT"
+choose_model "$COORD_AGENT" "Lead Coordinator"
+COORD_MODEL="$SELECTED_MODEL"
+COORD_EFFORT="$SELECTED_EFFORT"
 
 # ── 2. CỐT LÕI: Full-Stack Dev Team ──
 echo ""
@@ -173,6 +308,9 @@ echo "PHẦN 2: FULL-STACK DEVELOPERS (Nhóm Lập trình viên)"
 echo "Nhiệm vụ: Trực tiếp viết code, unit test trên các child worktree độc lập."
 choose_agent "Full-Stack Devs" 1
 DEV_AGENT="$SELECTED_AGENT"
+choose_model "$DEV_AGENT" "Full-Stack Devs"
+DEV_MODEL="$SELECTED_MODEL"
+DEV_EFFORT="$SELECTED_EFFORT"
 choose_count "Developer" 2
 DEV_COUNT="$SELECTED_COUNT"
 choose_utilities "1,2,5"
@@ -186,6 +324,9 @@ echo "PHẦN 3: QA & TEST ENGINEERS (Nhóm Kiểm thử chất lượng)"
 echo "Nhiệm vụ: Viết integration tests, kiểm tra edge cases và acceptance criteria."
 choose_agent "QA & Testing" 1
 QA_AGENT="$SELECTED_AGENT"
+choose_model "$QA_AGENT" "QA & Testing"
+QA_MODEL="$SELECTED_MODEL"
+QA_EFFORT="$SELECTED_EFFORT"
 choose_count "QA Tester" 1
 QA_COUNT="$SELECTED_COUNT"
 choose_utilities "1,2,5"
@@ -199,6 +340,9 @@ echo "PHẦN 4: BUG HUNTER & SECURITY AUDITOR (Nhóm Săn lỗi & Bảo mật)"
 echo "Nhiệm vụ: Quét lỗ hổng OWASP, race conditions, memory leaks, rò rỉ secret."
 choose_agent "Security & Bug Hunter" 3
 SEC_AGENT="$SELECTED_AGENT"
+choose_model "$SEC_AGENT" "Security & Bug Hunter"
+SEC_MODEL="$SELECTED_MODEL"
+SEC_EFFORT="$SELECTED_EFFORT"
 choose_count "Bug Hunter / Security" 1
 SEC_COUNT="$SELECTED_COUNT"
 choose_utilities "1,5"
@@ -212,11 +356,17 @@ echo "PHẦN 5: GIT & GITHUB/GITLAB LIFECYCLE ROLES"
 echo "5.1. PR Reviewer (Chuyên gia thẩm định Pull Request & Line-by-line Diff)"
 choose_agent "PR Reviewer" 2
 PR_AGENT="$SELECTED_AGENT"
+choose_model "$PR_AGENT" "PR Reviewer"
+PR_MODEL="$SELECTED_MODEL"
+PR_EFFORT="$SELECTED_EFFORT"
 
 echo ""
 echo "5.2. Git Issue Resolver (Chuyên gia xử lý bug được gán / assigned issues)"
 choose_agent "Git Issue Resolver" 1
 ISSUE_AGENT="$SELECTED_AGENT"
+choose_model "$ISSUE_AGENT" "Git Issue Resolver"
+ISSUE_MODEL="$SELECTED_MODEL"
+ISSUE_EFFORT="$SELECTED_EFFORT"
 
 # ── 6. SPECIALIZED EXTENSIONS ──
 echo ""
@@ -231,6 +381,9 @@ ENABLE_UI="$TOGGLE_RESULT"
 if [[ "$ENABLE_UI" == true ]]; then
   choose_agent "UI/UX Specialist" 2
   UI_AGENT="$SELECTED_AGENT"
+  choose_model "$UI_AGENT" "UI/UX Specialist"
+  UI_MODEL="$SELECTED_MODEL"
+  UI_EFFORT="$SELECTED_EFFORT"
 fi
 
 # 6.2 DevOps Specialist
@@ -241,6 +394,9 @@ ENABLE_DEVOPS="$TOGGLE_RESULT"
 if [[ "$ENABLE_DEVOPS" == true ]]; then
   choose_agent "DevOps Specialist" 3
   DEVOPS_AGENT="$SELECTED_AGENT"
+  choose_model "$DEVOPS_AGENT" "DevOps Specialist"
+  DEVOPS_MODEL="$SELECTED_MODEL"
+  DEVOPS_EFFORT="$SELECTED_EFFORT"
 fi
 
 # ── 7. Host Môi trường Thực thi ──
@@ -268,17 +424,17 @@ echo ""
 echo "┌──────────────────────────────────────────────────────────────────────────┐"
 echo "│                 TỔNG HỢP CẤU HÌNH ĐỘI NGŨ ORCA TOÀN DIỆN                 │"
 echo "├──────────────────────────────────────────────────────────────────────────┤"
-echo "│  Coordinator:     $COORD_AGENT (1 agent)"
-echo "│  Developers:      $DEV_AGENT ($DEV_COUNT agents song song) [$DEV_UTILS]"
-echo "│  QA Testers:      $QA_AGENT ($QA_COUNT agents song song) [$QA_UTILS]"
-echo "│  Security:        $SEC_AGENT ($SEC_COUNT agents song song) [$SEC_UTILS]"
-echo "│  PR Reviewer:     $PR_AGENT (Checkout PR, line-by-line diff, CI checks)"
-echo "│  Issue Resolver:  $ISSUE_AGENT (Checkout issue, auto-fix, commit & push)"
+echo "│  Coordinator:     $(fmt_agent_model "$COORD_AGENT" "$COORD_MODEL" "$COORD_EFFORT") (1 agent)"
+echo "│  Developers:      $(fmt_agent_model "$DEV_AGENT" "$DEV_MODEL" "$DEV_EFFORT") ($DEV_COUNT agents song song) [$DEV_UTILS]"
+echo "│  QA Testers:      $(fmt_agent_model "$QA_AGENT" "$QA_MODEL" "$QA_EFFORT") ($QA_COUNT agents song song) [$QA_UTILS]"
+echo "│  Security:        $(fmt_agent_model "$SEC_AGENT" "$SEC_MODEL" "$SEC_EFFORT") ($SEC_COUNT agents song song) [$SEC_UTILS]"
+echo "│  PR Reviewer:     $(fmt_agent_model "$PR_AGENT" "$PR_MODEL" "$PR_EFFORT")"
+echo "│  Issue Resolver:  $(fmt_agent_model "$ISSUE_AGENT" "$ISSUE_MODEL" "$ISSUE_EFFORT")"
 if [[ "$ENABLE_UI" == true ]]; then
-echo "│  UI/UX Designer:  $UI_AGENT (Design Mode, DOM/CSS inspection)"
+echo "│  UI/UX Designer:  $(fmt_agent_model "$UI_AGENT" "$UI_MODEL" "$UI_EFFORT")"
 fi
 if [[ "$ENABLE_DEVOPS" == true ]]; then
-echo "│  DevOps / Infra:  $DEVOPS_AGENT (Migrations, Docker/Orb, SSH Worktrees)"
+echo "│  DevOps / Infra:  $(fmt_agent_model "$DEVOPS_AGENT" "$DEVOPS_MODEL" "$DEVOPS_EFFORT")"
 fi
 echo "│  Execution Host:  $HOST_LABEL"
 echo "└──────────────────────────────────────────────────────────────────────────┘"
@@ -295,40 +451,56 @@ cat > "$TARGET_CONFIG" << JSON
   "projectPath": "$PROJECT_PATH",
   "executionHost": "$EXEC_HOST",
   "coordinator": {
-    "agent": "$COORD_AGENT"
+    "agent": "$COORD_AGENT",
+    "model": $([[ -n "$COORD_MODEL" ]] && echo "\"$COORD_MODEL\"" || echo "null"),
+    "effort": $([[ -n "$COORD_EFFORT" ]] && echo "\"$COORD_EFFORT\"" || echo "null")
   },
   "roles": {
     "developer": {
       "agent": "$DEV_AGENT",
+      "model": $([[ -n "$DEV_MODEL" ]] && echo "\"$DEV_MODEL\"" || echo "null"),
+      "effort": $([[ -n "$DEV_EFFORT" ]] && echo "\"$DEV_EFFORT\"" || echo "null"),
       "concurrency": $DEV_COUNT,
       "utilities": $DEV_UTILS_JSON
     },
     "qa": {
       "agent": "$QA_AGENT",
+      "model": $([[ -n "$QA_MODEL" ]] && echo "\"$QA_MODEL\"" || echo "null"),
+      "effort": $([[ -n "$QA_EFFORT" ]] && echo "\"$QA_EFFORT\"" || echo "null"),
       "concurrency": $QA_COUNT,
       "utilities": $QA_UTILS_JSON
     },
     "security": {
       "agent": "$SEC_AGENT",
+      "model": $([[ -n "$SEC_MODEL" ]] && echo "\"$SEC_MODEL\"" || echo "null"),
+      "effort": $([[ -n "$SEC_EFFORT" ]] && echo "\"$SEC_EFFORT\"" || echo "null"),
       "concurrency": $SEC_COUNT,
       "utilities": $SEC_UTILS_JSON
     },
     "prReviewer": {
       "agent": "$PR_AGENT",
+      "model": $([[ -n "$PR_MODEL" ]] && echo "\"$PR_MODEL\"" || echo "null"),
+      "effort": $([[ -n "$PR_EFFORT" ]] && echo "\"$PR_EFFORT\"" || echo "null"),
       "utilities": ["git-worktrees", "diff-viewer", "annotate-ai-diff"]
     },
     "issueResolver": {
       "agent": "$ISSUE_AGENT",
+      "model": $([[ -n "$ISSUE_MODEL" ]] && echo "\"$ISSUE_MODEL\"" || echo "null"),
+      "effort": $([[ -n "$ISSUE_EFFORT" ]] && echo "\"$ISSUE_EFFORT\"" || echo "null"),
       "utilities": ["git-worktrees", "issue-metadata", "commit-push"]
     },
     "uiSpecialist": {
       "enabled": $ENABLE_UI,
       "agent": "${UI_AGENT:-none}",
+      "model": $([[ -n "$UI_MODEL" ]] && echo "\"$UI_MODEL\"" || echo "null"),
+      "effort": $([[ -n "$UI_EFFORT" ]] && echo "\"$UI_EFFORT\"" || echo "null"),
       "utilities": ["browser-design-mode", "per-worktree-browser"]
     },
     "devopsSpecialist": {
       "enabled": $ENABLE_DEVOPS,
       "agent": "${DEVOPS_AGENT:-none}",
+      "model": $([[ -n "$DEVOPS_MODEL" ]] && echo "\"$DEVOPS_MODEL\"" || echo "null"),
+      "effort": $([[ -n "$DEVOPS_EFFORT" ]] && echo "\"$DEVOPS_EFFORT\"" || echo "null"),
       "utilities": ["ssh-remote-execution", "orca-per-workspace-env"]
     }
   }
@@ -337,8 +509,8 @@ JSON
 
 # Chuẩn bị các dòng bảng tùy chọn (tránh dòng trống làm vỡ bảng Markdown)
 EXTRA_TABLE_ROWS=""
-[[ "$ENABLE_UI" == true ]] && EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | \`$UI_AGENT\` | On-demand | Design Mode (Click-to-code), live inspection |"$'\n'
-[[ "$ENABLE_DEVOPS" == true ]] && EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **DevOps Specialist** | \`$DEVOPS_AGENT\` | On-demand | DB migrations, Docker/Orb, SSH worktrees |"$'\n'
+[[ "$ENABLE_UI" == true ]] && EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | $(fmt_md_cell "$UI_AGENT" "$UI_MODEL") | On-demand | Design Mode (Click-to-code), live inspection |"$'\n'
+[[ "$ENABLE_DEVOPS" == true ]] && EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **DevOps Specialist** | $(fmt_md_cell "$DEVOPS_AGENT" "$DEVOPS_MODEL") | On-demand | DB migrations, Docker/Orb, SSH worktrees |"$'\n'
 
 # ── Ghi file Directive GEMINI.md (Token-Optimized) ──
 cat > "$TARGET_RULE" << RULE
@@ -352,12 +524,12 @@ cat > "$TARGET_RULE" << RULE
 
 | Role | Agent & Model | Concurrency | Capabilities & Orca Utilities |
 | :--- | :--- | :--- | :--- |
-| **Lead Coordinator** | \`$COORD_AGENT\` | 1 | Task DAG, Decision Gates, Release |
-| **Full-Stack Devs** | \`$DEV_AGENT\` | $DEV_COUNT parallel | Child worktrees, implementation, unit tests |
-| **QA & Testers** | \`$QA_AGENT\` | $QA_COUNT parallel | Integration test suites, acceptance verification |
-| **Security & Bug Hunter** | \`$SEC_AGENT\` | $SEC_COUNT parallel | OWASP audit, security scan, diff review |
-| **PR Reviewer** | \`$PR_AGENT\` | On-demand | PR checkout (\`--pr\`), diff audit (\`open-changed\`) |
-| **Issue Resolver** | \`$ISSUE_AGENT\` | On-demand | Issue checkout (\`--issue\`), auto-fix, commit & push |
+| **Lead Coordinator** | $(fmt_md_cell "$COORD_AGENT" "$COORD_MODEL") | 1 | Task DAG, Decision Gates, Release |
+| **Full-Stack Devs** | $(fmt_md_cell "$DEV_AGENT" "$DEV_MODEL") | $DEV_COUNT parallel | Child worktrees, implementation, unit tests |
+| **QA & Testers** | $(fmt_md_cell "$QA_AGENT" "$QA_MODEL") | $QA_COUNT parallel | Integration test suites, acceptance verification |
+| **Security & Bug Hunter** | $(fmt_md_cell "$SEC_AGENT" "$SEC_MODEL") | $SEC_COUNT parallel | OWASP audit, security scan, diff review |
+| **PR Reviewer** | $(fmt_md_cell "$PR_AGENT" "$PR_MODEL") | On-demand | PR checkout (\`--pr\`), diff audit (\`open-changed\`) |
+| **Issue Resolver** | $(fmt_md_cell "$ISSUE_AGENT" "$ISSUE_MODEL") | On-demand | Issue checkout (\`--issue\`), auto-fix, commit & push |
 ${EXTRA_TABLE_ROWS}
 - **Execution Host:** \`$EXEC_HOST\` ($HOST_LABEL) | **Orca CLI:** \`/usr/local/bin/orca\`
 
