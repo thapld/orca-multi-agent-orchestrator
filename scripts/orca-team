@@ -63,6 +63,20 @@ KNOWN_AGENTS = [
 
 def find_project_root():
     curr = Path.cwd().resolve()
+    # 1. Tra cứu Git common-dir nếu đang nằm trong child worktree
+    try:
+        import subprocess
+        res = subprocess.run(["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True, cwd=str(curr))
+        if res.returncode == 0 and res.stdout.strip():
+            raw_git = Path(res.stdout.strip())
+            common_git = raw_git if raw_git.is_absolute() else (curr / raw_git).resolve()
+            main_root = common_git.parent
+            if (main_root / "orca-team.json").exists() or (main_root / ".agents" / "GEMINI.md").exists():
+                return main_root
+    except Exception:
+        pass
+
+    # 2. Quét ngược lên các thư mục cha thông thường
     for parent in [curr] + list(curr.parents):
         if (parent / "orca-team.json").exists() or (parent / ".agents" / "GEMINI.md").exists():
             return parent
@@ -395,12 +409,18 @@ def cmd_link(root: Path, args: list):
         print("   • orca-team link clean : Dọn dẹp link nếu chỉ dùng Antigravity\n")
 
 def cmd_get(root: Path, config: dict, args: list):
-    if not config or not args:
+    if not config:
+        print("❌ Không tìm thấy orca-team.json", file=sys.stderr)
+        sys.exit(1)
+    if not args:
+        print("❌ Thiếu role cần lấy thông tin", file=sys.stderr)
         sys.exit(1)
 
     role_raw = args[0].lower()
     role_key = ROLE_ALIASES.get(role_raw, role_raw)
     target = config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key, {})
+    if not target:
+        sys.exit(1)
 
     field = "agent"
     if "--field" in args:
@@ -412,11 +432,20 @@ def cmd_get(root: Path, config: dict, args: list):
         print(json.dumps(target))
     else:
         val = target.get(field)
-        print(val if val is not None else "")
+        if val is not None:
+            print(val)
+        else:
+            sys.exit(1)
 
-def cmd_watchdog(root: Path):
+def cmd_watchdog(root: Path, args: list = None):
     import subprocess
+    args = args or []
+    auto_unblock = any(a in args for a in ["--unblock", "--fix", "-y"])
+
     print("\n🩺 [ORCA AGENT WATCHDOG] Đang quét trạng thái toàn bộ worker...")
+    if auto_unblock:
+        print("⚡ Chế độ Auto-Unblock: Đang tự động gửi 'y' mở khóa các worker bị kẹt...")
+
     orca_bin = "/usr/local/bin/orca"
     if not os.path.exists(orca_bin):
         print(f"❌ Không tìm thấy orca CLI tại {orca_bin}", file=sys.stderr)
@@ -459,8 +488,16 @@ def cmd_watchdog(root: Path):
                         s_data = json.loads(show_res.stdout)
                         obs = s_data.get("observation", {})
                         if obs.get("agentWait"):
-                            note = "⚠️ ĐANG KẸT CÂU HỎI XÁC NHẬN [Y/N]"
-                            hung_count += 1
+                            if auto_unblock and term != "-":
+                                send_res = subprocess.run([orca_bin, "terminal", "send", "--terminal", term, "--text", "y", "--enter"], capture_output=True, text=True)
+                                if send_res.returncode == 0:
+                                    note = "🔓 ĐÃ TỰ ĐỘNG GỬI [y] MỞ KHÓA"
+                                else:
+                                    note = "⚠️ KẸT CÂU HỎI (Mở khóa lỗi)"
+                                    hung_count += 1
+                            else:
+                                note = "⚠️ ĐANG KẸT CÂU HỎI XÁC NHẬN [Y/N]"
+                                hung_count += 1
                     except:
                         pass
 
@@ -479,7 +516,7 @@ def cmd_watchdog(root: Path):
         print("-" * 82)
         if hung_count > 0:
             print(f"⚠️ Phát hiện {hung_count} worker đang bị treo chờ input!")
-            print("👉 Để tự động duyệt [y]: orca terminal send --terminal <handle> --text 'y' --enter")
+            print("👉 Tự động mở khóa tất cả: orca-team watchdog --unblock")
             print("👉 Để dừng worker cạn token: orca orchestration worker-stop --dispatch <id>\n")
         else:
             print("✅ Toàn bộ worker đều hoạt động trơn tru.\n")
@@ -498,7 +535,7 @@ def main():
     elif args[0] == "get":
         cmd_get(root, config, args[1:])
     elif args[0] in ["watchdog", "workers", "health"]:
-        cmd_watchdog(root)
+        cmd_watchdog(root, args[1:])
     elif args[0] in ["link", "discovery"]:
         cmd_link(root, args[1:])
     elif args[0] in ["agents", "list-agents"]:

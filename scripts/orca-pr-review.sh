@@ -5,7 +5,11 @@
 set -e
 
 PR_NUM="${1:?Thiếu số PR. Dùng: $0 <pr-number> [agent]}"
-AGENT="${2:-claude}"
+CONFIG_AGENT=""
+if command -v orca-team &>/dev/null; then
+  CONFIG_AGENT=$(orca-team get pr 2>/dev/null || true)
+fi
+AGENT="${2:-${CONFIG_AGENT:-claude}}"
 WORKTREE_NAME="review-pr-$PR_NUM"
 
 echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_NUM bằng agent: $AGENT..."

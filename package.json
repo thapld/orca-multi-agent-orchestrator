@@ -7,7 +7,10 @@
     "orca-multi-agent-orchestrator": "./scripts/orca-project-init",
     "orca-project-init": "./scripts/orca-project-init",
     "orca-init": "./scripts/orca-project-init",
-    "orca-team": "./scripts/orca-team"
+    "orca-team": "./scripts/orca-team",
+    "orca-dispatch": "./scripts/orca-dispatch-task.sh",
+    "orca-hotfix": "./scripts/orca-issue-hotfix.sh",
+    "orca-review": "./scripts/orca-pr-review.sh"
   },
   "scripts": {
     "init": "./scripts/orca-project-init"

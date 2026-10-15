@@ -4,9 +4,27 @@
 
 set -e
 
-TASK_TITLE="${1:?Thiếu tiêu đề task. Dùng: $0 <title> <agent> <spec>}"
-AGENT="${2:-kimi}"
-SPEC="${3:?Thiếu mô tả spec. Dùng: $0 <title> <agent> <spec>}"
+TASK_TITLE="${1:?Thiếu tiêu đề task. Dùng: $0 <title> [agent|role] <spec>}"
+
+if [[ $# -eq 2 ]]; then
+  SPEC="$2"
+  REQ_AGENT=""
+else
+  REQ_AGENT="${2:-}"
+  SPEC="${3:?Thiếu mô tả spec. Dùng: $0 <title> [agent|role] <spec>}"
+fi
+
+# Tự động lấy agent của dev từ orca-team nếu không truyền agent cụ thể
+CONFIG_AGENT=""
+if command -v orca-team &>/dev/null; then
+  ROLE_QUERY="${REQ_AGENT:-dev}"
+  CONFIG_AGENT=$(orca-team get "$ROLE_QUERY" 2>/dev/null || true)
+fi
+
+AGENT="${CONFIG_AGENT:-${REQ_AGENT:-kimi}}"
+if [[ -n "$REQ_AGENT" && "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot)$ ]]; then
+  AGENT="$REQ_AGENT"
+fi
 
 echo "🐋 [Orca Dispatch] Đang khởi tạo task: '$TASK_TITLE' cho agent: $AGENT..."
 

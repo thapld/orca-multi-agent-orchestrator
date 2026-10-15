@@ -127,9 +127,38 @@ orca-team set devops --disable
 
 # 6. Chế độ tương tác từng bước:
 orca-team set dev
+
+# 7. Quản lý Discovery Links cho nhiều AI CLI (Claude / Antigravity / Codex):
+orca-team link all      # Kích hoạt CLAUDE.md và AGENTS.md để mở bất kỳ AI CLI nào làm Leader
+orca-team link clean    # Dọn dẹp symlink thừa nếu chỉ dùng Antigravity
+orca-team link status   # Xem trạng thái liên kết
+
+# 8. Watchdog kiểm tra & tự động giải cứu worker bị kẹt:
+orca-team watchdog           # Quét trạng thái, phát hiện worker cạn token hoặc kẹt prompt [y/n]
+orca-team watchdog --unblock # Tự động gửi 'y' mở khóa toàn bộ worker đang chờ câu hỏi
 ```
 
 > **Ghi chú:** Khi chạy `orca-team set`, công cụ sẽ **tự động cập nhật `orca-team.json` đồng thời đồng bộ lại bảng vai trò trong `.agents/GEMINI.md`**, giúp Leader agent lập tức nhận biết cấu hình mới mà không cần khởi động lại.
+
+---
+
+## ⚡ Các Lệnh Dispatch Tác Vụ Nhanh (Anti-Token-Waste)
+
+Các script tiện ích đã được cấu hình sẵn timeout 5 phút (`--timeout-ms 300000`) và tự động tra cứu đúng Agent từ `orca-team.json`:
+
+```bash
+# Giao việc cho Developer (tự động dùng agent đã config cho dev):
+orca-dispatch "Tạo module Auth" "Viết JWT login/refresh token có kiểm thử đầy đủ"
+
+# Hoặc chỉ định rõ agent khác nếu muốn:
+orca-dispatch "Tạo module Auth" claude "Viết JWT login..."
+
+# Mở worktree fix Issue GitHub song song (không ảnh hưởng nhánh chính):
+orca-hotfix 142
+
+# Mở worktree review line-by-line diff PR GitHub độc lập:
+orca-review 89
+```
 
 ---
 

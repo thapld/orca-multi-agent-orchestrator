@@ -5,7 +5,11 @@
 set -e
 
 ISSUE_NUM="${1:?Thiếu số Issue. Dùng: $0 <issue-number> [agent]}"
-AGENT="${2:-kimi}"
+CONFIG_AGENT=""
+if command -v orca-team &>/dev/null; then
+  CONFIG_AGENT=$(orca-team get issue 2>/dev/null || true)
+fi
+AGENT="${2:-${CONFIG_AGENT:-kimi}}"
 WORKTREE_NAME="hotfix-issue-$ISSUE_NUM"
 
 echo "🐋 [Orca Hotfix] Đang khởi tạo worktree song song cho Issue #$ISSUE_NUM bằng agent: $AGENT..."
