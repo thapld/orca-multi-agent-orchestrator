@@ -7,6 +7,10 @@ mkdir -p "$INSTALL_DIR"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "-u" ]]; then
+  exec "$SCRIPT_DIR/uninstall.sh"
+fi
+
 echo "🐋 [Orca Orchestrator Installer] Đang cài đặt vào $INSTALL_DIR..."
 
 link_or_copy() {

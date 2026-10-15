@@ -162,6 +162,33 @@ orca-review 89
 
 ---
 
+## 🗑️ Hướng Dẫn Gỡ Bỏ (Uninstall)
+
+### 1. Gỡ bỏ cấu hình Orchestrator khỏi một project (Khôi phục dự án về ban đầu)
+Nếu bạn không còn muốn dùng multi-agent trong một repo cụ thể:
+```bash
+# Cách 1: Đứng tại project và chạy lệnh orca-team:
+orca-team uninstall
+
+# Cách 2: Chạy trực tiếp qua npx hoặc script init (không cần cài đặt):
+npx github:thapld/orca-multi-agent-orchestrator --uninstall /path/to/project
+# hoặc:
+orca-project-init --uninstall /path/to/project
+```
+> Lệnh này sẽ tự động xóa sạch `orca-team.json`, `.agents/GEMINI.md`, các symlink `CLAUDE.md`, `AGENTS.md` và khôi phục project về nguyên trạng sạch sẽ ban đầu.
+
+### 2. Gỡ cài đặt toàn bộ công cụ CLI khỏi máy (System Uninstall)
+Nếu bạn muốn xóa sạch toàn bộ các lệnh CLI (`orca-team`, `orca-project-init`, `orca-dispatch`, `orca-hotfix`, `orca-review`) khỏi máy tính (`~/.local/bin`):
+```bash
+# Chạy script gỡ bỏ trong repo:
+./uninstall.sh
+
+# Hoặc qua install.sh:
+./install.sh --uninstall
+```
+
+---
+
 ## 📖 Đọc Thêm
 
 * [Kiến Trúc Hệ Thống (Architecture)](./docs/architecture.md)

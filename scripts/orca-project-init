@@ -5,6 +5,34 @@
 
 set -e
 
+if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "--clean" ]]; then
+  TARGET_DIR="${2:-.}"
+  TARGET_PATH=$(cd "$TARGET_DIR" 2>/dev/null && pwd || echo "$TARGET_DIR")
+  echo "🐋 [Orca Orchestrator Uninstaller] Đang gỡ bỏ cấu hình khỏi: $TARGET_PATH..."
+  
+  if [[ -f "$TARGET_PATH/orca-team.json" ]]; then
+    rm -f "$TARGET_PATH/orca-team.json"
+    echo "  🗑️  Đã xóa: orca-team.json"
+  fi
+  if [[ -L "$TARGET_PATH/CLAUDE.md" ]]; then
+    rm -f "$TARGET_PATH/CLAUDE.md"
+    echo "  🗑️  Đã xóa symlink: CLAUDE.md"
+  fi
+  if [[ -L "$TARGET_PATH/AGENTS.md" ]]; then
+    rm -f "$TARGET_PATH/AGENTS.md"
+    echo "  🗑️  Đã xóa symlink: AGENTS.md"
+  fi
+  if [[ -f "$TARGET_PATH/.agents/GEMINI.md" ]]; then
+    if grep -q "Orca Multi-Agent" "$TARGET_PATH/.agents/GEMINI.md" 2>/dev/null; then
+      rm -f "$TARGET_PATH/.agents/GEMINI.md"
+      echo "  🗑️  Đã xóa: .agents/GEMINI.md"
+      rmdir "$TARGET_PATH/.agents" 2>/dev/null || true
+    fi
+  fi
+  echo "🎉 Dự án đã được khôi phục về trạng thái ban đầu sạch sẽ!"
+  exit 0
+fi
+
 PROJECT_DIR="${1:-.}"
 PROJECT_PATH=$(cd "$PROJECT_DIR" 2>/dev/null && pwd || echo "$PROJECT_DIR")
 AGENTS_DIR="$PROJECT_PATH/.agents"

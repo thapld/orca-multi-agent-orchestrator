@@ -7,6 +7,9 @@ Usage:
   orca-team [status|list]
   orca-team set <role> [--agent <id>] [--model <id>] [--effort <low|medium|high>] [--concurrency <n>] [--enable|--disable]
   orca-team get <role> [--field agent|model|effort|concurrency]
+  orca-team link [all|clean|status]
+  orca-team watchdog [--unblock]
+  orca-team uninstall [-y|--force]
   orca-team agents
 """
 
@@ -408,6 +411,64 @@ def cmd_link(root: Path, args: list):
         print("   • orca-team link all   : Kích hoạt cả 2 link để mở tự do Claude/Codex")
         print("   • orca-team link clean : Dọn dẹp link nếu chỉ dùng Antigravity\n")
 
+def cmd_uninstall_project(root: Path, args: list):
+    """Gỡ bỏ toàn bộ cấu hình Orchestrator khỏi project hiện tại."""
+    print(f"\n⚠️  [ORCA UNINSTALL PROJECT] Bạn sắp gỡ bỏ cấu hình Multi-Agent Orchestrator khỏi:")
+    print(f"   📁 {root}")
+    
+    force = any(a in args for a in ["-f", "--force", "-y", "--yes"])
+    if not force:
+        try:
+            ans = input("   ❓ Bạn có chắc chắn muốn xóa cấu hình Orchestrator khỏi project này? [y/N]: ")
+            if ans.strip().lower() not in ["y", "yes"]:
+                print("   🚫 Đã hủy bỏ thao tác gỡ cài đặt.\n")
+                return
+        except (KeyboardInterrupt, EOFError):
+            print("\n   🚫 Đã hủy thao tác.\n")
+            return
+
+    deleted = []
+    # 1. Xóa symlinks
+    for f in ["CLAUDE.md", "AGENTS.md"]:
+        target = root / f
+        if target.is_symlink():
+            target.unlink(missing_ok=True)
+            deleted.append(f)
+        elif target.exists():
+            try:
+                if "Orca Multi-Agent" in target.read_text(encoding="utf-8", errors="ignore"):
+                    target.unlink(missing_ok=True)
+                    deleted.append(f)
+            except:
+                pass
+
+    # 2. Xóa orca-team.json
+    cfg = root / "orca-team.json"
+    if cfg.exists():
+        cfg.unlink(missing_ok=True)
+        deleted.append("orca-team.json")
+
+    # 3. Xóa .agents/GEMINI.md nếu do orchestrator tạo ra
+    gemini_md = root / ".agents" / "GEMINI.md"
+    if gemini_md.exists():
+        try:
+            if "Orca Multi-Agent" in gemini_md.read_text(encoding="utf-8", errors="ignore"):
+                gemini_md.unlink(missing_ok=True)
+                deleted.append(".agents/GEMINI.md")
+                agents_dir = root / ".agents"
+                if agents_dir.exists() and not any(agents_dir.iterdir()):
+                    agents_dir.rmdir()
+                    deleted.append(".agents/ (thư mục rỗng)")
+        except:
+            pass
+
+    print("\n🎉 Đã gỡ bỏ thành công cấu hình Orchestrator:")
+    for d in deleted:
+        print(f"   🗑️  Đã xóa: {d}")
+    if not deleted:
+        print("   ℹ️ Không có file cấu hình nào cần xóa.")
+    print("✨ Dự án đã được khôi phục về trạng thái ban đầu sạch sẽ.\n")
+
 def cmd_get(root: Path, config: dict, args: list):
     if not config:
         print("❌ Không tìm thấy orca-team.json", file=sys.stderr)
@@ -538,6 +599,8 @@ def main():
         cmd_watchdog(root, args[1:])
     elif args[0] in ["link", "discovery"]:
         cmd_link(root, args[1:])
+    elif args[0] in ["uninstall", "remove", "clean-all", "purge"]:
+        cmd_uninstall_project(root, args[1:])
     elif args[0] in ["agents", "list-agents"]:
         print("🐋 Các Agent chính thức được Orca ADE hỗ trợ:")
         for ag in KNOWN_AGENTS:
