@@ -63,36 +63,46 @@ AVAILABLE_AGENTS=(
   "copilot"
 )
 
-print_agents() {
-  local default_idx="$1"
-  for i in {1..${#AVAILABLE_AGENTS[@]}}; do
-    local marker=""
-    [[ "$i" == "$default_idx" ]] && marker=" (khuyến nghị)"
-    echo "    $i) ${AVAILABLE_AGENTS[$i]}$marker"
-  done
-}
-
-choose_agent() {
-  local role_title="$1"
-  local default_idx="$2"
-  echo ""
-  echo "👉 [Chọn Agent] cho: $role_title"
-  print_agents "$default_idx"
-  printf "   Nhập số [1-${#AVAILABLE_AGENTS[@]}] (Enter = $default_idx [${AVAILABLE_AGENTS[$default_idx]}]): "
-  read -r choice
-  choice="${choice:-$default_idx}"
-  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#AVAILABLE_AGENTS[@]} )); then
-    choice=$default_idx
-  fi
-  SELECTED_AGENT="${AVAILABLE_AGENTS[$choice]}"
-  echo "   ➔ Đã chọn: $SELECTED_AGENT"
-}
-
 SCRIPT_DIR="${0:A:h}"
 ORCA_TEAM_BIN="$SCRIPT_DIR/orca-team"
 if [[ ! -x "$ORCA_TEAM_BIN" ]] && command -v orca-team >/dev/null 2>&1; then
   ORCA_TEAM_BIN="$(command -v orca-team)"
 fi
+
+choose_agent() {
+  local role_title="$1"
+  local default_idx="${2:-5}"
+  local menu_items=()
+  for i in {1..${#AVAILABLE_AGENTS[@]}}; do
+    local ag="${AVAILABLE_AGENTS[$i]}"
+    local marker=""
+    [[ "$i" == "$default_idx" ]] && marker=" ⭐ (khuyến nghị)"
+    menu_items+=("$ag$marker")
+  done
+
+  if [[ -x "$ORCA_TEAM_BIN" ]]; then
+    local chosen_idx
+    chosen_idx=$(python3 "$ORCA_TEAM_BIN" select \
+      --title "👉 [Chọn Agent] cho: $role_title" \
+      --options "${menu_items[@]}" \
+      --default-idx "$((default_idx - 1))" \
+      --return-idx)
+    if [[ "$chosen_idx" =~ ^[0-9]+$ ]] && (( chosen_idx >= 1 && chosen_idx <= ${#AVAILABLE_AGENTS[@]} )); then
+      SELECTED_AGENT="${AVAILABLE_AGENTS[$chosen_idx]}"
+    else
+      SELECTED_AGENT="${AVAILABLE_AGENTS[$default_idx]}"
+    fi
+  else
+    echo "👉 [Chọn Agent] cho: $role_title"
+    for i in {1..${#AVAILABLE_AGENTS[@]}}; do
+      echo "    $i) ${AVAILABLE_AGENTS[$i]}"
+    done
+    printf "   Nhập số [1-${#AVAILABLE_AGENTS[@]}] (Enter = $default_idx [${AVAILABLE_AGENTS[$default_idx]}]): "
+    read -r choice
+    choice="${choice:-$default_idx}"
+    SELECTED_AGENT="${AVAILABLE_AGENTS[$choice]}"
+  fi
+}
 
 choose_model() {
   local agent="$1"
@@ -130,40 +140,50 @@ choose_model() {
     fi
   fi
 
-  echo "👉 [Chọn Model] cho agent '$agent' ($role_title) — Nguồn: $source_label:"
   if (( ${#model_ids[@]} > 0 )); then
+    local menu_items=()
     for i in {1..${#model_ids[@]}}; do
       local marker=""
       [[ "$i" == "$rec_model_idx" ]] && marker=" ⭐ (khuyến nghị cho $role_title)"
       local m_id="${model_ids[$i]}"
       local m_lbl="${model_labels[$i]}"
       if [[ "$m_lbl" != "$m_id" && -n "$m_lbl" ]]; then
-        printf "   %2d) %-28s — %s%s\n" "$i" "$m_id" "$m_lbl" "$marker"
+        menu_items+=("$m_id — $m_lbl$marker")
       else
-        printf "   %2d) %s%s\n" "$i" "$m_id" "$marker"
+        menu_items+=("$m_id$marker")
       fi
     done
     local custom_idx=$(( ${#model_ids[@]} + 1 ))
     local default_idx=$(( ${#model_ids[@]} + 2 ))
-    printf "   %2d) Nhập model ID tùy chỉnh\n" "$custom_idx"
-    printf "   %2d) Dùng mặc định của Orca ADE\n" "$default_idx"
-    printf "   Nhập số [1-$default_idx] (Enter = $rec_model_idx [${model_ids[$rec_model_idx]}]): "
-    read -r m_choice
-    m_choice="${m_choice:-$rec_model_idx}"
-    
-    if [[ "$m_choice" =~ ^[0-9]+$ ]] && (( m_choice >= 1 && m_choice <= ${#model_ids[@]} )); then
-      SELECTED_MODEL="${model_ids[$m_choice]}"
-      chosen_baked_effort="${model_baked_efforts[$m_choice]}"
-      chosen_efforts_csv="${model_efforts_csv[$m_choice]}"
-    elif [[ "$m_choice" == "$custom_idx" ]]; then
+    menu_items+=("Nhập model ID tùy chỉnh...")
+    menu_items+=("Dùng mặc định của Orca ADE")
+
+    local chosen_idx
+    if [[ -x "$ORCA_TEAM_BIN" ]]; then
+      chosen_idx=$(python3 "$ORCA_TEAM_BIN" select \
+        --title "👉 [Chọn Model] cho agent '$agent' ($role_title) — Nguồn: $source_label" \
+        --options "${menu_items[@]}" \
+        --default-idx "$((rec_model_idx - 1))" \
+        --return-idx)
+    else
+      for i in {1..${#menu_items[@]}}; do
+        echo "   $i) ${menu_items[$i]}"
+      done
+      printf "   Nhập số (Enter = $rec_model_idx): "
+      read -r chosen_idx
+      chosen_idx="${chosen_idx:-$rec_model_idx}"
+    fi
+
+    if [[ "$chosen_idx" =~ ^[0-9]+$ ]] && (( chosen_idx >= 1 && chosen_idx <= ${#model_ids[@]} )); then
+      SELECTED_MODEL="${model_ids[$chosen_idx]}"
+      chosen_baked_effort="${model_baked_efforts[$chosen_idx]}"
+      chosen_efforts_csv="${model_efforts_csv[$chosen_idx]}"
+    elif [[ "$chosen_idx" == "$custom_idx" ]]; then
       printf "   Nhập model ID tùy chỉnh: "
       read -r custom_model
       SELECTED_MODEL="$custom_model"
-    elif [[ "$m_choice" == "$default_idx" ]]; then
-      SELECTED_MODEL=""
     else
-      # Cho phép gõ trực tiếp tên model ID
-      SELECTED_MODEL="$m_choice"
+      SELECTED_MODEL=""
     fi
   else
     printf "   ⚠️ Không tìm thấy danh sách model động từ CLI của '$agent'. Nhập model ID (Enter = mặc định): "
@@ -179,27 +199,36 @@ choose_model() {
 
     if [[ -n "$chosen_baked_effort" ]]; then
       SELECTED_EFFORT="$chosen_baked_effort"
-      echo "   ➔ Đã chọn Model: $SELECTED_MODEL (Reasoning Effort tích hợp: $SELECTED_EFFORT)"
     else
-      echo "   ➔ Đã chọn Model: $SELECTED_MODEL"
       if [[ -n "$chosen_efforts_csv" || "$SELECTED_MODEL" =~ (opus|argon|flash|gemini|o1|o3|gpt-5|r1|sonnet|fable|haiku|k1|k3|glm|thinking|reasoning) ]]; then
-        local eff_hint="${chosen_efforts_csv:-low,medium,high}"
-        printf "   Mức độ suy luận (Reasoning Effort: $eff_hint)? [1: low, 2: medium, 3: high, 4: none] (Enter = $default_eff): "
-        read -r eff_choice
-        eff_choice="${eff_choice:-$default_eff}"
-        case "$eff_choice" in
-          1|low) SELECTED_EFFORT="low" ;;
-          2|med|medium) SELECTED_EFFORT="medium" ;;
-          3|high) SELECTED_EFFORT="high" ;;
-          4|none|skip) SELECTED_EFFORT="" ;;
-          xhigh|max) SELECTED_EFFORT="$eff_choice" ;;
+        local eff_menu=("high (khuyến nghị suy luận cao)" "medium" "low" "none (tắt reasoning)")
+        local def_eff_idx=0
+        [[ "$default_eff" == "medium" ]] && def_eff_idx=1
+        [[ "$default_eff" == "low" ]] && def_eff_idx=2
+        [[ "$default_eff" == "none" ]] && def_eff_idx=3
+
+        local eff_choice_idx
+        if [[ -x "$ORCA_TEAM_BIN" ]]; then
+          eff_choice_idx=$(python3 "$ORCA_TEAM_BIN" select \
+            --title "👉 Mức độ suy luận (Reasoning Effort) cho model '$SELECTED_MODEL':" \
+            --options "${eff_menu[@]}" \
+            --default-idx "$def_eff_idx" \
+            --return-idx)
+        else
+          printf "   Mức độ suy luận? [1: high, 2: medium, 3: low, 4: none] (Enter = $default_eff): "
+          read -r eff_choice_idx
+          eff_choice_idx="${eff_choice_idx:-$((def_eff_idx + 1))}"
+        fi
+
+        case "$eff_choice_idx" in
+          1) SELECTED_EFFORT="high" ;;
+          2) SELECTED_EFFORT="medium" ;;
+          3) SELECTED_EFFORT="low" ;;
+          4) SELECTED_EFFORT="" ;;
           *) SELECTED_EFFORT="$default_eff" ;;
         esac
-        [[ -n "$SELECTED_EFFORT" ]] && echo "   ➔ Reasoning Effort: $SELECTED_EFFORT"
       fi
     fi
-  else
-    echo "   ➔ Model: (mặc định Orca ADE)"
   fi
 }
 
@@ -232,15 +261,30 @@ fmt_md_cell() {
 
 choose_count() {
   local role_title="$1"
-  local default_count="$2"
-  printf "   Nhập số lượng agent song song cho $role_title [1-5] (Enter = $default_count): "
-  read -r count
-  count="${count:-$default_count}"
-  if ! [[ "$count" =~ ^[1-5]$ ]]; then
-    count=$default_count
+  local default_count="${2:-1}"
+  local count_options=(
+    "1 agent"
+    "2 agents (khuyến nghị song song)"
+    "3 agents"
+    "4 agents"
+    "5 agents"
+  )
+  local def_i=$(( default_count - 1 ))
+  [[ $def_i -lt 0 || $def_i -gt 4 ]] && def_i=0
+
+  if [[ -x "$ORCA_TEAM_BIN" ]]; then
+    local chosen_i
+    chosen_i=$(python3 "$ORCA_TEAM_BIN" select \
+      --title "👉 Chọn số lượng agent song song cho $role_title:" \
+      --options "${count_options[@]}" \
+      --default-idx "$def_i" \
+      --return-idx)
+    SELECTED_COUNT="${chosen_i:-$default_count}"
+  else
+    printf "   Nhập số lượng agent song song cho $role_title [1-5] (Enter = $default_count): "
+    read -r count
+    SELECTED_COUNT="${count:-$default_count}"
   fi
-  SELECTED_COUNT="$count"
-  echo "   ➔ Số lượng: $SELECTED_COUNT agent(s)"
 }
 
 choose_utilities() {
@@ -274,14 +318,35 @@ utils_to_json() {
 
 ask_toggle() {
   local feature_name="$1"
-  local default_val="$2"
-  printf "   Kích hoạt $feature_name? (Y/n, Enter = $default_val): "
-  read -r ans
-  ans="${ans:-$default_val}"
-  if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
-    TOGGLE_RESULT=true
+  local default_val="${2:-y}"
+  local toggle_options=(
+    "Có (Kích hoạt $feature_name)"
+    "Không (Tắt $feature_name)"
+  )
+  local def_i=0
+  [[ "$default_val" == "n" || "$default_val" == "N" ]] && def_i=1
+
+  if [[ -x "$ORCA_TEAM_BIN" ]]; then
+    local ans_idx
+    ans_idx=$(python3 "$ORCA_TEAM_BIN" select \
+      --title "👉 Bạn có muốn kích hoạt vai trò mở rộng $feature_name?" \
+      --options "${toggle_options[@]}" \
+      --default-idx "$def_i" \
+      --return-idx)
+    if [[ "$ans_idx" == "1" ]]; then
+      TOGGLE_RESULT=true
+    else
+      TOGGLE_RESULT=false
+    fi
   else
-    TOGGLE_RESULT=false
+    printf "   Kích hoạt $feature_name? (Y/n, Enter = $default_val): "
+    read -r ans
+    ans="${ans:-$default_val}"
+    if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+      TOGGLE_RESULT=true
+    else
+      TOGGLE_RESULT=false
+    fi
   fi
 }
 
@@ -293,11 +358,18 @@ echo ""
 echo "📍 Thư mục dự án: $PROJECT_PATH"
 
 if [[ -f "$TARGET_RULE" ]]; then
-  echo ""
-  echo "⚠️  Đã tồn tại cấu hình $TARGET_RULE."
-  printf "Bạn có muốn cấu hình lại và ghi đè? (y/N): "
-  read -r overwrite
-  [[ "$overwrite" != "y" && "$overwrite" != "Y" ]] && echo "Đã huỷ." && exit 0
+  if [[ -x "$ORCA_TEAM_BIN" ]]; then
+    ow_choice=$(python3 "$ORCA_TEAM_BIN" select \
+      --title "⚠️ Đã tồn tại cấu hình $TARGET_RULE. Bạn muốn làm gì?" \
+      --options "Cấu hình lại và ghi đè" "Hủy bỏ và giữ nguyên cấu hình cũ" \
+      --default-idx 0 \
+      --return-idx)
+    [[ "$ow_choice" != "1" ]] && echo "Đã huỷ." && exit 0
+  else
+    printf "Bạn có muốn cấu hình lại và ghi đè? (y/N): "
+    read -r overwrite
+    [[ "$overwrite" != "y" && "$overwrite" != "Y" ]] && echo "Đã huỷ." && exit 0
+  fi
 fi
 
 # ── 1. CỐT LÕI: Lead Coordinator ──
@@ -410,16 +482,29 @@ if [[ "$ENABLE_DEVOPS" == true ]]; then
 fi
 
 # ── 7. Host Môi trường Thực thi ──
-echo ""
-echo "=================================================================="
-echo "PHẦN 7: MÔI TRƯỜNG THỰC THI CHÍNH (Execution Host)"
-echo "  1) local (Chạy trực tiếp trên máy macOS)"
-echo "  2) ssh:orb (Chạy remote qua SSH target 'orb')"
-printf "Chọn [1-2] (Enter = 1): "
-read -r host_choice
-host_choice="${host_choice:-1}"
-if [[ "$host_choice" == "2" ]]; then
-  printf "   Nhập tên SSH host target trong Orca (Enter = ssh:orb): "
+local host_menu=(
+  "local (Chạy trực tiếp trên máy macOS)"
+  "ssh:orb (Chạy remote qua SSH target 'orb')"
+  "SSH target tùy chỉnh..."
+)
+local host_choice_idx=1
+if [[ -x "$ORCA_TEAM_BIN" ]]; then
+  host_choice_idx=$(python3 "$ORCA_TEAM_BIN" select \
+    --title "PHẦN 7: MÔI TRƯỜNG THỰC THI CHÍNH (Execution Host)" \
+    --options "${host_menu[@]}" \
+    --default-idx 0 \
+    --return-idx)
+else
+  printf "Chọn [1: local, 2: ssh:orb, 3: custom] (Enter = 1): "
+  read -r host_choice_idx
+  host_choice_idx="${host_choice_idx:-1}"
+fi
+
+if [[ "$host_choice_idx" == "2" ]]; then
+  EXEC_HOST="ssh:orb"
+  HOST_LABEL="SSH Target (ssh:orb)"
+elif [[ "$host_choice_idx" == "3" ]]; then
+  printf "   Nhập tên SSH host target trong Orca (ví dụ: ssh:remote-server): "
   read -r ssh_target_input
   EXEC_HOST="${ssh_target_input:-ssh:orb}"
   HOST_LABEL="SSH Target ($EXEC_HOST)"
@@ -427,7 +512,6 @@ else
   EXEC_HOST="local"
   HOST_LABEL="Local Machine"
 fi
-echo "➔ Môi trường: $HOST_LABEL"
 
 # ── Tổng kết xác nhận ──
 echo ""
@@ -449,9 +533,20 @@ fi
 echo "│  Execution Host:  $HOST_LABEL"
 echo "└──────────────────────────────────────────────────────────────────────────┘"
 echo ""
-printf "Xác nhận tạo cấu hình cho project? (Y/n): "
-read -r confirm
-[[ "$confirm" == "n" || "$confirm" == "N" ]] && echo "Đã huỷ." && exit 0
+
+if [[ -x "$ORCA_TEAM_BIN" ]]; then
+  local confirm_choice
+  confirm_choice=$(python3 "$ORCA_TEAM_BIN" select \
+    --title "👉 Xác nhận tạo cấu hình cho project?" \
+    --options "Xác nhận tạo cấu hình cho project" "Hủy bỏ" \
+    --default-idx 0 \
+    --return-idx)
+  [[ "$confirm_choice" != "1" ]] && echo "Đã huỷ." && exit 0
+else
+  printf "Xác nhận tạo cấu hình cho project? (Y/n): "
+  read -r confirm
+  [[ "$confirm" == "n" || "$confirm" == "N" ]] && echo "Đã huỷ." && exit 0
+fi
 
 mkdir -p "$AGENTS_DIR"
 

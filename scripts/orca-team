@@ -6,6 +6,7 @@ and concurrency for roles in an Orca Multi-Agent Orchestrator project.
 Usage:
   orca-team [status|list]
   orca-team models [agent] [--json|--tsv] [--role <role>] [--tier <tier1|tier2|tier3>] [--effort <low|medium|high>]
+  orca-team select --title "..." [--options opt1 opt2 ...] [--default-idx 0] [--return-idx]
   orca-team set <role> [--agent <id>] [--model <id>] [--effort <low|medium|high>] [--concurrency <n>] [--enable|--disable]
   orca-team get <role> [--field agent|model|effort|concurrency]
   orca-team link [all|clean|status]
@@ -20,6 +21,9 @@ import os
 import json
 import re
 import shutil
+import select
+import tty
+import termios
 from pathlib import Path
 
 ROLE_ALIASES = {
@@ -687,6 +691,209 @@ def cmd_models(args: list):
         print(f"  {i:>2}) {m['id']:<28}{lbl_str}{eff_info}{rec_tag}")
     print("")
 
+def read_terminal_key(fd: int) -> str:
+    """Đọc 1 phím hoặc escape sequence từ terminal raw mode."""
+    ch = sys.stdin.read(1)
+    if ch == '\x1b':
+        r, _, _ = select.select([sys.stdin], [], [], 0.05)
+        if r:
+            ch2 = sys.stdin.read(1)
+            if ch2 == '[':
+                r2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if r2:
+                    ch3 = sys.stdin.read(1)
+                    if ch3 in ('A', 'B', 'C', 'D', 'H', 'F'):
+                        return f'\x1b[{ch3}'
+                    elif ch3 in ('1', '2', '3', '4', '5', '6', '7', '8'):
+                        r3, _, _ = select.select([sys.stdin], [], [], 0.05)
+                        if r3:
+                            ch4 = sys.stdin.read(1)
+                            return f'\x1b[{ch3}{ch4}'
+                    return f'\x1b[{ch3}'
+                return '\x1b['
+            elif ch2 == 'O':
+                r2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if r2:
+                    ch3 = sys.stdin.read(1)
+                    return f'\x1bO{ch3}'
+                return '\x1bO'
+            return '\x1b' + ch2
+        return '\x1b'
+    return ch
+
+def interactive_select(
+    title: str,
+    items: list,
+    default_idx: int = 0,
+    hint: str = "Dùng phím ↑/↓ hoặc j/k để di chuyển con trỏ, Enter để chọn",
+    max_visible: int = 14
+) -> tuple:
+    """
+    Menu điều hướng bằng con trỏ / phím mũi tên (Arrow Keys Interactive TUI).
+    Trả về (selected_index, selected_item_str).
+    Nếu không phải môi trường TTY tương tác, trả về giá trị mặc định.
+    """
+    if not items:
+        return -1, ""
+
+    current_idx = max(0, min(default_idx, len(items) - 1))
+
+    # Kiểm tra stdin / stderr tương tác
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return current_idx, items[current_idx]
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    try:
+        t_rows = shutil.get_terminal_size().lines
+        eff_max = max(5, min(max_visible, t_rows - 6))
+    except Exception:
+        eff_max = max_visible
+
+    def render_menu(start_i: int, cur_i: int) -> int:
+        lines_count = 0
+        end_i = min(start_i + eff_max, len(items))
+        if start_i > 0:
+            sys.stderr.write("     \033[90m▲  (...còn phía trên)\033[0m\r\n")
+            lines_count += 1
+        for i in range(start_i, end_i):
+            it = items[i]
+            prefix = f"{i+1:>2})"
+            if i == cur_i:
+                sys.stderr.write(f"\033[1;36m  ❯ {prefix} {it}\033[0m\r\n")
+            else:
+                sys.stderr.write(f"    {prefix} {it}\r\n")
+            lines_count += 1
+        if end_i < len(items):
+            sys.stderr.write("     \033[90m▼  (...còn phía dưới)\033[0m\r\n")
+            lines_count += 1
+        sys.stderr.flush()
+        return lines_count
+
+    # Ẩn con trỏ terminal trong lúc tương tác
+    sys.stderr.write("\033[?25l")
+    sys.stderr.write(f"\r\n\033[1m{title}\033[0m\r\n")
+    sys.stderr.write(f"\033[90m({hint})\033[0m\r\n")
+    sys.stderr.flush()
+
+    start_idx = 0
+    if current_idx >= eff_max:
+        start_idx = current_idx - eff_max + 1
+
+    last_rendered_lines = render_menu(start_idx, current_idx)
+
+    try:
+        tty.setraw(fd)
+        while True:
+            k = read_terminal_key(fd)
+            if k in ('\x1b[A', '\x1bOA', 'k', 'K'):  # Mũi tên Lên / k
+                current_idx = (current_idx - 1) % len(items)
+            elif k in ('\x1b[B', '\x1bOB', 'j', 'J'):  # Mũi tên Xuống / j
+                current_idx = (current_idx + 1) % len(items)
+            elif k in ('\x1b[H', '\x1b[1~', '\x1bOH', 'g'):  # Home
+                current_idx = 0
+            elif k in ('\x1b[F', '\x1b[4~', '\x1bOF', 'G'):  # End
+                current_idx = len(items) - 1
+            elif k == '\x1b[5~':  # PageUp
+                current_idx = max(0, current_idx - eff_max)
+            elif k == '\x1b[6~':  # PageDown
+                current_idx = min(len(items) - 1, current_idx + eff_max)
+            elif k in ('\r', '\n', ' '):  # Enter hoặc Space để xác nhận
+                break
+            elif k == '\x03':  # Ctrl+C
+                raise KeyboardInterrupt
+            elif k in ('q', 'Q', '\x1b'):  # Esc / q
+                break
+            elif k.isdigit() and 1 <= int(k) <= len(items):  # Phím tắt số nhanh
+                current_idx = int(k) - 1
+                break
+
+            # Điều chỉnh cửa sổ cuộn
+            if current_idx < start_idx:
+                start_idx = current_idx
+            elif current_idx >= start_idx + eff_max:
+                start_idx = current_idx - eff_max + 1
+
+            # Xóa các dòng menu cũ và vẽ lại vị trí con trỏ mới
+            sys.stderr.write(f"\033[{last_rendered_lines}A")
+            last_rendered_lines = render_menu(start_idx, current_idx)
+
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        # Xóa khối menu vừa hiển thị để giữ màn hình gọn đẹp
+        sys.stderr.write(f"\033[{last_rendered_lines}A\033[0J")
+        # Hiện lại con trỏ terminal
+        sys.stderr.write("\033[?25h")
+        sys.stderr.flush()
+
+    selected_val = items[current_idx]
+    clean_val = re.sub(r"\s*⭐.*$", "", selected_val).strip()
+    sys.stderr.write(f"   ➔ Đã chọn: \033[1;32m{clean_val}\033[0m\r\n")
+    sys.stderr.flush()
+    return current_idx, selected_val
+
+def cmd_select(args: list):
+    """
+    Menu con trỏ chọn tương tác cho shell script và CLI.
+    Dùng: orca-team select --title "..." [--options item1 item2 ...] [--default-idx 0] [--return-idx]
+    """
+    title = "Chọn một mục:"
+    items = []
+    default_idx = 0
+    return_idx = False
+
+    idx = 0
+    while idx < len(args):
+        a = args[idx]
+        if a == "--title" and idx + 1 < len(args):
+            title = args[idx + 1]
+            idx += 2
+        elif a in ("--default-idx", "--default") and idx + 1 < len(args):
+            try:
+                default_idx = int(args[idx + 1])
+            except ValueError:
+                pass
+            idx += 2
+        elif a in ("--return-idx", "--index"):
+            return_idx = True
+            idx += 1
+        elif a == "--options-json" and idx + 1 < len(args):
+            try:
+                items = json.loads(args[idx + 1])
+            except Exception:
+                pass
+            idx += 2
+        elif a in ("--options", "--items"):
+            idx += 1
+            while idx < len(args) and not args[idx].startswith("--"):
+                items.append(args[idx])
+                idx += 1
+        elif a in ("--option", "--item") and idx + 1 < len(args):
+            items.append(args[idx + 1])
+            idx += 2
+        else:
+            idx += 1
+
+    if not items and not sys.stdin.isatty():
+        lines = [l.strip() for l in sys.stdin.readlines() if l.strip()]
+        if lines:
+            items = lines
+
+    if not items:
+        return
+
+    try:
+        chosen_i, chosen_val = interactive_select(title, items, default_idx=default_idx)
+        if return_idx:
+            # 1-based index cho zsh/bash
+            print(chosen_i + 1)
+        else:
+            print(chosen_val)
+    except KeyboardInterrupt:
+        sys.stderr.write("\r\nĐã hủy.\r\n")
+        sys.exit(130)
+
 
 def cmd_status(root: Path, config: dict):
     if not config:
@@ -800,12 +1007,17 @@ def cmd_set(root: Path, config: dict, args: list):
         curr_model = current.get("model") or "mặc định"
         curr_effort = current.get("effort") or "-"
         print(f"   Hiện tại: Agent={curr_agent} | Model={curr_model} | Effort={curr_effort}")
-        print(f"   Các agent Orca hỗ trợ: {', '.join(KNOWN_AGENTS)}")
-        
-        agent_input = input(f"   Nhập agent mới (Enter = giữ nguyên '{curr_agent}'): ").strip()
-        target_agent = agent_input if agent_input else curr_agent
-        if agent_input:
-            new_agent = agent_input
+
+        agent_options = [ag + (" (hiện tại)" if ag == curr_agent else "") for ag in KNOWN_AGENTS]
+        def_agent_idx = KNOWN_AGENTS.index(curr_agent) if curr_agent in KNOWN_AGENTS else 0
+        ag_i, _ = interactive_select(
+            f"👉 Chọn Agent cho vai trò [{role_label}]:",
+            agent_options,
+            default_idx=def_agent_idx
+        )
+        target_agent = KNOWN_AGENTS[ag_i]
+        if target_agent != curr_agent:
+            new_agent = target_agent
 
         # Truy vấn động danh sách model từ CLI của provider target_agent
         role_tier, def_eff = ROLE_TIER_MAP.get(role_key, ("tier2", "high"))
@@ -813,36 +1025,40 @@ def cmd_set(root: Path, config: dict, args: list):
         models, src_label = discover_models_for_agent(target_agent)
         if models:
             rec_idx = recommend_model_index(models, role_tier, def_eff)
-            print(f"   📋 Danh sách Model từ {src_label}:")
+            model_menu = []
             for i, m in enumerate(models, 1):
                 rec_str = f" ⭐ (khuyến nghị cho {role_label})" if i == rec_idx else ""
                 lbl_str = f" — {m['label']}" if m["label"] != m["id"] else ""
-                print(f"      {i:>2}) {m['id']}{lbl_str}{rec_str}")
-            custom_idx = len(models) + 1
-            keep_idx = len(models) + 2
-            print(f"      {custom_idx:>2}) Nhập model ID tùy chỉnh")
-            print(f"      {keep_idx:>2}) Giữ nguyên ({curr_model})")
-            m_ans = input(f"   Chọn số [1-{keep_idx}] hoặc nhập model ID (Enter = {rec_idx} [{models[rec_idx-1]['id']}]): ").strip()
-            if not m_ans:
-                chosen = models[rec_idx - 1]
+                eff_str = f" [{m['bakedEffort']}]" if m.get("bakedEffort") else ""
+                model_menu.append(f"{m['id']}{lbl_str}{eff_str}{rec_str}")
+            model_menu.append("Nhập model ID tùy chỉnh...")
+            model_menu.append(f"Giữ nguyên ({curr_model})")
+            model_menu.append("Bỏ chọn model (mặc định Orca ADE)")
+
+            def_m_idx = rec_idx - 1
+            for idx_chk, m in enumerate(models):
+                if m["id"] == curr_model:
+                    def_m_idx = idx_chk
+                    break
+
+            m_i, _ = interactive_select(
+                f"👉 Chọn Model cho agent '{target_agent}' ({role_label}) — Nguồn: {src_label}:",
+                model_menu,
+                default_idx=def_m_idx
+            )
+            if m_i < len(models):
+                chosen = models[m_i]
                 new_model = chosen["id"]
                 if chosen.get("bakedEffort"):
                     new_effort = chosen["bakedEffort"]
-            elif m_ans.isdigit() and 1 <= int(m_ans) <= len(models):
-                chosen = models[int(m_ans) - 1]
-                new_model = chosen["id"]
-                if chosen.get("bakedEffort"):
-                    new_effort = chosen["bakedEffort"]
-            elif m_ans == str(custom_idx):
+            elif m_i == len(models):  # Nhập tùy chỉnh
                 c_in = input("   Nhập model ID tùy chỉnh: ").strip()
                 if c_in:
                     new_model = c_in
-            elif m_ans == str(keep_idx):
+            elif m_i == len(models) + 1:  # Giữ nguyên
                 pass
-            elif m_ans.lower() == "none":
+            else:  # Bỏ chọn model
                 new_model = ""
-            else:
-                new_model = m_ans
         else:
             model_input = input(f"   Nhập model ID mới (Enter = giữ nguyên, 'none' = bỏ chọn model): ").strip()
             if model_input.lower() == "none":
@@ -857,13 +1073,21 @@ def cmd_set(root: Path, config: dict, args: list):
             new_effort = baked_eff
             print(f"   ➔ Reasoning Effort tự động theo model: {new_effort}")
         else:
-            effort_input = input(f"   Nhập effort [low/medium/high] (Enter = {def_eff}, 'none' = bỏ): ").strip()
-            if effort_input.lower() == "none":
+            effort_choices = ["high (khuyến nghị suy luận cao)", "medium", "low", "none (tắt reasoning)"]
+            eff_def_idx = 0 if def_eff == "high" else (1 if def_eff == "medium" else 2)
+            eff_i, _ = interactive_select(
+                f"👉 Chọn Reasoning Effort cho model '{final_model_id or 'mặc định'}':",
+                effort_choices,
+                default_idx=eff_def_idx
+            )
+            if eff_i == 0:
+                new_effort = "high"
+            elif eff_i == 1:
+                new_effort = "medium"
+            elif eff_i == 2:
+                new_effort = "low"
+            else:
                 new_effort = ""
-            elif effort_input:
-                new_effort = effort_input
-            elif new_model is not None:
-                new_effort = def_eff
 
 
     # Apply changes
@@ -1520,6 +1744,8 @@ def main():
         cmd_uninstall_project(root, args[1:])
     elif args[0] in ["models", "list-models", "discover-models"]:
         cmd_models(args[1:])
+    elif args[0] in ["select", "menu", "choose"]:
+        cmd_select(args[1:])
     elif args[0] in ["agents", "list-agents"]:
         print("🐋 Các Agent chính thức được Orca ADE hỗ trợ:")
         for ag in KNOWN_AGENTS:
