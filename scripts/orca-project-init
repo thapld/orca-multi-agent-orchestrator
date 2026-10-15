@@ -99,6 +99,7 @@ choose_model() {
   case "$agent" in
     claude)
       options=(
+        "claude-opus-5-5"
         "claude-3-7-sonnet"
         "claude-3-5-sonnet"
         "claude-3-5-haiku"
@@ -120,9 +121,11 @@ choose_model() {
       ;;
     gemini|antigravity)
       options=(
+        "claude-opus-5-5"
+        "gemini-4-argon"
+        "gemini-3.8-flash"
         "gemini-2.5-pro"
         "gemini-2.5-flash"
-        "gemini-2.0-flash"
       )
       ;;
     cursor)
