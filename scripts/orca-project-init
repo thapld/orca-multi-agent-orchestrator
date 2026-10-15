@@ -728,16 +728,27 @@ case "$COORD_AGENT" in
     LINK_MSG="GEMINI.md & AGENTS.md -> .agents/GEMINI.md"
     ;;
 esac
-# ── Đảm bảo .gitignore bỏ qua runtime của Orca (Chống tràn token) ──
+# ── Đảm bảo .gitignore bỏ qua cấu hình Orchestrator & runtime Orca (Mặc định) ──
 GITIGNORE_FILE="$PROJECT_PATH/.gitignore"
+ORCA_IGNORE_BLOCK="
+# Orca Multi-Agent Orchestrator (Directives & Team Config)
+.agents/
+GEMINI.md
+AGENTS.md
+CLAUDE.md
+orca-team.json
+.orca/
+.orca-cache/
+*.orca.log"
+
 if [[ -f "$GITIGNORE_FILE" ]]; then
-  if ! grep -q "^\.orca/" "$GITIGNORE_FILE" 2>/dev/null; then
-    printf "\n# Orca ADE runtime & worktrees (chống tràn token khi git status/diff)\n.orca/\n.orca-cache/\n*.orca.log\n" >> "$GITIGNORE_FILE"
-    echo "   🛡️  Đã thêm .orca/ vào .gitignore (chống tràn context)."
+  if ! grep -q "orca-team\.json" "$GITIGNORE_FILE" 2>/dev/null; then
+    printf "%s\n" "$ORCA_IGNORE_BLOCK" >> "$GITIGNORE_FILE"
+    echo "   🛡️  Đã thêm cấu hình Orchestrator (.agents/, GEMINI.md, orca-team.json...) vào .gitignore."
   fi
 else
-  printf "# Orca ADE runtime & worktrees (chống tràn token khi git status/diff)\n.orca/\n.orca-cache/\n*.orca.log\n" > "$GITIGNORE_FILE"
-  echo "   🛡️  Đã tạo .gitignore và thêm .orca/ (chống tràn context)."
+  printf "%s\n" "$ORCA_IGNORE_BLOCK" > "$GITIGNORE_FILE"
+  echo "   🛡️  Đã tạo .gitignore và thêm cấu hình Orchestrator."
 fi
 
 echo ""

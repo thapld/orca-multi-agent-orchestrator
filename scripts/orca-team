@@ -1225,12 +1225,12 @@ def cmd_uninstall_project(root: Path, args: list):
             return
 
     deleted = []
-    # 1. Xóa symlinks (TUYỆT ĐỐI CHỈ XÓA SYMLINK, KHÔNG BAO GIỜ XÓA FILE THẬT CỦA USER)
-    for f in ["CLAUDE.md", "AGENTS.md"]:
+    # 1. Xóa tất cả discovery symlinks ở root
+    for f in ["GEMINI.md", "CLAUDE.md", "AGENTS.md"]:
         target = root / f
         if target.is_symlink():
             target.unlink(missing_ok=True)
-            deleted.append(f)
+            deleted.append(f"{f} (symlink)")
 
     # 2. Xóa orca-team.json
     cfg = root / "orca-team.json"
@@ -1238,22 +1238,52 @@ def cmd_uninstall_project(root: Path, args: list):
         cfg.unlink(missing_ok=True)
         deleted.append("orca-team.json")
 
-    # 3. Xóa .agents/GEMINI.md nếu đúng là do orchestrator tạo ra (khớp dòng đầu chuẩn xác)
-    gemini_md = root / ".agents" / "GEMINI.md"
-    if gemini_md.exists():
+    # 3. Xóa .agents/ và directive GEMINI.md
+    agents_dir = root / ".agents"
+    if agents_dir.exists() and agents_dir.is_dir():
+        gemini_md = agents_dir / "GEMINI.md"
+        if gemini_md.exists():
+            gemini_md.unlink(missing_ok=True)
+            deleted.append(".agents/GEMINI.md")
+        # Xóa các file/thư mục khác trong .agents nếu có hoặc xóa toàn bộ thư mục nếu rỗng/chỉ chứa file orchestrator
         try:
-            first_line = gemini_md.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-            if first_line == "# Orca Multi-Agent Orchestration Directive":
-                gemini_md.unlink(missing_ok=True)
-                deleted.append(".agents/GEMINI.md")
-                agents_dir = root / ".agents"
-                if agents_dir.exists() and not any(agents_dir.iterdir()):
-                    agents_dir.rmdir()
-                    deleted.append(".agents/ (thư mục rỗng)")
+            shutil.rmtree(agents_dir)
+            deleted.append(".agents/ (thư mục)")
         except Exception:
             pass
 
-    print("\n🎉 Đã gỡ bỏ thành công cấu hình Orchestrator:")
+    # 4. Xóa các file/thư mục runtime Orca nếu có
+    for r_item in [".orca", ".orca-cache"]:
+        rp = root / r_item
+        if rp.exists():
+            try:
+                if rp.is_dir(): shutil.rmtree(rp)
+                else: rp.unlink(missing_ok=True)
+                deleted.append(f"{r_item}/")
+            except Exception:
+                pass
+
+    # 5. Dọn dẹp block trong .gitignore nếu có
+    gi = root / ".gitignore"
+    if gi.exists():
+        try:
+            lines = gi.read_text(encoding="utf-8").splitlines()
+            cleaned_lines = []
+            skip = False
+            for line in lines:
+                if "# Orca Multi-Agent Orchestrator" in line or "# Orca ADE runtime" in line:
+                    skip = True
+                    continue
+                if skip and line.strip() in [".agents/", "GEMINI.md", "AGENTS.md", "CLAUDE.md", "orca-team.json", ".orca/", ".orca-cache/", "*.orca.log", ""]:
+                    continue
+                else:
+                    skip = False
+                    cleaned_lines.append(line)
+            gi.write_text("\n".join(cleaned_lines) + ("\n" if cleaned_lines else ""), encoding="utf-8")
+        except Exception:
+            pass
+
+    print("\n🎉 Đã gỡ bỏ thành công toàn bộ cấu hình Orchestrator:")
     for d in deleted:
         print(f"   🗑️  Đã xóa: {d}")
     if not deleted:
