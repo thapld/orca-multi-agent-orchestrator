@@ -18,6 +18,6 @@ RECEIPT=$(/usr/local/bin/orca worktree create \
   --setup run \
   --json)
 
-echo "✅ Đã tạo thành công worktree: $WORKTREE_NAME"
+WT_NAME=$(echo "$RECEIPT" | grep -o '"name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+echo "✅ Đã tạo thành công worktree độc lập: ${WT_NAME:-$WORKTREE_NAME}"
 echo "👉 Mã nguồn Issue #$ISSUE_NUM đã được kéo về tự động và cô lập trong worktree."
-echo "$RECEIPT"

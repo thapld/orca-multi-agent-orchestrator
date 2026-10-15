@@ -39,5 +39,10 @@ START_RECEIPT=$(/usr/local/bin/orca orchestration worker-start \
   --timeout-ms 300000 \
   --json)
 
+DISPATCH_ID=$(echo "$START_RECEIPT" | grep -o '"dispatchId": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+TERM_HANDLE=$(echo "$START_RECEIPT" | grep -o '"agentTerminalHandle": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
+
 echo "🎉 Worker đã được khởi chạy thành công!"
-echo "$START_RECEIPT"
+echo "   • Worktree: $WORKTREE_NAME"
+[[ -n "$DISPATCH_ID" ]] && echo "   • Dispatch: $DISPATCH_ID"
+[[ -n "$TERM_HANDLE" ]] && echo "   • Terminal: $TERM_HANDLE"

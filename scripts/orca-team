@@ -162,9 +162,9 @@ def sync_gemini_directive(root: Path, config: dict):
 
     table_text = "\n".join(rows)
 
-    # Regex replace the table under ## 👥 Configured Agent Team Topology
+    # Regex replace the table under ## 👥 Configured Agent (Team)? Topology
     pattern = re.compile(
-        r"(## 👥 Configured Agent Team Topology\s*\n\s*)(?:\|[^\n]+\|\n)+",
+        r"(## 👥 Configured Agent(?: Team)? Topology\s*\n\s*)(?:\|[^\n]+\|\n)+",
         re.MULTILINE
     )
     if pattern.search(content):
