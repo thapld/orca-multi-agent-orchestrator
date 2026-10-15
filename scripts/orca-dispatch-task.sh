@@ -56,6 +56,13 @@ fi
 
 echo "🐋 [Orca Dispatch] Đang khởi tạo task: '$TASK_TITLE' cho agent: $AGENT ${MODEL_ARGS[*]}..."
 
+# 0. Đảm bảo có Run đang bound trong Orca
+CHECK_RUN=$($ORCA_BIN orchestration task-list --json 2>&1 || true)
+if echo "$CHECK_RUN" | grep -q "No Run is bound"; then
+  echo "ℹ️  Chưa có Run orchestration active. Đang tự động tạo Run..."
+  $ORCA_BIN orchestration run-create --objective "Orchestration Run: $TASK_TITLE" --json >/dev/null 2>&1 || true
+fi
+
 # 1. Tạo task trong Orca
 TASK_JSON=$($ORCA_BIN orchestration task-create \
   --task-title "$TASK_TITLE" \
@@ -82,23 +89,40 @@ fi
 
 echo "✅ Đã tạo task ID: $TASK_ID"
 
-# 2. Khởi chạy worker trong child worktree
-SAFE_SLUG=$(echo "$TASK_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
-[[ -z "$SAFE_SLUG" ]] && SAFE_SLUG="task"
-SHORT_ID=$(echo "$TASK_ID" | tail -c 7)
-WORKTREE_NAME="wt-${SAFE_SLUG}-${SHORT_ID}"
+# 2. Khởi chạy worker
+# Kiểm tra nếu git repo chưa có commit thì fallback dùng worktree current
+HAS_GIT_COMMIT=true
+if ! git rev-parse HEAD &>/dev/null; then
+  HAS_GIT_COMMIT=false
+fi
 
-echo "🚀 Đang khởi chạy worker trong worktree: $WORKTREE_NAME..."
+if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
+  SAFE_SLUG=$(echo "$TASK_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
+  [[ -z "$SAFE_SLUG" ]] && SAFE_SLUG="task"
+  SHORT_ID=$(echo "$TASK_ID" | tail -c 7)
+  WORKTREE_NAME="wt-${SAFE_SLUG}-${SHORT_ID}"
 
-START_RECEIPT=$($ORCA_BIN orchestration worker-start \
-  --task "$TASK_ID" \
-  --worktree new-child \
-  --name "$WORKTREE_NAME" \
-  --agent "$AGENT" \
-  "${MODEL_ARGS[@]}" \
-  --setup run \
-  --timeout-ms "$TIMEOUT_MS" \
-  --json 2>&1) || true
+  echo "🚀 Đang khởi chạy worker trong worktree: $WORKTREE_NAME..."
+
+  START_RECEIPT=$($ORCA_BIN orchestration worker-start \
+    --task "$TASK_ID" \
+    --worktree new-child \
+    --name "$WORKTREE_NAME" \
+    --agent "$AGENT" \
+    "${MODEL_ARGS[@]}" \
+    --setup run \
+    --timeout-ms "$TIMEOUT_MS" \
+    --json 2>&1) || true
+else
+  echo "⚠️  Git repository chưa có commit đầu tiên. Đang khởi chạy worker trên workspace hiện tại..."
+  START_RECEIPT=$($ORCA_BIN orchestration worker-start \
+    --task "$TASK_ID" \
+    --worktree current \
+    --agent "$AGENT" \
+    "${MODEL_ARGS[@]}" \
+    --timeout-ms "$TIMEOUT_MS" \
+    --json 2>&1) || true
+fi
 
 DISPATCH_ID=$(python3 -c "
 import sys, json
