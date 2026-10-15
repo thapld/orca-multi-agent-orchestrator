@@ -5,6 +5,7 @@ and concurrency for roles in an Orca Multi-Agent Orchestrator project.
 
 Usage:
   orca-team [status|list]
+  orca-team models [agent] [--json|--tsv] [--role <role>] [--tier <tier1|tier2|tier3>] [--effort <low|medium|high>]
   orca-team set <role> [--agent <id>] [--model <id>] [--effort <low|medium|high>] [--concurrency <n>] [--enable|--disable]
   orca-team get <role> [--field agent|model|effort|concurrency]
   orca-team link [all|clean|status]
@@ -190,26 +191,523 @@ def sync_gemini_directive(root: Path, config: dict):
         new_content = pattern.sub(lambda m: m.group(1) + table_text + "\n", content)
         gemini_file.write_text(new_content, encoding="utf-8")
 
+def _build_discovery_env():
+    env = os.environ.copy()
+    env["NO_COLOR"] = "1"
+    env["TERM"] = "dumb"
+    extra_paths = [
+        str(Path.home() / ".local" / "bin"),
+        str(Path.home() / ".kimi-code" / "bin"),
+        str(Path.home() / ".kimi" / "bin"),
+        str(Path.home() / ".antigravity" / "antigravity" / "bin"),
+        str(Path.home() / ".opencode" / "bin"),
+        str(Path.home() / ".cursor" / "bin"),
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+    ]
+    curr_path = env.get("PATH", "")
+    for p in reversed(extra_paths):
+        if p not in curr_path:
+            curr_path = f"{p}:{curr_path}"
+    env["PATH"] = curr_path
+    return env
+
+def _find_cli_binary(names, env):
+    path_str = env.get("PATH", "")
+    for name in names:
+        found = shutil.which(name, path=path_str)
+        if found:
+            return found
+    return None
+
+def _strip_ansi_and_spinners(line: str) -> str:
+    line = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line)
+    line = re.sub(r"\r", "\n", line)
+    line = re.sub(r"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\s]+", "", line)
+    return line.strip()
+
+def _extract_baked_effort(model_id: str) -> str:
+    m = re.search(r"-(low|medium|high|xhigh|max)$", model_id, re.IGNORECASE)
+    return m.group(1).lower() if m else ""
+
+def _load_orca_cached_models(agent: str) -> list:
+    models = []
+    seen = set()
+    orca_profiles = Path.home() / "Library" / "Application Support" / "orca" / "profiles"
+    if not orca_profiles.exists():
+        return models
+    agents_to_check = [agent]
+    if agent == "gemini":
+        agents_to_check.append("antigravity")
+    elif agent == "antigravity":
+        agents_to_check.append("gemini")
+
+    for p_dir in orca_profiles.iterdir():
+        data_file = p_dir / "orca-data.json"
+        if not data_file.exists():
+            continue
+        try:
+            data = json.loads(data_file.read_text(encoding="utf-8", errors="ignore"))
+            settings = data.get("settings") or {}
+            by_host = settings.get("discoveredModelsByAgentByHost") or {}
+            by_agent = settings.get("discoveredModelsByAgent") or {}
+            raw_list = []
+            for ag in agents_to_check:
+                for host_map in by_host.values():
+                    if isinstance(host_map, dict) and isinstance(host_map.get(ag), list):
+                        raw_list.extend(host_map[ag])
+                if isinstance(by_agent.get(ag), list):
+                    raw_list.extend(by_agent[ag])
+            for item in raw_list:
+                if not isinstance(item, dict):
+                    continue
+                mid = str(item.get("id") or "").strip()
+                if not mid or mid == "default" or mid in seen:
+                    continue
+                seen.add(mid)
+                lbl = str(item.get("label") or mid).strip()
+                baked = _extract_baked_effort(mid)
+                t_levels = item.get("thinkingLevels") or []
+                effs = [str(x.get("id") if isinstance(x, dict) else x) for x in t_levels if x]
+                models.append({
+                    "id": mid,
+                    "label": lbl,
+                    "bakedEffort": baked,
+                    "efforts": [] if baked else (effs or ["low", "medium", "high"]),
+                    "source": "orca-cache"
+                })
+        except Exception:
+            pass
+    return models
+
+def discover_models_for_agent(agent: str, refresh: bool = False) -> tuple:
+    """
+    Trả về (models_list, source_label) bằng cách truy vấn trực tiếp CLI của provider đã chọn.
+    Có cache phiên ngắn hạn (120s) tại /tmp/orca-cli-models-cache.json để tránh gọi lại CLI 8 lần liên tiếp trong cùng 1 phiên khởi tạo.
+    Mỗi phần tử trong models_list:
+      {"id": str, "label": str, "bakedEffort": str, "efforts": list[str], "source": str}
+    """
+    import subprocess
+    import time
+    ag = (agent or "").strip().lower()
+    cache_file = Path("/tmp/orca-cli-models-cache.json")
+    if not refresh and cache_file.exists():
+        try:
+            c_data = json.loads(cache_file.read_text(encoding="utf-8", errors="ignore"))
+            entry = c_data.get(ag)
+            if isinstance(entry, dict) and (time.time() - entry.get("ts", 0) < 120) and entry.get("models"):
+                return entry["models"], entry.get("source", "provider-cli")
+        except Exception:
+            pass
+
+    env = _build_discovery_env()
+    models = []
+    seen = set()
+    source_label = "provider-cli"
+
+    def add_model(mid: str, label: str = "", efforts=None, src="provider-cli"):
+        mid = (mid or "").strip()
+        if not mid or mid == "default" or mid in seen:
+            return
+        seen.add(mid)
+        baked = _extract_baked_effort(mid)
+        if efforts is None:
+            if baked:
+                eff_list = []
+            elif re.search(r"(opus|sonnet|argon|flash|gemini|o1|o3|gpt-5|r1|k1|k3|glm|thinking|reasoning)", mid, re.I):
+                eff_list = ["low", "medium", "high"]
+            else:
+                eff_list = []
+        else:
+            eff_list = [] if baked else list(efforts)
+        models.append({
+            "id": mid,
+            "label": (label or mid).strip(),
+            "bakedEffort": baked,
+            "efforts": eff_list,
+            "source": src
+        })
+
+    # 1. ANTIGRAVITY / GEMINI (`agy models`)
+    if ag in ("antigravity", "gemini"):
+        bin_path = _find_cli_binary(["agy", "antigravity"] if ag == "antigravity" else ["agy", "gemini", "antigravity"], env)
+        if bin_path:
+            try:
+                res = subprocess.run([bin_path, "models"], capture_output=True, text=True, env=env, timeout=8)
+                raw_out = (res.stdout or "") + "\n" + (res.stderr or "")
+                raw_out = re.sub(r"\r", "\n", raw_out)
+                for raw_line in raw_out.splitlines():
+                    clean = _strip_ansi_and_spinners(raw_line)
+                    if not clean or clean.lower().startswith(("loading", "available", "fetching", "id ", "model ")):
+                        continue
+                    # Format: <id>\t<label> or <id>   <label>
+                    m = re.match(r"^([a-zA-Z0-9._-]+)\s{2,}(.+)$", clean) or re.match(r"^([a-zA-Z0-9._-]+)\t+(.+)$", clean)
+                    if m:
+                        mid, lbl = m.group(1).strip(), m.group(2).strip()
+                        if mid.lower() not in ("id", "model", "name"):
+                            add_model(mid, lbl, src=f"{Path(bin_path).name} models")
+                if models:
+                    source_label = f"{Path(bin_path).name} models"
+            except Exception:
+                pass
+
+    # 2. CLAUDE (`claude -p --input-format stream-json --output-format stream-json --verbose`)
+    elif ag == "claude":
+        bin_path = _find_cli_binary(["claude"], env)
+        if bin_path:
+            try:
+                proc = subprocess.Popen(
+                    [bin_path, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env
+                )
+                req = '{"type":"control_request","request_id":"orca-model-discovery","request":{"subtype":"list_models"}}\n'
+                try:
+                    out, _ = proc.communicate(input=req, timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    out, _ = proc.communicate()
+                for line in (out or "").splitlines():
+                    line = line.strip()
+                    if not line.startswith("{"):
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        if obj.get("type") == "control_response":
+                            resp = (obj.get("response") or {}).get("response") or {}
+                            m_list = resp.get("models") or []
+                            for m_obj in m_list:
+                                mid = m_obj.get("value") or m_obj.get("id")
+                                lbl = m_obj.get("displayName") or m_obj.get("label") or mid
+                                desc = m_obj.get("description") or ""
+                                full_lbl = f"{lbl} ({desc.splitlines()[0]})" if desc else lbl
+                                effs = m_obj.get("supportedEffortLevels") or ["low", "medium", "high"]
+                                add_model(mid, full_lbl, efforts=effs, src="claude stream-json list_models")
+                    except Exception:
+                        pass
+                if models:
+                    source_label = "claude CLI (list_models)"
+            except Exception:
+                pass
+        # Check ~/.claude/settings.json cho custom/router models
+        claude_settings = Path.home() / ".claude" / "settings.json"
+        if claude_settings.exists():
+            try:
+                c_cfg = json.loads(claude_settings.read_text(encoding="utf-8", errors="ignore"))
+                c_env = c_cfg.get("env") or {}
+                for k in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
+                    val = c_env.get(k)
+                    if val and isinstance(val, str):
+                        add_model(val, f"{val} (từ ~/.claude/settings.json {k})", src="~/.claude/settings.json")
+            except Exception:
+                pass
+
+    # 3. KIMI (`~/.kimi-code/config.toml` & `~/.kimi/config.toml`)
+    elif ag == "kimi":
+        cfg_paths = [
+            Path.home() / ".kimi-code" / "config.toml",
+            Path.home() / ".kimi" / "config.toml"
+        ]
+        for cfg_p in cfg_paths:
+            if not cfg_p.exists():
+                continue
+            try:
+                raw_toml = cfg_p.read_text(encoding="utf-8", errors="ignore")
+                def_m = re.search(r'^\s*default_model\s*=\s*"([^"]+)"', raw_toml, re.M)
+                default_id = def_m.group(1).strip() if def_m else ""
+                sec_pattern = re.compile(r'^\[models\.(?:"([^"]+)"|([A-Za-z0-9_.-]+))\]\s*$([\s\S]*?)(?=^\[|\Z)', re.M)
+                parsed_entries = []
+                for sm in sec_pattern.finditer(raw_toml):
+                    m_key = (sm.group(1) or sm.group(2) or "").strip()
+                    body = sm.group(3) or ""
+                    disp_m = re.search(r'^\s*model\s*=\s*"([^"]+)"', body, re.M)
+                    disp = disp_m.group(1).strip() if disp_m else m_key
+                    has_think = "thinking" in body.lower() or "k3" in m_key.lower() or "k1" in m_key.lower()
+                    effs = ["low", "medium", "high"] if has_think else []
+                    lbl = f"{disp}{' [default]' if m_key == default_id else ''}"
+                    parsed_entries.append((0 if m_key == default_id else 1, m_key, lbl, effs))
+                parsed_entries.sort(key=lambda x: x[0])
+                for _, m_key, lbl, effs in parsed_entries:
+                    add_model(m_key, lbl, efforts=effs, src=f"kimi ({cfg_p.parent.name}/config.toml)")
+                if default_id and default_id not in seen:
+                    add_model(default_id, f"{default_id} [default]", efforts=["low", "medium", "high"], src=f"kimi ({cfg_p.parent.name}/config.toml)")
+                if models:
+                    source_label = f"kimi CLI ({cfg_p.parent.name}/config.toml)"
+            except Exception:
+                pass
+
+    # 4. CODEX (`codex debug models`)
+    elif ag == "codex":
+        bin_path = _find_cli_binary(["codex"], env)
+        if bin_path:
+            try:
+                res = subprocess.run([bin_path, "debug", "models"], capture_output=True, text=True, env=env, timeout=6)
+                obj = json.loads(res.stdout or "{}")
+                for item in (obj.get("models") or []):
+                    slug = item.get("slug")
+                    disp = item.get("display_name") or slug
+                    r_levels = item.get("supported_reasoning_levels") or []
+                    effs = [x.get("effort") for x in r_levels if isinstance(x, dict) and x.get("effort")]
+                    add_model(slug, disp, efforts=effs or ["low", "medium", "high"], src="codex debug models")
+                if models:
+                    source_label = "codex debug models"
+            except Exception:
+                pass
+
+    # 5. CURSOR (`cursor-agent --list-models`)
+    elif ag == "cursor":
+        bin_path = _find_cli_binary(["cursor-agent"], env)
+        if bin_path:
+            try:
+                res = subprocess.run([bin_path, "--list-models"], capture_output=True, text=True, env=env, timeout=6)
+                for line in (res.stdout or "").splitlines():
+                    m = re.match(r"^([^\s]+)\s+-\s+(.+)$", line.strip())
+                    if m:
+                        add_model(m.group(1), m.group(2), src="cursor-agent --list-models")
+                if models:
+                    source_label = "cursor-agent --list-models"
+            except Exception:
+                pass
+
+    # 6. OPENCODE / OPENCODE2 (`opencode models`)
+    elif ag in ("opencode", "opencode2"):
+        bin_path = _find_cli_binary([ag, "opencode"], env)
+        if bin_path:
+            try:
+                res = subprocess.run([bin_path, "models"], capture_output=True, text=True, env=env, timeout=6)
+                for line in (res.stdout or "").splitlines():
+                    clean = _strip_ansi_and_spinners(line)
+                    if clean and " " not in clean and not clean.lower().startswith("available"):
+                        add_model(clean, clean, src=f"{Path(bin_path).name} models")
+                if models:
+                    source_label = f"{Path(bin_path).name} models"
+            except Exception:
+                pass
+
+    # 7. OTHER DYNAMIC PROVIDERS (pi, omp, jcode, grok, copilot, aider, goose)
+    else:
+        cmd_map = {
+            "pi": (["pi"], ["--list-models"]),
+            "omp": (["omp"], ["models"]),
+            "jcode": (["jcode"], ["--no-update", "--quiet", "model", "list"]),
+            "grok": (["grok"], ["models"]),
+            "aider": (["aider"], ["--list-models", ""]),
+        }
+        if ag in cmd_map:
+            bins, args_list = cmd_map[ag]
+            bin_path = _find_cli_binary(bins, env)
+            if bin_path:
+                try:
+                    res = subprocess.run([bin_path] + args_list, capture_output=True, text=True, env=env, timeout=6)
+                    for line in (res.stdout or "").splitlines():
+                        clean = _strip_ansi_and_spinners(line)
+                        if clean and not clean.endswith(":"):
+                            parts = clean.split()
+                            if parts and ("/" in parts[0] or "-" in parts[0]):
+                                add_model(parts[0].lstrip("*- "), clean, src=f"{ag} CLI")
+                    if models:
+                        source_label = f"{ag} CLI"
+                except Exception:
+                    pass
+
+    # 8. Merge thêm từ Orca Local Cache (nếu có)
+    for cached in _load_orca_cached_models(ag):
+        if cached["id"] not in seen:
+            seen.add(cached["id"])
+            models.append(cached)
+            if source_label == "provider-cli":
+                source_label = "Orca ADE Cache"
+
+    # Lưu cache phiên 120s
+    if models:
+        try:
+            c_data = {}
+            if cache_file.exists():
+                c_data = json.loads(cache_file.read_text(encoding="utf-8", errors="ignore"))
+            c_data[ag] = {"ts": time.time(), "source": source_label, "models": models}
+            cache_file.write_text(json.dumps(c_data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    return models, source_label
+
+
+ROLE_TIER_MAP = {
+    "coordinator": ("tier1", "high"),
+    "developer": ("tier3", "high"),
+    "qa": ("tier3", "medium"),
+    "security": ("tier2", "high"),
+    "prReviewer": ("tier2", "high"),
+    "issueResolver": ("tier2", "high"),
+    "uiSpecialist": ("tier3", "medium"),
+    "devopsSpecialist": ("tier3", "high"),
+}
+
+def recommend_model_index(models: list, role_tier: str = "tier2", target_effort: str = "high") -> int:
+    """
+    Chọn vị trí model (1-based) tối ưu nhất trong danh sách động theo kiến trúc Kim Tự Tháp (5% / 15% / 80%):
+      - tier1 (Lead Coordinator): ưu tiên Opus + High (hoặc model suy luận kiến trúc đỉnh nhất)
+      - tier2 (Security, PR Reviewer, Issue Resolver): ưu tiên Gemini 4 Argon High / Sonnet High / O3
+      - tier3 (Full-Stack Dev, QA, UI, DevOps): ưu tiên Gemini 3.8 Flash (High cho Dev/DevOps, Medium cho QA/UI) / Kimi K3
+    """
+    if not models:
+        return 1
+    eff = (target_effort or "high").lower()
+
+    def score_model(m: dict) -> int:
+        mid = m["id"].lower()
+        lbl = m["label"].lower()
+        baked = (m.get("bakedEffort") or "").lower()
+        effs = [e.lower() for e in (m.get("efforts") or [])]
+        s = 0
+        if role_tier == "tier1":
+            if "opus" in mid or "opus" in lbl:
+                s += 100
+            elif "argon" in mid or "o1" in mid or "gpt-5" in mid or "k3" in mid or "r1" in mid:
+                s += 70
+            elif "sonnet" in mid or "fable" in mid:
+                s += 50
+        elif role_tier == "tier2":
+            if "argon" in mid or "argon" in lbl:
+                s += 100
+            elif "sonnet" in mid or "fable" in mid or "o3" in mid or "k3" in mid:
+                s += 85
+            elif "opus" in mid:
+                s += 60
+            elif "flash" in mid:
+                s += 40
+        else:  # tier3 (80% workload: Dev, QA, UI, DevOps - tối ưu tốc độ & quota)
+            if "flash" in mid or "flash" in lbl:
+                s += 100
+            elif "k3" in mid or "kimi" in mid or "haiku" in mid or "mini" in mid or "sonnet" in mid:
+                s += 85
+            elif "argon" in mid:
+                s += 50
+            elif "opus" in mid:
+                s += 10
+
+        if baked == eff:
+            s += 30
+        elif not baked and eff in effs:
+            s += 28
+        elif baked == "high":
+            s += 15
+        elif baked == "medium":
+            s += 10
+
+        if "settings.json" not in m.get("source", ""):
+            s += 5
+        return s
+
+    best_idx = 1
+    best_score = -1
+    for i, m in enumerate(models, 1):
+        sc = score_model(m)
+        if sc > best_score:
+            best_score = sc
+            best_idx = i
+    return best_idx
+
+
+def cmd_models(args: list):
+    """
+    Liệt kê danh sách model động từ Provider CLI của agent.
+    Dùng: orca-team models <agent> [--json|--tsv] [--role <role>] [--tier tier1|tier2|tier3] [--effort low|medium|high] [--refresh]
+    """
+    agent = "antigravity"
+    as_json = False
+    as_tsv = False
+    refresh = False
+    role_tier = "tier2"
+    target_effort = "high"
+
+    idx = 0
+    while idx < len(args):
+        a = args[idx]
+        if a == "--json":
+            as_json = True
+            idx += 1
+        elif a == "--tsv":
+            as_tsv = True
+            idx += 1
+        elif a == "--refresh":
+            refresh = True
+            idx += 1
+        elif a == "--tier" and idx + 1 < len(args):
+            role_tier = args[idx + 1]
+            idx += 2
+        elif a == "--effort" and idx + 1 < len(args):
+            target_effort = args[idx + 1]
+            idx += 2
+        elif a == "--role" and idx + 1 < len(args):
+            r_key = ROLE_ALIASES.get(args[idx + 1].lower(), args[idx + 1])
+            role_tier, target_effort = ROLE_TIER_MAP.get(r_key, ("tier2", "high"))
+            idx += 2
+        elif not a.startswith("-"):
+            agent = a.lower()
+            idx += 1
+        else:
+            idx += 1
+
+    models, source_label = discover_models_for_agent(agent, refresh=refresh)
+    rec_idx = recommend_model_index(models, role_tier, target_effort)
+
+    if as_json:
+        print(json.dumps({
+            "agent": agent,
+            "source": source_label,
+            "recommendedIndex": rec_idx,
+            "models": models
+        }, ensure_ascii=False, indent=2))
+        return
+
+    if as_tsv:
+        # Dạng TSV gọn nhẹ cho shell script (orca-project-init):
+        # Dòng 1: META\t<source_label>\t<rec_idx>
+        # Các dòng sau: MODEL\t<id>\t<label>\t<bakedEffort>\t<efforts_csv>
+        print(f"META\t{source_label}\t{rec_idx}")
+        for m in models:
+            eff_csv = ",".join(m.get("efforts") or [])
+            print(f"MODEL\t{m['id']}\t{m['label']}\t{m.get('bakedEffort', '')}\t{eff_csv}")
+        return
+
+    print(f"\n🔍 Danh sách Model truy vấn động cho agent '{agent}' (Nguồn: {source_label}):")
+    if not models:
+        print(f"   ⚠️ Không tìm thấy CLI hoặc danh sách model động cho '{agent}'.")
+        return
+    for i, m in enumerate(models, 1):
+        rec_tag = " ⭐ (khuyến nghị)" if i == rec_idx else ""
+        eff_info = f" [effort tích hợp: {m['bakedEffort']}]" if m.get("bakedEffort") else (
+            f" [efforts: {', '.join(m['efforts'])}]" if m.get("efforts") else ""
+        )
+        lbl_str = f" — {m['label']}" if m["label"] != m["id"] else ""
+        print(f"  {i:>2}) {m['id']:<28}{lbl_str}{eff_info}{rec_tag}")
+    print("")
+
+
 def cmd_status(root: Path, config: dict):
     if not config:
         print(f"⚠️ Không tìm thấy cấu hình orca-team.json trong '{root}'.")
         print("👉 Hãy khởi tạo trước bằng: orca-project-init")
         sys.exit(1)
 
-    print("\n╔═══════════════════════════════════════════════════════════════════════════════════╗")
-    print("║             🐋  ORCA MULTI-AGENT TEAM TOPOLOGY & MODEL CONFIGURATION             ║")
-    print("╚═══════════════════════════════════════════════════════════════════════════════════╝")
+    print("\n╔═════════════════════════════════════════════════════════════════════════════════════════╗")
+    print("║                🐋  ORCA MULTI-AGENT TEAM TOPOLOGY & MODEL CONFIGURATION                ║")
+    print("╚═════════════════════════════════════════════════════════════════════════════════════════╝")
     print(f"📍 Dự án: {root}")
     print(f"🌐 Host thực thi: {config.get('executionHost', 'local')}\n")
 
-    print(f"{'VAI TRÒ (ROLE)':<24} | {'AGENT':<12} | {'MODEL':<20} | {'EFFORT':<8} | {'SONG SONG'}")
-    print("-" * 83)
+    print(f"{'VAI TRÒ (ROLE)':<24} | {'AGENT':<12} | {'MODEL':<26} | {'EFFORT':<8} | {'SONG SONG'}")
+    print("-" * 89)
 
     coord = config.get("coordinator", {})
     c_agent = coord.get("agent", "claude")
     c_model = coord.get("model") or "(default)"
     c_effort = coord.get("effort") or "-"
-    print(f"{'1. Lead Coordinator':<24} | {c_agent:<12} | {c_model:<20} | {c_effort:<8} | 1")
+    print(f"{'1. Lead Coordinator':<24} | {c_agent:<12} | {c_model:<26} | {c_effort:<8} | 1")
 
     roles = config.get("roles", {})
     role_order = [
@@ -226,17 +724,17 @@ def cmd_status(root: Path, config: dict):
         data = roles.get(key, {})
         enabled = data.get("enabled", True)
         if not enabled:
-            print(f"{label:<24} | {'[ĐÃ TẮT]':<12} | {'-':<20} | {'-':<8} | -")
+            print(f"{label:<24} | {'[ĐÃ TẮT]':<12} | {'-':<26} | {'-':<8} | -")
             continue
         agent = data.get("agent", "kimi")
         model = data.get("model") or "(default)"
         effort = data.get("effort") or "-"
         conc = str(data.get("concurrency", "On-demand"))
-        print(f"{label:<24} | {agent:<12} | {model:<20} | {effort:<8} | {conc}")
+        print(f"{label:<24} | {agent:<12} | {model:<26} | {effort:<8} | {conc}")
 
-    print("-" * 83)
-    print("💡 Thay đổi cấu hình role: orca-team set <role> [--agent <id>] [--model <model_id>] [--effort <low|med|high>]")
-    print("   Ví dụ: orca-team set dev --agent claude --model claude-3-5-sonnet --effort high\n")
+    print("-" * 89)
+    print("💡 Xem model từ CLI của provider: orca-team models <agent>")
+    print("💡 Thay đổi cấu hình role:        orca-team set <role> [--agent <id>] [--model <model_id>] [--effort <low|med|high>]\n")
 
 def cmd_set(root: Path, config: dict, args: list):
     if not config:
@@ -295,28 +793,78 @@ def cmd_set(root: Path, config: dict, args: list):
 
     # Interactive prompt if no flags provided
     if new_agent is None and new_model is None and new_effort is None and new_concurrency is None and toggle_enable is None:
-        print(f"\n⚙️  Cấu hình tương tác cho vai trò: {ROLE_LABELS.get(role_key, role_key)}")
+        role_label = ROLE_LABELS.get(role_key, role_key)
+        print(f"\n⚙️  Cấu hình tương tác cho vai trò: {role_label}")
         current = config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key, {})
-        curr_agent = current.get("agent", "claude")
+        curr_agent = current.get("agent", "antigravity")
         curr_model = current.get("model") or "mặc định"
-        print(f"   Agent hiện tại: {curr_agent} (Model: {curr_model})")
+        curr_effort = current.get("effort") or "-"
+        print(f"   Hiện tại: Agent={curr_agent} | Model={curr_model} | Effort={curr_effort}")
         print(f"   Các agent Orca hỗ trợ: {', '.join(KNOWN_AGENTS)}")
         
         agent_input = input(f"   Nhập agent mới (Enter = giữ nguyên '{curr_agent}'): ").strip()
+        target_agent = agent_input if agent_input else curr_agent
         if agent_input:
             new_agent = agent_input
 
-        model_input = input(f"   Nhập model ID mới (Enter = giữ nguyên, 'none' = bỏ chọn model): ").strip()
-        if model_input.lower() == "none":
-            new_model = ""
-        elif model_input:
-            new_model = model_input
+        # Truy vấn động danh sách model từ CLI của provider target_agent
+        role_tier, def_eff = ROLE_TIER_MAP.get(role_key, ("tier2", "high"))
+        print(f"   ⏳ Đang truy vấn danh sách model từ CLI của '{target_agent}'...")
+        models, src_label = discover_models_for_agent(target_agent)
+        if models:
+            rec_idx = recommend_model_index(models, role_tier, def_eff)
+            print(f"   📋 Danh sách Model từ {src_label}:")
+            for i, m in enumerate(models, 1):
+                rec_str = f" ⭐ (khuyến nghị cho {role_label})" if i == rec_idx else ""
+                lbl_str = f" — {m['label']}" if m["label"] != m["id"] else ""
+                print(f"      {i:>2}) {m['id']}{lbl_str}{rec_str}")
+            custom_idx = len(models) + 1
+            keep_idx = len(models) + 2
+            print(f"      {custom_idx:>2}) Nhập model ID tùy chỉnh")
+            print(f"      {keep_idx:>2}) Giữ nguyên ({curr_model})")
+            m_ans = input(f"   Chọn số [1-{keep_idx}] hoặc nhập model ID (Enter = {rec_idx} [{models[rec_idx-1]['id']}]): ").strip()
+            if not m_ans:
+                chosen = models[rec_idx - 1]
+                new_model = chosen["id"]
+                if chosen.get("bakedEffort"):
+                    new_effort = chosen["bakedEffort"]
+            elif m_ans.isdigit() and 1 <= int(m_ans) <= len(models):
+                chosen = models[int(m_ans) - 1]
+                new_model = chosen["id"]
+                if chosen.get("bakedEffort"):
+                    new_effort = chosen["bakedEffort"]
+            elif m_ans == str(custom_idx):
+                c_in = input("   Nhập model ID tùy chỉnh: ").strip()
+                if c_in:
+                    new_model = c_in
+            elif m_ans == str(keep_idx):
+                pass
+            elif m_ans.lower() == "none":
+                new_model = ""
+            else:
+                new_model = m_ans
+        else:
+            model_input = input(f"   Nhập model ID mới (Enter = giữ nguyên, 'none' = bỏ chọn model): ").strip()
+            if model_input.lower() == "none":
+                new_model = ""
+            elif model_input:
+                new_model = model_input
 
-        effort_input = input(f"   Nhập effort [low/medium/high] (Enter = giữ nguyên, 'none' = bỏ): ").strip()
-        if effort_input.lower() == "none":
-            new_effort = ""
-        elif effort_input:
-            new_effort = effort_input
+        # Nếu model đã chọn chưa tích hợp sẵn effort trong ID thì mới hỏi tiếp effort
+        final_model_id = new_model if new_model is not None else (current.get("model") or "")
+        baked_eff = _extract_baked_effort(final_model_id) if final_model_id else ""
+        if baked_eff:
+            new_effort = baked_eff
+            print(f"   ➔ Reasoning Effort tự động theo model: {new_effort}")
+        else:
+            effort_input = input(f"   Nhập effort [low/medium/high] (Enter = {def_eff}, 'none' = bỏ): ").strip()
+            if effort_input.lower() == "none":
+                new_effort = ""
+            elif effort_input:
+                new_effort = effort_input
+            elif new_model is not None:
+                new_effort = def_eff
+
 
     # Apply changes
     if role_key == "coordinator":
@@ -970,6 +1518,8 @@ def main():
         cmd_link(root, args[1:])
     elif args[0] in ["uninstall", "remove", "clean-all", "purge"]:
         cmd_uninstall_project(root, args[1:])
+    elif args[0] in ["models", "list-models", "discover-models"]:
+        cmd_models(args[1:])
     elif args[0] in ["agents", "list-agents"]:
         print("🐋 Các Agent chính thức được Orca ADE hỗ trợ:")
         for ag in KNOWN_AGENTS:

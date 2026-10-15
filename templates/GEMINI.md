@@ -1,58 +1,8 @@
-# Orca Multi-Agent Orchestration Directive
+# Orca Multi-Agent Orchestrator Framework Project Directive
 
-> **[ROLE SCOPING]** This directive applies strictly to the **Lead Coordinator**. Supervised workers (Dev, QA, Security) running inside child worktrees must ignore orchestration rules and focus entirely on their specific task prompt.
-
----
-
-## 👥 Configured Agent Topology
-
-| Role | Agent & Model | Concurrency | Capabilities & Orca Utilities |
-| :--- | :--- | :--- | :--- |
-| **Lead Coordinator** | `{{COORD_AGENT}}` | 1 | Task DAG, Decision Gates, Release |
-| **Full-Stack Devs** | `{{DEV_AGENT}}` | {{DEV_COUNT}} parallel | Child worktrees, implementation, unit tests |
-| **QA & Testers** | `{{QA_AGENT}}` | {{QA_COUNT}} parallel | Integration test suites, acceptance verification |
-| **Security & Bug Hunter** | `{{SEC_AGENT}}` | {{SEC_COUNT}} parallel | OWASP audit, security scan, diff review |
-| **PR Reviewer** | `{{PR_AGENT}}` | On-demand | PR checkout (`--pr`), diff audit (`open-changed`) |
-| **Issue Resolver** | `{{ISSUE_AGENT}}` | On-demand | Issue checkout (`--issue`), auto-fix, commit & push |
-| **UI/UX Specialist** | `{{UI_AGENT}}` | On-demand | Design Mode (Click-to-code), live inspection |
-| **DevOps Specialist** | `{{DEVOPS_AGENT}}` | On-demand | DB migrations, Docker/Orb, SSH worktrees |
-
-- **Execution Host:** `{{EXEC_HOST}}` | **Orca CLI:** `/usr/local/bin/orca`
-
----
-
-## ⚡ Core Operational Runbook (Anti-Token-Waste Rules)
-
-### 1. Phase 0 Planning Gate
-Analyze requirements and produce a concise architecture plan (Context, Task Breakdown, Acceptance Criteria). Wait for user approval before dispatching workers.
-
-### 2. STRICT ANTI-POLLING RULE (CRITICAL)
-- **NEVER poll in loops** with `orca orchestration check` or `worker-show`.
-- After dispatching workers, **STOP CALLING TOOLS**. Wait reactively for worker completion notifications or explicit user input. Repeated polling burns thousands of tokens per minute.
-
-### 3. Worker Launch & Token Frugality
-Use `orca-dispatch` to launch workers (auto-injects 5m timeout, auto-resolves configured dev agent, and suppresses 200+ lines of raw JSON stdout):
-```bash
-orca-dispatch "feature-name" [agent] "Spec description (reference file paths, do NOT dump full file contents)"
-```
-
-### 4. Concurrent Dual-Track (Hotfix P0)
-If a GitHub issue is assigned during feature development, fork an isolated worktree in 1 line:
-```bash
-orca-hotfix <issue-id> [agent]
-```
-
-### 5. Issue Reassignment & Handoff
-If an issue is reassigned: stop worker (`worker-stop`), commit WIP branch `wip/issue-<id>-handover`, post comment on issue, and release worktree.
-
-### 6. Watchdog & Rate-Limit Failover
-- **Worker waiting on prompt (`[y/n]`):** Auto-unblock via: `orca-team watchdog --unblock`.
-- **Session context overflow:** Spawn fresh worker on same worktree: `worker-start --task <taskId> --retry-of <id> --worktree current`.
-- **Account Rate Limit (429):** Do not respawn same provider! Switch provider via `orca-team set dev --agent <fallback_agent>` (e.g. Claude ➔ Kimi, Kimi ➔ Codex).
-- **Token Bloat & Leak Diagnosis:** Audit token hotspots and auto-fix anytime via: `orca-monitor` (or `orca-team monitor --fix`).
-- **All providers exhausted:** Halt all workers cleanly and report to user (Human Gate).
-
-### 7. Quality Gate & Release
-- Verify workers sent `send --type worker_done --outcome succeeded`.
-- Release settled workers: `orca orchestration worker-release --dispatch <id> --json`.
-- For extended workflows and diagrams, refer to https://github.com/thapld/orca-multi-agent-orchestrator.
+This repository is the central framework and reference project for Orca Multi-Agent Orchestration.
+When operating within this repository:
+1. Adhere to the architecture defined in `docs/architecture.md`.
+2. Keep all scripts in `scripts/` executable and tested.
+3. Keep the process diagrams in `docs/workflows.md` and role matrix in `docs/roles.md` synchronized with any framework upgrades.
+4. If the user wants to set up a target project, invoke `orca-project-init <target-path>`.

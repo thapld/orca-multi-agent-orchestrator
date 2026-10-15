@@ -88,6 +88,12 @@ choose_agent() {
   echo "   ➔ Đã chọn: $SELECTED_AGENT"
 }
 
+SCRIPT_DIR="${0:A:h}"
+ORCA_TEAM_BIN="$SCRIPT_DIR/orca-team"
+if [[ ! -x "$ORCA_TEAM_BIN" ]] && command -v orca-team >/dev/null 2>&1; then
+  ORCA_TEAM_BIN="$(command -v orca-team)"
+fi
+
 choose_model() {
   local agent="$1"
   local role_title="$2"
@@ -97,116 +103,100 @@ choose_model() {
   SELECTED_MODEL=""
   SELECTED_EFFORT=""
   
-  local options=()
+  local model_ids=()
+  local model_labels=()
+  local model_baked_efforts=()
+  local model_efforts_csv=()
   local rec_model_idx=1
-  case "$agent" in
-    claude)
-      options=(
-        "claude-opus-5-5"
-        "claude-3-7-sonnet"
-        "claude-3-5-sonnet"
-        "claude-3-5-haiku"
-      )
-      [[ "$role_tier" == "tier1" ]] && rec_model_idx=1
-      [[ "$role_tier" == "tier2" ]] && rec_model_idx=2
-      [[ "$role_tier" == "tier3" ]] && rec_model_idx=2
-      ;;
-    codex)
-      options=(
-        "o3-mini"
-        "o1"
-        "gpt-4o"
-        "gpt-4o-mini"
-      )
-      [[ "$role_tier" == "tier1" ]] && rec_model_idx=2
-      [[ "$role_tier" == "tier2" ]] && rec_model_idx=1
-      [[ "$role_tier" == "tier3" ]] && rec_model_idx=3
-      ;;
-    kimi)
-      options=(
-        "k1.5"
-        "kimi-k3"
-      )
-      rec_model_idx=1
-      ;;
-    gemini|antigravity)
-      options=(
-        "claude-opus-5-5"
-        "gemini-4-argon"
-        "gemini-3.8-flash"
-        "gemini-2.5-pro"
-        "gemini-2.5-flash"
-      )
-      [[ "$role_tier" == "tier1" ]] && rec_model_idx=1
-      [[ "$role_tier" == "tier2" ]] && rec_model_idx=2
-      [[ "$role_tier" == "tier3" ]] && rec_model_idx=3
-      ;;
-    cursor)
-      options=(
-        "claude-3-7-sonnet"
-        "claude-3-5-sonnet"
-        "gpt-4o"
-      )
-      rec_model_idx=1
-      ;;
-    opencode)
-      options=(
-        "deepseek-r1"
-        "deepseek-v3"
-        "claude-3-5-sonnet"
-      )
-      [[ "$role_tier" == "tier3" ]] && rec_model_idx=2 || rec_model_idx=1
-      ;;
-    *)
-      options=()
-      ;;
-  esac
+  local source_label="provider-cli"
+  local chosen_baked_effort=""
+  local chosen_efforts_csv=""
 
-  echo "👉 [Chọn Model] cho agent '$agent' ($role_title):"
-  if (( ${#options[@]} > 0 )); then
-    for i in {1..${#options[@]}}; do
+  if [[ -x "$ORCA_TEAM_BIN" ]]; then
+    local tsv_out
+    tsv_out=$(python3 "$ORCA_TEAM_BIN" models "$agent" --tsv --tier "$role_tier" --effort "$default_eff" 2>/dev/null || true)
+    if [[ -n "$tsv_out" ]]; then
+      while IFS=$'\t' read -r rec_type col1 col2 col3 col4; do
+        if [[ "$rec_type" == "META" ]]; then
+          source_label="${col1:-provider-cli}"
+          [[ "$col2" =~ ^[0-9]+$ ]] && rec_model_idx="$col2"
+        elif [[ "$rec_type" == "MODEL" && -n "$col1" ]]; then
+          model_ids+=("$col1")
+          model_labels+=("${col2:-$col1}")
+          model_baked_efforts+=("${col3:-}")
+          model_efforts_csv+=("${col4:-}")
+        fi
+      done <<< "$tsv_out"
+    fi
+  fi
+
+  echo "👉 [Chọn Model] cho agent '$agent' ($role_title) — Nguồn: $source_label:"
+  if (( ${#model_ids[@]} > 0 )); then
+    for i in {1..${#model_ids[@]}}; do
       local marker=""
-      [[ "$i" == "$rec_model_idx" ]] && marker=" (khuyến nghị cho $role_title)"
-      echo "    $i) ${options[$i]}$marker"
+      [[ "$i" == "$rec_model_idx" ]] && marker=" ⭐ (khuyến nghị cho $role_title)"
+      local m_id="${model_ids[$i]}"
+      local m_lbl="${model_labels[$i]}"
+      if [[ "$m_lbl" != "$m_id" && -n "$m_lbl" ]]; then
+        printf "   %2d) %-28s — %s%s\n" "$i" "$m_id" "$m_lbl" "$marker"
+      else
+        printf "   %2d) %s%s\n" "$i" "$m_id" "$marker"
+      fi
     done
-    local custom_idx=$(( ${#options[@]} + 1 ))
-    local default_idx=$(( ${#options[@]} + 2 ))
-    echo "    $custom_idx) Nhập model ID tùy chỉnh"
-    echo "    $default_idx) Dùng mặc định của Orca ADE"
-    printf "   Nhập số [1-$default_idx] (Enter = $rec_model_idx [${options[$rec_model_idx]}]): "
+    local custom_idx=$(( ${#model_ids[@]} + 1 ))
+    local default_idx=$(( ${#model_ids[@]} + 2 ))
+    printf "   %2d) Nhập model ID tùy chỉnh\n" "$custom_idx"
+    printf "   %2d) Dùng mặc định của Orca ADE\n" "$default_idx"
+    printf "   Nhập số [1-$default_idx] (Enter = $rec_model_idx [${model_ids[$rec_model_idx]}]): "
     read -r m_choice
     m_choice="${m_choice:-$rec_model_idx}"
     
-    if [[ "$m_choice" =~ ^[0-9]+$ ]] && (( m_choice >= 1 && m_choice <= ${#options[@]} )); then
-      SELECTED_MODEL="${options[$m_choice]}"
+    if [[ "$m_choice" =~ ^[0-9]+$ ]] && (( m_choice >= 1 && m_choice <= ${#model_ids[@]} )); then
+      SELECTED_MODEL="${model_ids[$m_choice]}"
+      chosen_baked_effort="${model_baked_efforts[$m_choice]}"
+      chosen_efforts_csv="${model_efforts_csv[$m_choice]}"
     elif [[ "$m_choice" == "$custom_idx" ]]; then
-      printf "   Nhập model ID (ví dụ: claude-opus-5-5, gemini-4-argon): "
+      printf "   Nhập model ID tùy chỉnh: "
       read -r custom_model
       SELECTED_MODEL="$custom_model"
-    else
+    elif [[ "$m_choice" == "$default_idx" ]]; then
       SELECTED_MODEL=""
+    else
+      # Cho phép gõ trực tiếp tên model ID
+      SELECTED_MODEL="$m_choice"
     fi
   else
-    printf "   Nhập model ID (Enter = dùng mặc định của $agent): "
+    printf "   ⚠️ Không tìm thấy danh sách model động từ CLI của '$agent'. Nhập model ID (Enter = mặc định): "
     read -r custom_model
     SELECTED_MODEL="$custom_model"
   fi
 
   if [[ -n "$SELECTED_MODEL" ]]; then
-    echo "   ➔ Đã chọn Model: $SELECTED_MODEL"
-    # Hỏi Reasoning Effort cho mọi model suy luận hiện đại
-    if [[ "$SELECTED_MODEL" =~ (opus|argon|flash|gemini|o1|o3|r1|sonnet|k1|k3|thinking|reasoning) ]]; then
-      printf "   Mức độ suy luận (Reasoning Effort)? [1: low, 2: medium, 3: high, 4: none] (Enter = $default_eff): "
-      read -r eff_choice
-      eff_choice="${eff_choice:-$default_eff}"
-      case "$eff_choice" in
-        1|low) SELECTED_EFFORT="low" ;;
-        2|med|medium) SELECTED_EFFORT="medium" ;;
-        3|high) SELECTED_EFFORT="high" ;;
-        4|none|skip) SELECTED_EFFORT="" ;;
-        *) SELECTED_EFFORT="$default_eff" ;;
-      esac
-      [[ -n "$SELECTED_EFFORT" ]] && echo "   ➔ Reasoning Effort: $SELECTED_EFFORT"
+    # Kiểm tra nếu model ID đã tích hợp sẵn hậu tố effort (-low, -medium, -high, -xhigh, -max)
+    if [[ -z "$chosen_baked_effort" && "$SELECTED_MODEL" =~ -(low|medium|high|xhigh|max)$ ]]; then
+      chosen_baked_effort="${match[1]:l}"
+    fi
+
+    if [[ -n "$chosen_baked_effort" ]]; then
+      SELECTED_EFFORT="$chosen_baked_effort"
+      echo "   ➔ Đã chọn Model: $SELECTED_MODEL (Reasoning Effort tích hợp: $SELECTED_EFFORT)"
+    else
+      echo "   ➔ Đã chọn Model: $SELECTED_MODEL"
+      if [[ -n "$chosen_efforts_csv" || "$SELECTED_MODEL" =~ (opus|argon|flash|gemini|o1|o3|gpt-5|r1|sonnet|fable|haiku|k1|k3|glm|thinking|reasoning) ]]; then
+        local eff_hint="${chosen_efforts_csv:-low,medium,high}"
+        printf "   Mức độ suy luận (Reasoning Effort: $eff_hint)? [1: low, 2: medium, 3: high, 4: none] (Enter = $default_eff): "
+        read -r eff_choice
+        eff_choice="${eff_choice:-$default_eff}"
+        case "$eff_choice" in
+          1|low) SELECTED_EFFORT="low" ;;
+          2|med|medium) SELECTED_EFFORT="medium" ;;
+          3|high) SELECTED_EFFORT="high" ;;
+          4|none|skip) SELECTED_EFFORT="" ;;
+          xhigh|max) SELECTED_EFFORT="$eff_choice" ;;
+          *) SELECTED_EFFORT="$default_eff" ;;
+        esac
+        [[ -n "$SELECTED_EFFORT" ]] && echo "   ➔ Reasoning Effort: $SELECTED_EFFORT"
+      fi
     fi
   else
     echo "   ➔ Model: (mặc định Orca ADE)"
