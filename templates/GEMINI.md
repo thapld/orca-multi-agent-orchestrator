@@ -24,7 +24,7 @@
 ## ⚡ Core Operational Runbook (Anti-Token-Waste Rules)
 
 ### 1. Phase 0 Planning Gate
-Analyze requirements and produce a concise `plan.md` (see `templates/plan-template.md`). Wait for user approval before dispatching workers.
+Analyze requirements and produce a concise architecture plan (Context, Task Breakdown, Acceptance Criteria). Wait for user approval before dispatching workers.
 
 ### 2. STRICT ANTI-POLLING RULE (CRITICAL)
 - **NEVER poll in loops** with `orca orchestration check` or `worker-show`.
@@ -54,4 +54,4 @@ If an issue is reassigned: stop worker (`worker-stop`), commit WIP branch `wip/i
 ### 7. Quality Gate & Release
 - Verify workers sent `send --type worker_done --outcome succeeded`.
 - Release settled workers: `orca orchestration worker-release --dispatch <id> --json`.
-- For extended workflows and diagrams, refer to `docs/workflows.md` and `docs/roles.md`.
+- For extended workflows and diagrams, refer to https://github.com/thapld/orca-multi-agent-orchestrator.
