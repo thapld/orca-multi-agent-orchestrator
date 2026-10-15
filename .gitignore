@@ -9,3 +9,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Orca ADE runtime & worktrees (chống rò rỉ token khi git status/diff)
+.orca/
+.orca-cache/
+*.orca.log
+

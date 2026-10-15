@@ -165,10 +165,7 @@ sequenceDiagram
     Worker->>Worker: Gặp lỗi / Bế tắc (Blocker)
     Worker->>Orca: orca orchestration send --type ask --text "Cần làm rõ format JWT header"
     
-    loop Kiểm tra định kỳ (Mailbox Poll)
-        Lead->>Orca: orca orchestration check
-    end
-
+    Note over Lead,Orca: 🔔 Reactive Event (Orca Mailbox tự động đánh thức Leader - CẤM chạy loop polling)
     Note over Lead,Orca: Leader phát hiện tin nhắn 'ask' / 'escalation'
     
     alt Leader tự xử lý được theo spec
@@ -206,10 +203,7 @@ sequenceDiagram
 
     Worker->>Worker: Đang code... Bất ngờ dừng (Cạn token / Kẹt prompt [y/n] / Lặp lỗi)
     
-    loop Giám sát định kỳ (Watchdog Loop)
-        Lead->>Orca: orca orchestration check (Kiểm tra tin nhắn & Heartbeat)
-    end
-
+    Note over Lead,Orca: 🩺 Reactive Watchdog (Chỉ kiểm tra khi nhận sự kiện worker dừng hoặc chạy 'orca-team watchdog')
     Note over Lead,Orca: Phát hiện worker im tiếng > 1-2 phút hoặc timeout
     Lead->>Orca: orca orchestration worker-show --dispatch <id>
     

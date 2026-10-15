@@ -353,29 +353,25 @@ Analyze requirements and produce a concise \`plan.md\` (see \`templates/plan-tem
 
 ### 2. STRICT ANTI-POLLING RULE (CRITICAL)
 - **NEVER poll in loops** with \`orca orchestration check\` or \`worker-show\`.
-- After dispatching workers via \`worker-start\`, **STOP CALLING TOOLS**. Wait reactively for worker completion notifications or explicit user input. Repeated polling burns thousands of tokens per minute.
+- After dispatching workers, **STOP CALLING TOOLS**. Wait reactively for worker completion notifications or explicit user input. Repeated polling burns thousands of tokens per minute.
 
-### 3. Worker Launch & Timeout
-Always include \`--timeout-ms 300000\` (5 minutes watchdog limit) and use child worktrees:
+### 3. Worker Launch & Token Frugality
+Use \`orca-dispatch\` to launch workers (auto-injects 5m timeout, auto-resolves configured dev agent, and suppresses 200+ lines of raw JSON stdout):
 \`\`\`bash
-/usr/local/bin/orca orchestration worker-start \\
-  --task <taskId> --worktree new-child --name "feature-dev" \\
-  --agent $DEV_AGENT --setup run --timeout-ms 300000 --json
+orca-dispatch "feature-name" [agent] "Spec description (reference file paths, do NOT dump full file contents)"
 \`\`\`
 
 ### 4. Concurrent Dual-Track (Hotfix P0)
-If a GitHub issue is assigned during feature development, do not disrupt the current branch:
+If a GitHub issue is assigned during feature development, fork an isolated worktree in 1 line:
 \`\`\`bash
-/usr/local/bin/orca worktree create \\
-  --name "hotfix-issue-<id>" --issue <id> --no-parent \\
-  --agent $ISSUE_AGENT --setup run --json
+orca-hotfix <issue-id> [agent]
 \`\`\`
 
 ### 5. Issue Reassignment & Handoff
 If an issue is reassigned: stop worker (\`worker-stop\`), commit WIP branch \`wip/issue-<id>-handover\`, post comment on issue, and release worktree.
 
 ### 6. Watchdog & Rate-Limit Failover
-- **Agent waiting on prompt (\`observation.agentWait\`):** Unblock with: \`orca terminal send --terminal <handle> --text "y" --enter\`.
+- **Worker waiting on prompt (\`[y/n]\`):** Auto-unblock via: \`orca-team watchdog --unblock\`.
 - **Session context overflow:** Spawn fresh worker on same worktree: \`worker-start --task <taskId> --retry-of <id> --worktree current\`.
 - **Account Rate Limit (429):** Do not respawn same provider! Switch provider via \`orca-team set dev --agent <fallback_agent>\` (e.g. Claude ➔ Kimi, Kimi ➔ Codex).
 - **All providers exhausted:** Halt all workers cleanly and report to user (Human Gate).
@@ -403,7 +399,17 @@ case "$COORD_AGENT" in
     rm -f "$PROJECT_PATH/CLAUDE.md" "$PROJECT_PATH/AGENTS.md"
     LINK_MSG="Native (.agents/GEMINI.md, không trùng lặp)"
     ;;
-esac
+# ── Đảm bảo .gitignore bỏ qua runtime của Orca (Chống tràn token) ──
+GITIGNORE_FILE="$PROJECT_PATH/.gitignore"
+if [[ -f "$GITIGNORE_FILE" ]]; then
+  if ! grep -q "^\.orca/" "$GITIGNORE_FILE" 2>/dev/null; then
+    printf "\n# Orca ADE runtime & worktrees (chống tràn token khi git status/diff)\n.orca/\n.orca-cache/\n*.orca.log\n" >> "$GITIGNORE_FILE"
+    echo "   🛡️  Đã thêm .orca/ vào .gitignore (chống tràn context)."
+  fi
+else
+  printf "# Orca ADE runtime & worktrees (chống tràn token khi git status/diff)\n.orca/\n.orca-cache/\n*.orca.log\n" > "$GITIGNORE_FILE"
+  echo "   🛡️  Đã tạo .gitignore và thêm .orca/ (chống tràn context)."
+fi
 
 echo ""
 echo "🎉 [HOÀN TẤT] Đã tạo xong hệ thống Full-Spectrum Orchestrator (Token-Optimized)!"
