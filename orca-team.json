@@ -19,8 +19,8 @@
         "browser-design-mode",
         "orca-skills-registry"
       ],
-      "model": "gemini-3.8-flash",
-      "effort": "low"
+      "model": "gemini-4-argon",
+      "effort": "high"
     },
     "qa": {
       "agent": "antigravity",
@@ -31,7 +31,7 @@
         "orca-skills-registry"
       ],
       "model": "gemini-3.8-flash",
-      "effort": "low"
+      "effort": "medium"
     },
     "security": {
       "agent": "antigravity",
@@ -40,7 +40,7 @@
         "git-worktrees",
         "orca-skills-registry"
       ],
-      "model": "gemini-4-argon",
+      "model": "claude-opus-5-5",
       "effort": "high"
     },
     "prReviewer": {
@@ -70,7 +70,8 @@
         "browser-design-mode",
         "per-worktree-browser"
       ],
-      "model": "gemini-3.8-flash"
+      "model": "gemini-3.8-flash",
+      "effort": "medium"
     },
     "devopsSpecialist": {
       "enabled": true,
@@ -79,7 +80,8 @@
         "ssh-remote-execution",
         "orca-per-workspace-env"
       ],
-      "model": "gemini-3.8-flash"
+      "model": "gemini-4-argon",
+      "effort": "medium"
     }
   }
 }

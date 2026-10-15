@@ -91,11 +91,14 @@ choose_agent() {
 choose_model() {
   local agent="$1"
   local role_title="$2"
+  local default_eff="${3:-high}"
+  local role_tier="${4:-tier2}"
   
   SELECTED_MODEL=""
   SELECTED_EFFORT=""
   
   local options=()
+  local rec_model_idx=1
   case "$agent" in
     claude)
       options=(
@@ -104,6 +107,9 @@ choose_model() {
         "claude-3-5-sonnet"
         "claude-3-5-haiku"
       )
+      [[ "$role_tier" == "tier1" ]] && rec_model_idx=1
+      [[ "$role_tier" == "tier2" ]] && rec_model_idx=2
+      [[ "$role_tier" == "tier3" ]] && rec_model_idx=2
       ;;
     codex)
       options=(
@@ -112,12 +118,16 @@ choose_model() {
         "gpt-4o"
         "gpt-4o-mini"
       )
+      [[ "$role_tier" == "tier1" ]] && rec_model_idx=2
+      [[ "$role_tier" == "tier2" ]] && rec_model_idx=1
+      [[ "$role_tier" == "tier3" ]] && rec_model_idx=3
       ;;
     kimi)
       options=(
         "k1.5"
         "kimi-k3"
       )
+      rec_model_idx=1
       ;;
     gemini|antigravity)
       options=(
@@ -127,6 +137,9 @@ choose_model() {
         "gemini-2.5-pro"
         "gemini-2.5-flash"
       )
+      [[ "$role_tier" == "tier1" ]] && rec_model_idx=1
+      [[ "$role_tier" == "tier2" ]] && rec_model_idx=2
+      [[ "$role_tier" == "tier3" ]] && rec_model_idx=3
       ;;
     cursor)
       options=(
@@ -134,6 +147,7 @@ choose_model() {
         "claude-3-5-sonnet"
         "gpt-4o"
       )
+      rec_model_idx=1
       ;;
     opencode)
       options=(
@@ -141,6 +155,7 @@ choose_model() {
         "deepseek-v3"
         "claude-3-5-sonnet"
       )
+      [[ "$role_tier" == "tier3" ]] && rec_model_idx=2 || rec_model_idx=1
       ;;
     *)
       options=()
@@ -151,21 +166,21 @@ choose_model() {
   if (( ${#options[@]} > 0 )); then
     for i in {1..${#options[@]}}; do
       local marker=""
-      [[ "$i" == 1 ]] && marker=" (khuyến nghị)"
+      [[ "$i" == "$rec_model_idx" ]] && marker=" (khuyến nghị cho $role_title)"
       echo "    $i) ${options[$i]}$marker"
     done
     local custom_idx=$(( ${#options[@]} + 1 ))
     local default_idx=$(( ${#options[@]} + 2 ))
     echo "    $custom_idx) Nhập model ID tùy chỉnh"
     echo "    $default_idx) Dùng mặc định của Orca ADE"
-    printf "   Nhập số [1-$default_idx] (Enter = 1 [${options[1]}]): "
+    printf "   Nhập số [1-$default_idx] (Enter = $rec_model_idx [${options[$rec_model_idx]}]): "
     read -r m_choice
-    m_choice="${m_choice:-1}"
+    m_choice="${m_choice:-$rec_model_idx}"
     
     if [[ "$m_choice" =~ ^[0-9]+$ ]] && (( m_choice >= 1 && m_choice <= ${#options[@]} )); then
       SELECTED_MODEL="${options[$m_choice]}"
     elif [[ "$m_choice" == "$custom_idx" ]]; then
-      printf "   Nhập model ID (ví dụ: claude-3-7-sonnet, gpt-4.5-preview): "
+      printf "   Nhập model ID (ví dụ: claude-opus-5-5, gemini-4-argon): "
       read -r custom_model
       SELECTED_MODEL="$custom_model"
     else
@@ -179,15 +194,17 @@ choose_model() {
 
   if [[ -n "$SELECTED_MODEL" ]]; then
     echo "   ➔ Đã chọn Model: $SELECTED_MODEL"
-    # Hỏi Reasoning Effort nếu model hỗ trợ
-    if [[ "$SELECTED_MODEL" =~ (o1|o3|r1|sonnet|thinking|reasoning) ]]; then
-      printf "   Mức độ suy luận (Reasoning Effort)? [1: low, 2: medium, 3: high, Enter = bỏ qua]: "
+    # Hỏi Reasoning Effort cho mọi model suy luận hiện đại
+    if [[ "$SELECTED_MODEL" =~ (opus|argon|flash|gemini|o1|o3|r1|sonnet|k1|k3|thinking|reasoning) ]]; then
+      printf "   Mức độ suy luận (Reasoning Effort)? [1: low, 2: medium, 3: high, 4: none] (Enter = $default_eff): "
       read -r eff_choice
+      eff_choice="${eff_choice:-$default_eff}"
       case "$eff_choice" in
         1|low) SELECTED_EFFORT="low" ;;
         2|med|medium) SELECTED_EFFORT="medium" ;;
         3|high) SELECTED_EFFORT="high" ;;
-        *) SELECTED_EFFORT="" ;;
+        4|none|skip) SELECTED_EFFORT="" ;;
+        *) SELECTED_EFFORT="$default_eff" ;;
       esac
       [[ -n "$SELECTED_EFFORT" ]] && echo "   ➔ Reasoning Effort: $SELECTED_EFFORT"
     fi
@@ -298,9 +315,9 @@ echo ""
 echo "=================================================================="
 echo "PHẦN 1: LEAD COORDINATOR (Nhạc trưởng điều phối)"
 echo "Nhiệm vụ: Lập Task DAG, quản lý Run, giao việc và điều phối các worker."
-choose_agent "Lead Coordinator" 2
+choose_agent "Lead Coordinator" 5
 COORD_AGENT="$SELECTED_AGENT"
-choose_model "$COORD_AGENT" "Lead Coordinator"
+choose_model "$COORD_AGENT" "Lead Coordinator" "high" "tier1"
 COORD_MODEL="$SELECTED_MODEL"
 COORD_EFFORT="$SELECTED_EFFORT"
 
@@ -309,9 +326,9 @@ echo ""
 echo "=================================================================="
 echo "PHẦN 2: FULL-STACK DEVELOPERS (Nhóm Lập trình viên)"
 echo "Nhiệm vụ: Trực tiếp viết code, unit test trên các child worktree độc lập."
-choose_agent "Full-Stack Devs" 1
+choose_agent "Full-Stack Devs" 5
 DEV_AGENT="$SELECTED_AGENT"
-choose_model "$DEV_AGENT" "Full-Stack Devs"
+choose_model "$DEV_AGENT" "Full-Stack Devs" "high" "tier2"
 DEV_MODEL="$SELECTED_MODEL"
 DEV_EFFORT="$SELECTED_EFFORT"
 choose_count "Developer" 2
@@ -325,9 +342,9 @@ echo ""
 echo "=================================================================="
 echo "PHẦN 3: QA & TEST ENGINEERS (Nhóm Kiểm thử chất lượng)"
 echo "Nhiệm vụ: Viết integration tests, kiểm tra edge cases và acceptance criteria."
-choose_agent "QA & Testing" 1
+choose_agent "QA & Testing" 5
 QA_AGENT="$SELECTED_AGENT"
-choose_model "$QA_AGENT" "QA & Testing"
+choose_model "$QA_AGENT" "QA & Testing" "medium" "tier3"
 QA_MODEL="$SELECTED_MODEL"
 QA_EFFORT="$SELECTED_EFFORT"
 choose_count "QA Tester" 1
@@ -341,9 +358,9 @@ echo ""
 echo "=================================================================="
 echo "PHẦN 4: BUG HUNTER & SECURITY AUDITOR (Nhóm Săn lỗi & Bảo mật)"
 echo "Nhiệm vụ: Quét lỗ hổng OWASP, race conditions, memory leaks, rò rỉ secret."
-choose_agent "Security & Bug Hunter" 3
+choose_agent "Security & Bug Hunter" 5
 SEC_AGENT="$SELECTED_AGENT"
-choose_model "$SEC_AGENT" "Security & Bug Hunter"
+choose_model "$SEC_AGENT" "Security & Bug Hunter" "high" "tier1"
 SEC_MODEL="$SELECTED_MODEL"
 SEC_EFFORT="$SELECTED_EFFORT"
 choose_count "Bug Hunter / Security" 1
@@ -357,17 +374,17 @@ echo ""
 echo "=================================================================="
 echo "PHẦN 5: GIT & GITHUB/GITLAB LIFECYCLE ROLES"
 echo "5.1. PR Reviewer (Chuyên gia thẩm định Pull Request & Line-by-line Diff)"
-choose_agent "PR Reviewer" 2
+choose_agent "PR Reviewer" 5
 PR_AGENT="$SELECTED_AGENT"
-choose_model "$PR_AGENT" "PR Reviewer"
+choose_model "$PR_AGENT" "PR Reviewer" "high" "tier2"
 PR_MODEL="$SELECTED_MODEL"
 PR_EFFORT="$SELECTED_EFFORT"
 
 echo ""
 echo "5.2. Git Issue Resolver (Chuyên gia xử lý bug được gán / assigned issues)"
-choose_agent "Git Issue Resolver" 1
+choose_agent "Git Issue Resolver" 5
 ISSUE_AGENT="$SELECTED_AGENT"
-choose_model "$ISSUE_AGENT" "Git Issue Resolver"
+choose_model "$ISSUE_AGENT" "Git Issue Resolver" "high" "tier2"
 ISSUE_MODEL="$SELECTED_MODEL"
 ISSUE_EFFORT="$SELECTED_EFFORT"
 
@@ -382,9 +399,9 @@ echo "6.1. UI/UX Specialist (Khai thác tối đa Design Mode & Embedded Browser
 ask_toggle "UI/UX Specialist" "y"
 ENABLE_UI="$TOGGLE_RESULT"
 if [[ "$ENABLE_UI" == true ]]; then
-  choose_agent "UI/UX Specialist" 2
+  choose_agent "UI/UX Specialist" 5
   UI_AGENT="$SELECTED_AGENT"
-  choose_model "$UI_AGENT" "UI/UX Specialist"
+  choose_model "$UI_AGENT" "UI/UX Specialist" "medium" "tier3"
   UI_MODEL="$SELECTED_MODEL"
   UI_EFFORT="$SELECTED_EFFORT"
 fi
@@ -395,9 +412,9 @@ echo "6.2. DevOps / Infra Specialist (DB migration, Docker/Orb, SSH Worktrees)"
 ask_toggle "DevOps Specialist" "y"
 ENABLE_DEVOPS="$TOGGLE_RESULT"
 if [[ "$ENABLE_DEVOPS" == true ]]; then
-  choose_agent "DevOps Specialist" 3
+  choose_agent "DevOps Specialist" 5
   DEVOPS_AGENT="$SELECTED_AGENT"
-  choose_model "$DEVOPS_AGENT" "DevOps Specialist"
+  choose_model "$DEVOPS_AGENT" "DevOps Specialist" "medium" "tier2"
   DEVOPS_MODEL="$SELECTED_MODEL"
   DEVOPS_EFFORT="$SELECTED_EFFORT"
 fi
