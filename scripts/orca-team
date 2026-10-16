@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 orca-team: CLI tool to inspect and dynamically reconfigure agents, models, 
 and concurrency for roles in an Orca Multi-Agent Orchestrator project.
@@ -359,12 +360,54 @@ def sync_gemini_directive(root: Path, config: dict):
     if pattern.search(content):
         content = pattern.sub(lambda m: m.group(1) + table_text + "\n", content)
 
+    devops_spec_line = (
+        '  orca orchestration task-create --spec "[ROLE: PRINCIPAL DEVOPS/SRE] Nhiệm vụ: [Docker/K8s/DB/Infra]. '
+        'Chuẩn: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. '
+        'CẤM VƯỢT RÀO: Chỉ sửa Infra/Docker/K8s/DB/CI; CẤM sửa business logic của Dev. '
+        'RÀ SOÁT RUNTIME LOGS & BÁO LỖI TỨC THỜI (BẮT BUỘC): (1) Phải git merge --no-edit <nhánh-dev> trước khi build code mới, '
+        '(2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! Bắt buộc chờ qua chu kỳ chạy thật '
+        'của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start (kubectl logs/docker logs '
+        'KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) cùng trạng thái vận hành trong DB, '
+        '(3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, SSLHandshakeException, Auth 401/403 hay health=ERROR '
+        'nào lúc runtime ➔ BẮT BUỘC gửi ngay escalation hoặc worker_done --outcome failed kèm trích xuất log lỗi '
+        '(TUYỆT ĐỐI CẤM báo succeeded khi runtime log còn lỗi!)." --json'
+    )
+    qa_spec_line = (
+        '  orca orchestration task-create --spec "[ROLE: PRINCIPAL QA/SDET] Nhiệm vụ: Kiểm thử nghiệm thu, bẻ gãy hệ thống '
+        '(Adversarial Testing) & Kiểm toán Runtime Logs cho [chi tiết]. Chuẩn: Phủ kín Happy Path, Edge Cases (null, rỗng, số âm, '
+        'payload lớn, race condition, lỗi mạng/DB) và 100% Acceptance Criteria. CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test; '
+        'CẤM TUYỆT ĐỐI sửa business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi '
+        'status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót '
+        'không quét pod DB/Kafka! BẰNG CHỨNG BẮT BUỘC: (1) Phải git merge --no-edit <nhánh-dev> để lấy code mới trước khi test, '
+        '(2) Chạy lệnh test thật VÀ yêu cầu/kiểm toán trực tiếp TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên '
+        'MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, (3) Dù API/Unit test trả về PASS nhưng nếu '
+        'Runtime Logs hoặc trạng thái DB còn BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL nào ➔ BẮT BUỘC chốt QA_VERDICT: FAIL '
+        'và yêu cầu Dev/DevOps xử lý!" --json'
+    )
+    bench_spec_line = (
+        '  orca orchestration task-create --spec "[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: [Đo tải, benchmark & profiling]. '
+        'Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. '
+        'CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! '
+        'BẰNG CHỨNG BẮT BUỘC: (1) Phải git merge --no-edit <nhánh-dev> để đo trên code mới nhất, (2) CẤM nhận xét cảm tính (\'Hệ thống mượt\') — '
+        'bắt buộc xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM, '
+        'chỉ rõ file:line gây nghẽn và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND." --json'
+    )
+    re_spec_line = (
+        '  orca orchestration task-create --spec "[ROLE: PRINCIPAL REVERSE ENGINEER (REA)] Nhiệm vụ: [Giải phẫu artifact/binary/protocol]. '
+        'Chuẩn: Bắt buộc kích hoạt skill reverse-engineer-anything (morluto/rea) & công cụ rea/rea-agents (open_binary, inspect_artifact, '
+        'analyze_javascript_application, inspect_web_network_capture...). CẤM VƯỢT RÀO: (1) Read-Only đối với source code dự án '
+        '(chỉ xuất Đặc tả Kỹ thuật Clean-Room cho dev-worker cài đặt, CẤM copy code decompile rối rắm vào repo), '
+        '(2) CẤM dùng REA cho source code repo thông thường, (3) CẤM đoán mò hành vi hộp đen khi không có Evidence từ REA! '
+        'BẰNG CHỨNG BẮT BUỘC: Xuất Hồ sơ Evidence thực tế (Target SHA-256/Path, REA tool đã chạy, Symbol/Offset/Decompiled Function/'
+        'Struct/Protocol contract, Unknowns/Limitations) và chốt RE_VERDICT: EVIDENCE_COMPLETE hoặc BLOCKED_BY_UNKNOWN." --json'
+    )
+
     # Tự động thêm/gỡ các dòng Step 1 (task-create) và Step 2 (worker-start) nếu role được bật/tắt động
     optional_directives = [
         (
             devops_enabled,
             "ROLE: PRINCIPAL DEVOPS/SRE",
-            '  # Principal DevOps/SRE (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):\n  orca orchestration task-create --spec "[ROLE: PRINCIPAL DEVOPS/SRE] Nhiệm vụ: [Docker/K8s/DB/Infra]. Chuẩn: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. CẤM VƯỢT RÀO: Chỉ sửa Infra/Docker/K8s/DB/CI; CẤM sửa business logic của Dev (nếu container crash do code Dev, phải gửi container log và báo failed/escalation). BẰNG CHỨNG BẮT BUỘC: (1) Phải git merge --no-edit <nhánh-dev> trước khi build code mới, (2) CẤM chỉ sửa YAML/Dockerfile rồi báo xong — phải chạy build/rollout thật, xác nhận pod Running (1/1 Ready, 0 Restarts, không CrashLoopBackOff), log sạch và git commit." --json\n',
+            f'  # Principal DevOps/SRE (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):\n{devops_spec_line}\n',
             "devops-worker",
             f'  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):\n  orca orchestration worker-start --task <DEVOPS_TASK_ID> --worktree new-child --name devops-worker {_fmt_worker_args_py(devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort") or "high")} --json\n'
         ),
@@ -378,14 +421,14 @@ def sync_gemini_directive(root: Path, config: dict):
         (
             bench_enabled,
             "ROLE: PRINCIPAL BENCHMARK & PERF",
-            '  # Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):\n  orca orchestration task-create --spec "[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: [Đo tải, benchmark & profiling]. Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! BẰNG CHỨNG BẮT BUỘC: (1) Phải git merge --no-edit <nhánh-dev> để đo trên code mới nhất, (2) CẤM nhận xét cảm tính (\'Hệ thống mượt\') — bắt buộc xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM, chỉ rõ file:line gây nghẽn và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND." --json\n',
+            f'  # Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):\n{bench_spec_line}\n',
             "bench-worker",
             f'  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):\n  orca orchestration worker-start --task <BENCH_TASK_ID> --worktree new-child --name bench-worker {_fmt_worker_args_py(bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort") or "high")} --json\n'
         ),
         (
             re_enabled,
             "ROLE: PRINCIPAL REVERSE ENGINEER (REA)",
-            '  # Principal Reverse Engineer - REA (BẮT BUỘC khi dịch ngược binary/JAR/ASAR/APK/firmware/network capture hoặc tái tạo giao thức đóng):\n  orca orchestration task-create --spec "[ROLE: PRINCIPAL REVERSE ENGINEER (REA)] Nhiệm vụ: [Giải phẫu artifact/binary/protocol]. Chuẩn: Bắt buộc kích hoạt skill reverse-engineer-anything (morluto/rea) & công cụ rea/rea-agents (open_binary, inspect_artifact, analyze_javascript_application, inspect_web_network_capture...). CẤM VƯỢT RÀO: (1) Read-Only đối với source code dự án (chỉ xuất Đặc tả Kỹ thuật Clean-Room cho dev-worker cài đặt, CẤM copy code decompile rối rắm vào repo), (2) CẤM dùng REA cho source code repo thông thường, (3) CẤM đoán mò hành vi hộp đen khi không có Evidence từ REA! BẰNG CHỨNG BẮT BUỘC: Xuất Hồ sơ Evidence thực tế (Target SHA-256/Path, REA tool đã chạy, Symbol/Offset/Decompiled Function/Struct/Protocol contract, Unknowns/Limitations) và chốt RE_VERDICT: EVIDENCE_COMPLETE hoặc BLOCKED_BY_UNKNOWN." --json\n',
+            f'  # Principal Reverse Engineer - REA (BẮT BUỘC khi dịch ngược binary/JAR/ASAR/APK/firmware/network capture hoặc tái tạo giao thức đóng):\n{re_spec_line}\n',
             "re-worker",
             f'  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):\n  orca orchestration worker-start --task <RE_TASK_ID> --worktree new-child --name re-worker {_fmt_worker_args_py(re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort") or "high")} --json\n'
         ),
@@ -421,6 +464,39 @@ def sync_gemini_directive(root: Path, config: dict):
                     re.M
                 )
                 content = s2_pat.sub("", content)
+
+    # Nâng cấp tự động chuẩn mực Runtime Log Audit cho DevOps, QA và Bước 3 Zero-Trust trên các file GEMINI.md hiện hữu
+    content = re.sub(
+        r'^[ \t]*orca orchestration task-create --spec "\[ROLE: PRINCIPAL DEVOPS/SRE\][^\n]*$',
+        lambda m: devops_spec_line,
+        content,
+        flags=re.M
+    )
+    content = re.sub(
+        r'^[ \t]*#[ \t]*(?:\d+\.\s*)?Principal SDET / QA[^\n]*\n[ \t]*orca orchestration task-create --spec "\[ROLE: PRINCIPAL QA/SDET\][^\n]*$',
+        lambda m: f'  # 4. Principal SDET / QA (Kiểm thử độc lập, Nghiệm thu & Kiểm toán Runtime Logs):\n{qa_spec_line}',
+        content,
+        flags=re.M
+    )
+    step3_new = (
+        "- **Nghiệm thu Zero-Trust:** Đọc kỹ bằng `orca orchestration worker-read --dispatch <DISPATCH_ID> --json`. **BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:\n"
+        "  1. **Báo sạch giả (Fake Clean):** Báo `succeeded` nhưng thiếu log chạy lệnh thật (`EXIT_CODE=0`), chưa `git commit` (thiếu Commit Hash), "
+        "`Tests Run = 0`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence dịch ngược từ `rea` (đối với `re-worker`), "
+        "hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ mà chưa merge commit mới của Dev!\n"
+        "  2. **Bỏ sót hoặc Che giấu Lỗi Runtime (Runtime Log Blindness / Masking):** DevOps/QA báo `PASS` nhưng không xuất bằng chứng quét "
+        "**Full Container/Pod Logs** (từ lúc start trên toàn bộ App + DB + Kafka/Broker sau chu kỳ chạy background job), dùng `--since` ngắn "
+        "để cắt bỏ log lỗi trước đó, bỏ sót không quét pod phụ trợ (`postgres`, `kafka`), hoặc QA sửa test script để nới lỏng assert / "
+        "phớt lờ trạng thái lỗi runtime (`ERROR`, `FATAL`, `Exception`, `SQL error`, `SSLHandshakeException`, `health: ERROR`, `close_status: FAILED`).\n"
+        "  3. **Còn lỗi tồn đọng:** Còn lỗi compile, test fail, lỗi trong runtime logs, `SECURITY_VERDICT: BLOCK`, `QA_VERDICT: FAIL`, "
+        "`PERF_VERDICT: BOTTLENECK_FOUND`, `RE_VERDICT: BLOCKED_BY_UNKNOWN`, hoặc pod K8s bị `CrashLoopBackOff`/`ErrImagePull`.\n"
+        "  4. **Vượt rào (Boundary Crossing):** QA/Bench/RE tự sửa code app, Dev xóa/skip test cũ, hoặc DevOps sửa lụi business logic."
+    )
+    content = re.sub(
+        r"- \*\*Nghiệm thu Zero-Trust:\*\*[^\n]*\n(?:[ \t]*\d+\.[ \t]*\*\*[^\n]*\n)+",
+        lambda m: step3_new + "\n",
+        content,
+        flags=re.M
+    )
 
     # Đồng bộ luôn các dòng lệnh worker-start trong BƯỚC 2 của .agents/GEMINI.md
     worker_map = {
@@ -1403,7 +1479,8 @@ def cmd_set(root: Path, config: dict, args: list):
             changes.append("Enabled: False ➔ True (tự động kích hoạt khi gán Agent/Model)")
 
     if not changes:
-        print("ℹ️ Không có thay đổi nào được yêu cầu.")
+        sync_gemini_directive(root, config)
+        print("ℹ️ Không có thay đổi nào được yêu cầu (đã đồng bộ lại '.agents/GEMINI.md').")
         return
 
     if role_key == "reSpecialist" and target.get("enabled", True):

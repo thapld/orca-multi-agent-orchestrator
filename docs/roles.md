@@ -58,7 +58,8 @@ Tài liệu này định nghĩa chi tiết **10 vai trò chuyên biệt cấp K�
   * **CẤM** tự ý sửa đổi business logic trong mã nguồn ứng dụng của Developer! Nếu container crash do lỗi code của Dev, phải trích xuất nguyên vẹn container logs/stacktrace và báo `failed`/`escalation` để Leader giao `dev-worker` sửa.
 * **Bằng chứng bắt buộc trước khi gửi `worker_done`:**
   1. **Đồng bộ nhánh code mới:** Nếu cần đóng gói/deploy code mới của Dev, bắt buộc chạy `git merge --no-edit <nhánh-dev>` trước khi build để không build nhầm code cũ!
-  2. **Cấm chỉ sửa file YAML/Dockerfile trên giấy rồi báo xong!** Phải chạy lệnh build/rollout/migration thực tế và xuất bằng chứng: `docker build` thành công, `kubectl rollout status` hoàn tất, `kubectl get pods` đạt `Running (1/1 Ready, 0 Restarts, không CrashLoopBackOff/ErrImagePull)`, healthcheck/logs thực tế sạch lỗi, và `git commit` sạch.
+  2. **Cấm chỉ sửa file YAML/Dockerfile hoặc chỉ nhìn `1/1 Running` lúc mới bật rồi báo xong!** Phải chạy lệnh build/rollout/migration thực tế, chờ qua chu kỳ thực thi của các background worker/`@Scheduled`/message consumer (tối thiểu 60–90s), và **quét TOÀN BỘ Runtime Logs từ lúc container start** (`kubectl logs <pod> --all-containers=true` / `docker logs`, **cấm dùng `--since` ngắn cắt lỗi**) trên **tất cả các pod/container của hệ thống** (App + Database + Kafka/Redpanda/Broker + Sidecar) cùng trạng thái vận hành trong DB.
+  3. **Thông báo lỗi tức thời (Immediate Escalation):** Nếu phát hiện bất kỳ dòng `ERROR`, `FATAL`, `PANIC`, `Exception`, `Stacktrace`, lỗi SQL (`BadSqlGrammarException`, `PSQLException`, `operator does not exist`), lỗi SSL/TLS (`SSLHandshakeException`), lỗi xác thực/kết nối (`401/403`) hay `health=ERROR` nào trong lúc chạy runtime ➔ **Bắt buộc gửi ngay `escalation` hoặc `worker_done --outcome failed`** kèm trích xuất log lỗi để báo cho Leader/Dev/QA, tuyệt đối cấm báo `succeeded`!
 
 ---
 
@@ -75,15 +76,16 @@ Tài liệu này định nghĩa chi tiết **10 vai trò chuyên biệt cấp K�
 ---
 
 ### 2.5. QA & Test Engineer (`qa-worker` — Principal SDET & Quality Architect)
-* **Chuẩn mực:** Kỹ sư trưởng Kiểm thử Tự động với tư duy bẻ gãy hệ thống (Adversarial Testing). Phủ kín Happy Path, Boundary/Edge Cases (`null`, rỗng, số âm, biên số học, payload quá tải/độc hại, race condition, timeout, lỗi mạng/DB) và đối chiếu 100% Acceptance Criteria.
-* **Ranh giới Cấm vượt rào:**
+* **Chuẩn mực:** Kỹ sư trưởng Kiểm thử Tự động với tư duy bẻ gãy hệ thống (Adversarial Testing) kết hợp **Kiểm toán Runtime Logs Toàn trình**. Phủ kín Happy Path, Boundary/Edge Cases (`null`, rỗng, số âm, biên số học, payload quá tải/độc hại, race condition, timeout, lỗi mạng/DB) và đối chiếu 100% Acceptance Criteria.
+* **Ranh giới Cấm vượt rào & Luật Chống Che Giấu Lỗi (Anti-Masking Law):**
   * Chỉ viết/chạy test suites (Integration/E2E/Regression) và nghiệm thu.
   * **CẤM TUYỆT ĐỐI** tự ý sửa code business logic của ứng dụng để ép test pass!
-  * **CẤM** xóa assert, nới lỏng điều kiện kiểm tra, hoặc viết mock giả luôn trả về `true` để làm đẹp báo cáo!
+  * **CẤM** xóa assert, nới lỏng điều kiện kiểm tra (ví dụ: chỉ kiểm tra `HTTP 200` bên ngoài hoặc `attempts >= 1` mà lờ đi `status = FAILED`, `health = ERROR`, `last_error`, `close_error`, `SSLHandshakeException`), hoặc viết mock giả luôn trả về `true`!
+  * **CẤM** thu hẹp cửa sổ `--since=<short_window>` để cắt bỏ các dòng `ERROR`/`FATAL` đã xuất hiện trước đó trong container log, và **CẤM** bỏ sót không quét log của các container phụ trợ (`postgres`, `kafka`, `redis`, v.v.)!
 * **Bằng chứng bắt buộc trước khi gửi `worker_done`:**
   1. **Chống test nhầm nhánh cũ:** Bắt buộc chạy `git merge --no-edit <nhánh-dev>` (kiểm tra `git log -n 1`) để lấy đúng code mới của Dev trước khi chạy test!
-  2. **Cấm duyệt bằng mắt (No Inspection-Only Pass):** Bắt buộc thực thi lệnh chạy test thật trên terminal (`mvn test`, `pytest`, `npm test`, `go test`, v.v.).
-  3. Chỉ được chốt `QA_VERDICT: PASS` khi `EXIT_CODE=0`, `Tests Run > 0`, `Failed = 0`, `Errors = 0`. Nếu có dù chỉ 1 lỗi nhỏ, bắt buộc chốt `QA_VERDICT: FAIL` kèm stacktrace lỗi.
+  2. **Cấm duyệt bằng mắt & Bắt buộc Kiểm toán Runtime Logs:** Ngoài việc chạy bộ test thật trên terminal (`mvn test`, `pytest`, `npm test`, `go test`...), đối với ứng dụng chạy runtime (Docker/K8s/Service), QA **bắt buộc yêu cầu/kiểm toán trực tiếp TOÀN BỘ Runtime Logs từ lúc container start** trên mọi pod/container (App + DB + Broker) trong và sau khi kích hoạt luồng E2E/background jobs.
+  3. **Quy tắc Phán quyết Nghiêm ngặt:** Dù toàn bộ Unit/API test trả về `EXIT_CODE=0`, nhưng nếu **Runtime Logs của bất kỳ container nào hoặc trạng thái DB (`last_error`, `close_error`, `health`) còn xuất hiện bất kỳ lỗi `ERROR`, `Exception`, `FATAL`, lỗi SQL hay SSL/Auth bất thường nào** ➔ **BẮT BUỘC chốt `QA_VERDICT: FAIL`** kèm trích xuất log lỗi để yêu cầu Dev/DevOps xử lý triệt để!
 
 ---
 
