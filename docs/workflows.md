@@ -32,21 +32,22 @@ sequenceDiagram
     end
 
     loop Trong khi code
-        Devs->>Orca: send --type heartbeat
-        Devs->>Devs: Viết code & Unit test
+        Devs->>Orca: send --from <handle> --type heartbeat
+        Devs->>Devs: Viết code, Unit test & git commit
     end
 
-    Devs->>Orca: send --type worker_done --outcome succeeded
-    
-    Lead->>Orca: worker-start QA (Chạy Integration test)
-    QA->>Orca: send --type worker_done --outcome succeeded
+    Devs->>Orca: send --from <handle> --type handoff --subject "Dev Handoff" --body "DEV_HANDOFF: branch=..., commit=..."
+    Devs->>Orca: send --from <handle> --type worker_done --outcome succeeded
+    Lead->>Orca: check --ack <DELIVERY_ID> & worker-read (Kiểm duyệt Commit Hash & Build=0)
 
-    Lead->>Orca: worker-start Security Auditor
-    Sec->>Orca: send --type worker_done (0 Critical)
+    Lead->>Orca: worker-start QA & Security Auditor (Truyền nhánh đã được Coordinator duyệt)
+    QA->>Orca: send --from <handle> --type worker_done --outcome succeeded (QA_VERDICT: PASS + Runtime Log Clean)
+    Sec->>Orca: send --from <handle> --type worker_done --outcome succeeded (SECURITY_VERDICT: PASS)
 
     Lead->>Orca: orca file open-changed --mode diff (Soi diff tổng thể)
-    Lead->>Orca: git push & gh pr create (Tạo PR / Merge vào main)
-    Lead->>Orca: orca orchestration worker-release (Dọn dẹp terminal)
+    Lead->>Orca: orca orchestration gate-create (Xin phép Human User trước khi merge)
+    User->>Lead: Duyệt Merge (Approved)
+    Lead->>Orca: git merge --no-ff & orca orchestration worker-release
     Lead-->>User: Báo cáo hoàn tất
 ```
 
@@ -150,35 +151,43 @@ sequenceDiagram
 
 ---
 
-## 6. Quy Trình Xử Lý Sự Cố & Chỉ Đạo Khi Bế Tắc (Worker Escalation & Blocker Handling)
+## 6. Quy Trình Ra Quyết Định Trung Tâm, Bàn Giao & Xử Lý Sự Cố (3-Tier Decision Hierarchy & Escalation)
 
-Tình huống: Worker (Dev/QA) gặp lỗi không vượt qua được (thiếu dependency, API contract không khớp, test fail liên tục) hoặc cần quyết định kiến trúc từ Leader.
+Tình huống: Worker (Dev/DevOps/QA/Sec/Bench/RE) cần quyết định kiến trúc (`ask`), gửi kết quả bàn giao (`handoff`), hoặc thực thi Quyền Phủ quyết Chuyên môn (`escalation`) khi phát hiện lỗi Runtime Log/Security/Performance. **Lead Coordinator là Người Ra Quyết Định Kỹ Thuật & Điều Phối Duy Nhất** trong các bước thực thi (Steps 1–3), và **Human User** giữ quyền quyết định cuối cùng ở Step 4 (`gate-create`).
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as 👤 Người dùng
-    participant Lead as 🏛️ Lead Coordinator
+    actor User as 👤 Người dùng (Human Gate)
+    participant Lead as 🏛️ Lead Coordinator (Sole Decision-Maker)
     participant Orca as 🐋 Orca Mailbox & CLI
-    participant Worker as 🤖 Worker (Dev/QA)
+    participant Worker as 🤖 Worker (Dev/DevOps/QA/Sec/Bench/RE)
 
-    Worker->>Worker: Gặp lỗi / Bế tắc (Blocker)
-    Worker->>Orca: orca orchestration send --type ask --text "Cần làm rõ format JWT header"
-    
-    Note over Lead,Orca: 🔔 Reactive Event (Orca Mailbox tự động đánh thức Leader - CẤM chạy loop polling)
-    Note over Lead,Orca: Leader phát hiện tin nhắn 'ask' / 'escalation'
-    
-    alt Leader tự xử lý được theo spec
-        Lead->>Orca: orca orchestration send --to <worker> --type steer --text "Dùng Authorization: Bearer <token>"
-        Worker->>Worker: Nhận chỉ đạo & Tiếp tục công việc
-    else Vấn đề kiến trúc lớn cần ý kiến con người
+    Note over Lead,Orca: Lắng nghe sự kiện: orca orchestration check [--ack <DELIVERY_ID>] --wait --types "worker_done,escalation,question,handoff"
+
+    alt Trường hợp A: Worker hỏi quyết định kiến trúc (Blocking Question)
+        Worker->>Orca: orca orchestration ask --from <handle> --task-id <tid> --dispatch-id <did> --question "Cần làm rõ format JWT header" --json
+        Orca-->>Lead: Sự kiện 'question' (id: <MSG_ID>)
+        Lead->>Orca: orca orchestration reply --id <MSG_ID> --body "Quyết định của Chief Architect: Dùng Authorization: Bearer <token>" --json
+        Orca-->>Worker: Mở khóa 'ask' và trả về câu trả lời của Coordinator
+    else Trường hợp B: Worker trình duyệt kết quả bàn giao (Handoff Submission)
+        Worker->>Orca: orca orchestration send --from <handle> --task-id <tid> --dispatch-id <did> --type handoff --subject "Dev Handoff" --body "DEV_HANDOFF: branch=..., commit=..." --json
+        Orca-->>Lead: Sự kiện 'handoff'
+        Lead->>Lead: Kiểm duyệt Commit Hash / Clean-Room Spec / Runtime Logs
+        Lead->>Orca: Duyệt & Điều phối cho role kế tiếp (send --to dispatch:<LIVE_ID> --type dispatch hoặc task-create + worker-start)
+    else Trường hợp C: Worker thực thi Quyền Phủ quyết Chuyên môn (Domain Veto / Escalation)
+        Worker->>Orca: orca orchestration send --from <handle> --task-id <tid> --dispatch-id <did> --type escalation --subject "Runtime Log Error" --body "DEVOPS_ALERT / QA_ALERT / SEC_BLOCK: <error_detail>" --json
+        Orca-->>Lead: Sự kiện 'escalation'
+        Lead->>Lead: Phân tích nguyên nhân gốc rễ & Phân xử xung đột liên role
+        alt Worker cần sửa vẫn đang chạy (live)
+            Lead->>Orca: orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "<Chỉ dẫn vá lỗi>" --json
+        else Worker cần sửa đã kết thúc (settled / đã gửi worker_done)
+            Lead->>Orca: orca orchestration task-create & worker-start (hoặc --retry-of <OLD_DISPATCH_ID>)
+        end
+    else Trường hợp D: Vấn đề vượt phạm vi spec cần ý kiến con người
+        Lead->>Orca: orca orchestration gate-create --title "..." --question "..." --options "approve,revise" --json
         Lead-->>User: Tham vấn người dùng (Human Gate)
-        User->>Lead: Phản hồi giải pháp
-        Lead->>Orca: orca orchestration send --to <worker> --type steer --text "<Giải pháp từ User>"
-    else Worker bị loop vô tận / Crash
-        Lead->>Orca: orca terminal read --terminal <handle> (Đọc log phân tích)
-        Lead->>Orca: orca orchestration worker-stop --dispatch <id>
-        Lead->>Orca: orca orchestration worker-start --task <id> (Khởi động lại với prompt bổ sung)
+        User->>Lead: Phản hồi quyết định
     end
 ```
 

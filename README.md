@@ -25,8 +25,8 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
    * Khi Leader đang điều phối hoặc review tính năng mà có Issue P0/Hotfix gán đột xuất: tự động fork ra worktree riêng (`--no-parent`) để fix ngầm song song mà không làm gián đoạn luồng chính.
 6. **Chính Sách Bàn Giao Khi Đổi Người (Reassignment & Handoff Policy):**
    * Khi issue đang fix bị chuyển sang người khác: tự động dừng worker an toàn (`worker-stop`), đóng gói tiến độ nháp thành branch bàn giao `wip/issue-<id>-handover`, để lại comment trên GitHub và thu dọn worktree.
-7. **Xử Lý Sự Cố & Chỉ Đạo Khi Bế Tắc (Worker Escalation & Blocker Handling):**
-   * Khi worker gặp blocker, tự động gửi `ask`/`escalation` lên Coordinator qua Orca Mailbox. Leader kiểm tra qua `orca orchestration check`, đưa ra chỉ đạo (`steer`), hoặc tham vấn Human Gate nếu cần quyết định kiến trúc lớn.
+7. **Phân Cấp Thẩm Quyền Quyết Định 3 Tầng & Giao Tiếp Đa Chiều (3-Tier Decision Hierarchy & Handoff Protocol):**
+   * **Worker** giữ Quyền Phủ quyết Chuyên môn (`escalation`), trình duyệt kết quả bàn giao (`handoff`) và hỏi quyết định kiến trúc (`ask`). **Lead Coordinator** là Người Ra Quyết Định Kỹ Thuật & Điều Phối Duy Nhất trong các bước thực thi (`check --ack`, `reply`, `send --to dispatch:<id> --type dispatch` hoặc tạo Task vá lỗi). **Human User** giữ quyền quyết định cuối cùng trước khi merge (`gate-create`).
 8. **Universal Auto-Discovery (Khởi chạy tự động không cần dán prompt):**
    * Tự động tạo symlink `CLAUDE.md` và `AGENTS.md` trỏ về `.agents/GEMINI.md`. Dù bạn mở Antigravity, Claude Code (`claude`), hay Codex CLI làm Leader, agent đều tự động đọc toàn bộ directive và quy trình điều phối ngay khi khởi động mà không cần dán prompt thủ công.
 9. **Điều Chỉnh Model & Agent Năng Động Ngay Khi Ở Leader (`orca-team` CLI):**
