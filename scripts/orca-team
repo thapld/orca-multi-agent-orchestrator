@@ -1980,18 +1980,261 @@ def estimate_tokens(text: str) -> int:
     ascii_chars = len(text) - non_ascii
     return max(1, int(round((ascii_chars / 3.8) + (non_ascii / 2.0))))
 
+
+def _parse_iso_utc(s: str):
+    if not s:
+        return None
+    from datetime import datetime, timezone
+    try:
+        clean = str(s).strip()
+        if clean.endswith("Z"):
+            clean = clean[:-1] + "+00:00"
+        elif " " in clean and "+" not in clean and "T" not in clean:
+            clean = clean.replace(" ", "T") + "+00:00"
+        dt = datetime.fromisoformat(clean)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _fmt_dur(secs: float) -> str:
+    secs_i = max(0, int(round(secs)))
+    if secs_i >= 3600:
+        return f"{secs_i // 3600}h{(secs_i % 3600) // 60:02d}m"
+    if secs_i >= 60:
+        return f"{secs_i // 60}m{secs_i % 60:02d}s"
+    return f"{secs_i}s"
+
+
+def _fmt_tok(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 10_000:
+        return f"{n / 1_000:.1f}k"
+    return f"{n:,}"
+
+
+def _analyze_antigravity_transcript(tf_path: Path) -> dict:
+    try:
+        raw_lines = tf_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        steps = [json.loads(ln) for ln in raw_lines if ln.strip()]
+    except Exception:
+        return {}
+    if not steps:
+        return {}
+
+    measured_llm_secs = 0.0
+    measured_out_tok = 0
+    for i, s in enumerate(steps):
+        if s.get("type") == "PLANNER_RESPONSE" and i + 1 < len(steps) and steps[i + 1].get("type") == "GENERIC":
+            t_s = _parse_iso_utc(s.get("created_at"))
+            t_e = _parse_iso_utc(steps[i + 1].get("created_at"))
+            ot = int(s.get("output_tokens") or 0)
+            if t_s and t_e:
+                dt = max(0.5, (t_e - t_s).total_seconds())
+                measured_llm_secs += dt
+                measured_out_tok += ot
+    avg_rate = (measured_out_tok / measured_llm_secs) if measured_llm_secs > 0 else 50.0
+
+    llm_secs = 0.0
+    tool_secs = 0.0
+    idle_wait_secs = 0.0
+    in_tok = 0
+    cache_tok = 0
+    out_tok = 0
+    peak_ctx = 0
+    last_ctx = 0
+    turns = 0
+    tool_calls = 0
+    tool_errors = 0
+    last_tool_name = "-"
+
+    for i, s in enumerate(steps):
+        if s.get("type") == "PLANNER_RESPONSE":
+            turns += 1
+            it = int(s.get("input_tokens") or 0)
+            ct = int(s.get("cache_read_tokens") or 0)
+            ot = int(s.get("output_tokens") or 0)
+            in_tok += it
+            cache_tok += ct
+            out_tok += ot
+            last_ctx = it + ct
+            if last_ctx > peak_ctx:
+                peak_ctx = last_ctx
+            tcs = s.get("tool_calls") or []
+            tool_calls += len(tcs)
+            if tcs and isinstance(tcs[-1], dict):
+                last_tool_name = str(tcs[-1].get("name") or "-")
+
+            t_start = _parse_iso_utc(s.get("created_at"))
+            if i + 1 < len(steps):
+                t_end = _parse_iso_utc(steps[i + 1].get("created_at"))
+                if steps[i + 1].get("type") == "GENERIC" and t_start and t_end:
+                    dt = max(0.5, (t_end - t_start).total_seconds())
+                    llm_secs += dt
+                    j = i + 1
+                    t_tool_start = t_end
+                    t_tool_end = t_end
+                    while j < len(steps) and steps[j].get("type") == "GENERIC":
+                        c = str(steps[j].get("content") or "")
+                        if "exited with code" in c and "exited with code 0" not in c:
+                            tool_errors += 1
+                        elif steps[j].get("status") == "ERROR":
+                            tool_errors += 1
+                        m2 = re.search(r"Completed At:\s*([^\n\r]+)", c)
+                        if m2:
+                            ts2 = _parse_iso_utc(m2.group(1).strip())
+                            if ts2 and (not t_tool_end or ts2 > t_tool_end):
+                                t_tool_end = ts2
+                        j += 1
+                    if j < len(steps) and steps[j].get("type") == "PLANNER_RESPONSE":
+                        ts_next_p = _parse_iso_utc(steps[j].get("created_at"))
+                        if ts_next_p and t_tool_start and ts_next_p > t_tool_start:
+                            t_tool_end = ts_next_p
+                    if t_tool_start and t_tool_end and t_tool_end > t_tool_start:
+                        tool_secs += (t_tool_end - t_tool_start).total_seconds()
+                else:
+                    est_dt = max(0.8, ot / max(10.0, avg_rate))
+                    llm_secs += est_dt
+                    if t_start and t_end and (t_end - t_start).total_seconds() > est_dt:
+                        idle_wait_secs += (t_end - t_start).total_seconds() - est_dt
+            else:
+                llm_secs += max(0.8, ot / max(10.0, avg_rate))
+
+    t0 = _parse_iso_utc(steps[0].get("created_at"))
+    tN = _parse_iso_utc(steps[-1].get("created_at"))
+    wall_secs = max(0.0, (tN - t0).total_seconds()) if (t0 and tN) else 0.0
+    active_secs = llm_secs + tool_secs
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    idle_since_last = max(0.0, (now_utc - tN).total_seconds()) if tN else 0.0
+
+    return {
+        "transcript_path": str(tf_path),
+        "steps": len(steps),
+        "turns": turns,
+        "tool_calls": tool_calls,
+        "tool_errors": tool_errors,
+        "in_tok": in_tok,
+        "cache_tok": cache_tok,
+        "out_tok": out_tok,
+        "peak_ctx": peak_ctx,
+        "last_ctx": last_ctx,
+        "llm_secs": llm_secs,
+        "tool_secs": tool_secs,
+        "active_secs": active_secs,
+        "wall_secs": wall_secs,
+        "idle_wait_secs": idle_wait_secs,
+        "idle_since_last_secs": idle_since_last,
+        "out_tok_s": out_tok / max(1.0, llm_secs),
+        "active_tok_s": out_tok / max(1.0, active_secs),
+        "prefill_tok_s": (in_tok + cache_tok + out_tok) / max(1.0, llm_secs),
+        "cache_hit_pct": (cache_tok / max(1, in_tok + cache_tok)) * 100.0,
+        "avg_turn_s": llm_secs / max(1, turns),
+        "last_tool": last_tool_name,
+        "last_step_at": steps[-1].get("created_at") or "",
+    }
+
+
+def _index_cli_transcripts() -> dict:
+    """Scan local CLI session directories and index transcripts by dispatchId, taskId, termHandle, and runId."""
+    by_dispatch = {}
+    by_task = {}
+    by_term = {}
+    by_leader_run = {}
+
+    roots = [
+        Path.home() / ".gemini" / "antigravity-cli" / "brain",
+        Path.home() / ".gemini" / "antigravity" / "brain",
+    ]
+    for r_dir in roots:
+        if not r_dir.is_dir():
+            continue
+        for cid_dir in r_dir.iterdir():
+            if not cid_dir.is_dir():
+                continue
+            tf = cid_dir / ".system_generated" / "logs" / "transcript.jsonl"
+            full_tf = cid_dir / ".system_generated" / "logs" / "transcript_full.jsonl"
+            if not tf.exists():
+                continue
+            src = full_tf if full_tf.exists() else tf
+            try:
+                with open(src, "r", encoding="utf-8", errors="ignore") as f:
+                    first_line = f.readline()
+                    is_dispatched_worker = "You are a dispatched worker" in first_line
+                    rest_sample = "" if is_dispatched_worker else f.read()
+            except Exception:
+                continue
+
+            if is_dispatched_worker:
+                for cid_match in re.findall(r"ctx_[a-f0-9]+", first_line):
+                    by_dispatch[cid_match] = tf
+                for tid_match in re.findall(r"task_[a-f0-9]+", first_line):
+                    by_task[tid_match] = tf
+                for trm_match in re.findall(r"term_[a-f0-9-]+", first_line):
+                    by_term[trm_match] = tf
+            else:
+                combined = first_line + "\n" + rest_sample
+                for rid_match in set(re.findall(r"run_[a-f0-9]+", combined)):
+                    prev = by_leader_run.get(rid_match)
+                    if not prev or ("antigravity-cli" in str(tf) and "antigravity-cli" not in str(prev)):
+                        by_leader_run[rid_match] = tf
+    return {
+        "by_dispatch": by_dispatch,
+        "by_task": by_task,
+        "by_term": by_term,
+        "by_leader_run": by_leader_run,
+    }
+
+
+def _collect_git_diff_stats(wt_path: str, wt_name: str) -> dict:
+    res = {"files": 0, "ins": 0, "del": 0, "commits": 0}
+    if not wt_path or not os.path.isdir(wt_path):
+        return res
+    import subprocess
+    try:
+        head_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2).stdout.strip()
+        main_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "main"], capture_output=True, text=True, timeout=2).stdout.strip()
+        dev_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "dev-worker"], capture_output=True, text=True, timeout=2).stdout.strip()
+        base_ref = None
+        if head_sha and main_sha and head_sha != main_sha:
+            if wt_name == "dev-worker" or head_sha != dev_sha:
+                base_ref = dev_sha if (wt_name != "dev-worker" and dev_sha and dev_sha != head_sha) else main_sha
+        if base_ref:
+            c_cnt = subprocess.run(["git", "-C", wt_path, "rev-list", "--count", f"{base_ref}..HEAD"], capture_output=True, text=True, timeout=2).stdout.strip()
+            if c_cnt.isdigit():
+                res["commits"] = int(c_cnt)
+            numstat = subprocess.run(["git", "-C", wt_path, "diff", "--numstat", f"{base_ref}..HEAD"], capture_output=True, text=True, timeout=3)
+        else:
+            numstat = subprocess.run(["git", "-C", wt_path, "diff", "--numstat", "HEAD"], capture_output=True, text=True, timeout=3)
+        if numstat.returncode == 0:
+            for ln in numstat.stdout.splitlines():
+                parts = ln.strip().split("\t")
+                if len(parts) >= 3:
+                    res["files"] += 1
+                    if parts[0].isdigit():
+                        res["ins"] += int(parts[0])
+                    if parts[1].isdigit():
+                        res["del"] += int(parts[1])
+    except Exception:
+        pass
+    return res
+
+
 def cmd_monitor(root: Path, config: dict, args: list = None):
     import subprocess
     args = args or []
     verbose = any(a in args for a in ["-v", "--verbose", "--full"])
     auto_fix = any(a in args for a in ["--fix", "-f"])
 
-    print("\n╔═══════════════════════════════════════════════════════════════════════════════════╗")
-    print("║             🔬 ORCA TOKEN AUDITOR & CONTEXT LEAK MONITOR                          ║")
-    print("╚═══════════════════════════════════════════════════════════════════════════════════╝")
-    print(f"📍 Dự án: {root}")
+    print("\n╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+    print("║                   🔬 ORCA ENGINEERING TELEMETRY, SPEED BENCHMARK & TOKEN MONITOR                                     ║")
+    print("╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
+    print(f"📍 Workspace: {root}")
     if auto_fix:
-        print("⚡ Chế độ Auto-Fix: Đang tự động xử lý các bẫy rò rỉ token...")
+        print("⚡ Auto-Fix Mode: Enabled")
     print("")
 
     critical_issues = []
@@ -2000,11 +2243,11 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
     actions_taken = []
 
     # ─────────────────────────────────────────────────────────────────────────────
-    # PHẦN 1: PHÂN TÍCH DIRECTIVES & CONTEXT TIÊU TỐN MỖI LƯỢT (PER-TURN OVERHEAD)
+    # PHẦN 1: CHỈ DẪN HỆ THỐNG & CONTEXT TIÊU TỐN MỖI LƯỢT (PER-TURN SYSTEM PROMPT)
     # ─────────────────────────────────────────────────────────────────────────────
-    print("📋 1. CHỈ DẪN HỆ THỐNG & CONTEXT TIÊU TỐN MỖI LƯỢT (PER-TURN SYSTEM PROMPT)")
+    print("📋 1. SYSTEM PROMPT & STATIC DIRECTIVE OVERHEAD (PER-TURN BASELINE)")
     print(f"{'FILE / NGUỒN':<26} | {'LOẠI':<12} | {'KÍCH THƯỚC':<12} | {'ƯỚC TÍNH TOKENS':<16} | {'TRẠNG THÁI'}")
-    print("-" * 85)
+    print("-" * 88)
 
     base_tokens = 0
     target_files = [
@@ -2030,7 +2273,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             tokens = 0
 
         if is_link:
-            status = "🟢 Symlink (0 extra)"
+            status = "Symlink (0 extra)"
             type_str = "Symlink"
             size_str = f"{size_b} B"
             tokens_str = f"~{tokens} (shared)"
@@ -2040,45 +2283,43 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             tokens_str = f"~{tokens} tokens"
             base_tokens += tokens
             if tokens > 5600:
-                status = "⚠️ Quá lớn (>5.6k tok)"
-                warning_issues.append(f"File '{rel_name}' có kích thước lớn (~{tokens} tokens). Sẽ bị nạp lại vào context của AI Leader trên MỖI turn.")
+                status = "WARN (>5.6k tok)"
+                warning_issues.append(f"File '{rel_name}' nặng ~{tokens} tokens (nạp lại vào context trên mỗi turn).")
             else:
-                status = "🟢 Gọn gàng"
+                status = "OK"
 
-        # Kiểm tra nếu CLAUDE.md hoặc AGENTS.md là file độc lập trùng lặp với GEMINI.md
         if rel_name in ["CLAUDE.md", "AGENTS.md"] and not is_link and path.exists():
             gemini_p = root / ".agents" / "GEMINI.md"
             if gemini_p.exists():
-                status = "🚨 Trùng lặp (x2 token)"
+                status = "DUPLICATE (x2)"
                 critical_issues.append(
-                    f"File '{rel_name}' là file độc lập thay vì symlink tới '.agents/GEMINI.md'. "
-                    f"Một số AI IDE (như Cursor/Claude/Codex) nạp cả hai file cùng lúc, gây lãng phí ~{tokens} tokens mỗi turn!"
+                    f"File '{rel_name}' là bản sao độc lập thay vì symlink tới '.agents/GEMINI.md' (tốn gấp đôi ~{tokens} tokens/turn)."
                 )
                 if auto_fix:
                     try:
                         path.unlink()
                         os.symlink(".agents/GEMINI.md", path)
-                        actions_taken.append(f"Đã chuyển '{rel_name}' thành symlink trỏ về '.agents/GEMINI.md'.")
-                        status = "✅ Đã sửa thành Symlink"
+                        actions_taken.append(f"Chuyển '{rel_name}' thành symlink trỏ về '.agents/GEMINI.md'.")
+                        status = "FIXED (Symlink)"
                     except Exception as e:
                         actions_taken.append(f"Lỗi khi chuyển '{rel_name}' thành symlink: {e}")
 
         print(f"{rel_name:<26} | {type_str:<12} | {size_str:<12} | {tokens_str:<16} | {status}")
 
-    print("-" * 85)
-    print(f"👉 Tổng token cơ sở (Base Context Tokens) nạp mỗi turn: ~{base_tokens:,} tokens")
+    print("-" * 88)
+    print(f"👉 Base Directive Overhead: ~{base_tokens:,} tokens/turn")
     if base_tokens < 6400:
-        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn, bao gồm đầy đủ Hiến pháp 10 Vai trò cấp Principal, Giao thức Handoff/Runtime Log Audit & Quy tắc 1 Role = 1 Worktree).")
+        passed_items.append(f"Base Directive Overhead: ~{base_tokens:,} tokens/turn (< 6,400 tokens threshold).")
     elif base_tokens < 7400:
-        warning_issues.append(f"Context chỉ dẫn ban đầu ở mức trung bình (~{base_tokens:,} tokens/turn).")
+        warning_issues.append(f"Base Directive Overhead ở mức trung bình (~{base_tokens:,} tokens/turn).")
     else:
-        critical_issues.append(f"Context chỉ dẫn ban đầu quá lớn (~{base_tokens:,} tokens/turn). Cần tinh gọn lại các file chỉ dẫn.")
+        critical_issues.append(f"Base Directive Overhead vượt ngưỡng (~{base_tokens:,} tokens/turn).")
     print("")
 
     # ─────────────────────────────────────────────────────────────────────────────
     # PHẦN 2: QUÉT BẪY VÒNG LẶP & ĐƯỜNG DẪN CHẾT (DEAD REFERENCE TRAPS)
     # ─────────────────────────────────────────────────────────────────────────────
-    print("🕵️ 2. QUÉT BẪY VÒNG LẶP & ĐƯỜNG DẪN CHẾT (DEAD REFERENCE TRAPS)")
+    print("🕵️ 2. KIỂM TRA ĐƯỜNG DẪN CHẾT TRONG FILE CHỈ DẪN (DEAD REFERENCE CHECK)")
     scanned_directives = [p for _, p in target_files if p.exists()]
     dead_refs_found = []
 
@@ -2107,53 +2348,43 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     dead_refs_found.append((p_str, path.name))
 
     if dead_refs_found:
-        print(f"🚨 Phát hiện {len(dead_refs_found)} đường dẫn chết trong file chỉ dẫn:")
+        print(f"🚨 Phát hiện {len(dead_refs_found)} đường dẫn không tồn tại:")
         for ref, source in dead_refs_found:
-            print(f"   ❌ '{ref}' (trong {source}) ➔ KHÔNG TỒN TẠI trên đĩa!")
+            print(f"   ❌ '{ref}' (trong {source})")
             critical_issues.append(
-                f"Đường dẫn chết '{ref}' trong file '{source}'. Khi AI đọc thấy đường dẫn này, nó sẽ liên tục "
-                f"gọi tool view_file / glob để tìm file, nhận lỗi File Not Found và lặp lại tìm kiếm (đốt 1.500 - 3.000 tokens/lần)!"
+                f"Đường dẫn '{ref}' trong '{source}' không tồn tại trên đĩa (gây lỗi File Not Found khi AI gọi view_file)."
             )
     else:
-        print("✅ Tuyệt vời! Không phát hiện đường dẫn chết nào trong file chỉ dẫn.")
-        passed_items.append("Không có bẫy đường dẫn chết trong các file chỉ dẫn AI.")
+        print("   • Dead references: 0 (OK)")
+        passed_items.append("Dead references trong file chỉ dẫn: 0.")
     print("")
 
     # ─────────────────────────────────────────────────────────────────────────────
     # PHẦN 3: VỆ SINH WORKSPACE & BẪY GIT STATUS (WORKSPACE HYGIENE)
     # ─────────────────────────────────────────────────────────────────────────────
-    print("🧹 3. VỆ SINH WORKSPACE & BẪY GIT STATUS (WORKSPACE HYGIENE)")
+    print("🧹 3. WORKSPACE HYGIENE & GIT STATUS FOOTPRINT")
     gitignore_path = root / ".gitignore"
     if not gitignore_path.exists():
-        print("⚠️ Dự án chưa có file '.gitignore'!")
-        warning_issues.append("Chưa có file '.gitignore'. Lệnh git status của AI có thể bị ngập trong file rác.")
+        print("⚠️ Chưa có file '.gitignore'.")
+        warning_issues.append("Thiếu file '.gitignore'.")
         if auto_fix:
             gitignore_path.write_text(".orca/\n.orca-cache/\n*.orca.log\nnode_modules/\n.venv/\n", encoding="utf-8")
-            actions_taken.append("Đã tự động tạo file '.gitignore' chuẩn với các luật bỏ qua rác Orca.")
-            print("  ✅ Đã tự động tạo file '.gitignore' mới.")
+            actions_taken.append("Tạo mới '.gitignore' với quy tắc chặn log Orca.")
     else:
         gi_content = gitignore_path.read_text(encoding="utf-8", errors="ignore")
-        missing_ignores = []
-        for pat in [".orca", ".orca-cache", "*.orca.log"]:
-            if pat not in gi_content:
-                missing_ignores.append(pat)
-
+        missing_ignores = [pat for pat in [".orca", ".orca-cache", "*.orca.log"] if pat not in gi_content]
         if missing_ignores:
-            print(f"⚠️ '.gitignore' đang thiếu các quy tắc: {', '.join(missing_ignores)}")
-            critical_issues.append(
-                f"Thiếu '{', '.join(missing_ignores)}' trong .gitignore! Các file log/receipt của Orca sẽ bị đưa vào "
-                f"'git status' và 'git diff', làm tràn hàng chục ngàn tokens vào ngữ cảnh AI!"
-            )
+            print(f"⚠️ '.gitignore' thiếu: {', '.join(missing_ignores)}")
+            critical_issues.append(f"Thiếu '{', '.join(missing_ignores)}' trong .gitignore.")
             if auto_fix:
                 with open(gitignore_path, "a", encoding="utf-8") as f:
                     f.write("\n# Orca Orchestrator Runtime Logs & Receipts\n")
                     for m in missing_ignores:
                         f.write(f"{m}\n")
-                actions_taken.append(f"Đã bổ sung '{', '.join(missing_ignores)}' vào .gitignore.")
-                print(f"  ✅ Đã tự động bổ sung {', '.join(missing_ignores)} vào .gitignore.")
+                actions_taken.append(f"Bổ sung '{', '.join(missing_ignores)}' vào .gitignore.")
         else:
-            print("✅ '.gitignore' đã chặn đầy đủ các thư mục và log rác của Orca (.orca/, .orca-cache/).")
-            passed_items.append(".gitignore đã cấu hình chuẩn chống rò rỉ receipt Orca.")
+            print("   • .gitignore rules (.orca/, .orca-cache/, *.orca.log): OK")
+            passed_items.append(".gitignore đã chặn thư mục tạm của Orca.")
 
     try:
         git_res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=str(root), timeout=5)
@@ -2161,25 +2392,22 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             lines = [l for l in git_res.stdout.splitlines() if l.strip()]
             untracked = [l for l in lines if l.startswith("??")]
             modified = [l for l in lines if not l.startswith("??")]
-            
             git_tokens = estimate_tokens(git_res.stdout)
-            print(f"📊 Git Status: {len(modified)} file thay đổi, {len(untracked)} file untracked (Kích thước ~{git_tokens} tokens).")
+            print(f"   • Git status output: {len(modified)} modified, {len(untracked)} untracked (~{git_tokens:,} tokens khi gọi git status)")
             if len(untracked) > 25:
-                print(f"⚠️ Có tới {len(untracked)} file untracked chưa được gitignore!")
                 warning_issues.append(
-                    f"Có {len(untracked)} file untracked trong workspace (~{git_tokens} tokens). "
-                    f"Mỗi lần AI chạy 'git status' hoặc liệt kê file sẽ tiêu tốn lượng token này."
+                    f"Workspace có {len(untracked)} file untracked (~{git_tokens:,} tokens mỗi lần chạy 'git status')."
                 )
             else:
-                passed_items.append("Git workspace gọn gàng, không bị ngập file untracked.")
+                passed_items.append(f"Git status footprint nhỏ ({len(untracked)} untracked files, ~{git_tokens:,} tokens).")
     except Exception:
         pass
     print("")
 
     # ─────────────────────────────────────────────────────────────────────────────
-    # PHẦN 4: RUNTIME ORCA TELEMETRY & CHỨNG MINH HIỆU QUẢ CHIA VIỆC (MULTI-AGENT ROI)
+    # PHẦN 4: RUNTIME TELEMETRY, TỐC ĐỘ MODEL (TOK/S) & PHÂN TÍCH ĐỊNH LƯỢNG
     # ─────────────────────────────────────────────────────────────────────────────
-    print("⚡ 4. RUNTIME TELEMETRY & CHỨNG MINH HIỆU QUẢ ĐA AGENT (REAL WORKFLOW AUDIT)")
+    print("⚡ 4. RUNTIME TELEMETRY, MODEL VELOCITY (TOK/S) & TOKEN BREAKDOWN")
     orca_bin = os.environ.get("ORCA_BIN") or shutil.which("orca") or "/usr/local/bin/orca"
 
     runtime_ok = False
@@ -2187,10 +2415,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
     active_run_obj = ""
     run_tasks = {}
     workers = []
-    msgs = []
 
     try:
-        # 4.1 Tìm Run gần nhất của project hiện tại trong run-list
         r_res = subprocess.run([orca_bin, "orchestration", "run-list", "--json"], capture_output=True, text=True, timeout=5)
         all_runs = []
         if r_res.returncode == 0:
@@ -2199,15 +2425,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             all_runs = r_obj.get("runs", []) if isinstance(r_obj, dict) else []
             runtime_ok = True
 
-        # Tìm danh sách các Run thuộc về project (hoặc các Run gần nhất có worker/task)
         proj_slug = root.name.lower()
-        candidate_runs = []
-        for r in all_runs:
-            if r.get("legacy"):
-                continue
-            candidate_runs.append(r)
+        candidate_runs = [r for r in all_runs if not r.get("legacy")]
 
-        # Kiểm tra lần lượt các Run gần nhất để lấy Run đang chạy hoặc Run vừa hoàn thành của project
         selected_run = None
         for r in candidate_runs[:6]:
             rid = r.get("id")
@@ -2224,7 +2444,6 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 to = json.loads(t_chk.stdout).get("result", {})
                 t_list_tmp = to.get("tasks", []) if isinstance(to, dict) else []
 
-            # Kiểm tra xem Run này có thuộc workspace hiện tại không
             belongs_to_proj = (proj_slug in str(r.get("objective", "")).lower())
             for w_item in w_list_tmp:
                 ws_str = str((w_item.get("resource") or {}).get("worktreeId") or "")
@@ -2259,20 +2478,26 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             active_run_obj = selected_run.get("objective", "")
 
         if runtime_ok:
+            cli_index = _index_cli_transcripts()
             if active_run_id:
-                obj_short = (active_run_obj[:72] + "...") if len(active_run_obj) > 75 else active_run_obj
-                print(f"🎯 Run đang giám sát: {active_run_id} — \"{obj_short}\"")
-            print(f"👥 Tổng số Worker Dispatches trong Run: {len(workers)} worker(s) | Tổng số Tasks: {len(run_tasks)}")
+                obj_short = (active_run_obj[:78] + "...") if len(active_run_obj) > 81 else active_run_obj
+                print(f"🎯 Run ID: {active_run_id} — \"{obj_short}\"")
+            print(f"👥 Dispatched Workers: {len(workers)} | Tasks in DAG: {len(run_tasks)}")
 
             if workers:
-                print(f"\n   {'DISPATCH ID':<16} | {'WORKTREE / ROLE':<16} | {'AGENT & MODEL THỰC TẾ':<38} | {'THỜI GIAN':<10} | {'TRẠNG THÁI & TERMINAL'}")
-                print("   " + "-" * 112)
+                print("\n📊 4.1 BẢNG ĐO LƯỜNG TỐC ĐỘ AGENT CLI & TIÊU THỤ TOKEN TRÊN TỪNG WORKER:")
+                hdr = (
+                    f"   {'DISPATCH / ROLE':<27} | {'MODEL THỰC TẾ':<26} | {'WALL / IDLE':<13} | "
+                    f"{'TURNS / TOOLS':<16} | {'LLM / TOOL TIME':<15} | {'SPEED (OUT | PREFILL)':<23} | "
+                    f"{'TOKENS (OUT / PEAK / CACHE)':<27} | {'STATE'}"
+                )
+                print(hdr)
+                print("   " + "-" * (len(hdr) - 3))
 
             reclaimable_dispatches = []
-            total_offloaded_files = 0
             total_spec_tokens = 0
             total_report_tokens = 0
-            total_worker_work_tokens_est = 0
+            worker_metrics_list = []
 
             for w in workers:
                 d_id = str(w.get("dispatchId") or w.get("id") or "-")
@@ -2280,13 +2505,14 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 term = str(w.get("terminalHandle") or w.get("agentTerminalHandle") or "-")
                 term_state = str(w.get("terminalState") or "-")
                 w_state = str(w.get("workerState") or w.get("state") or "-")
+                w_phase = "-"
 
-                # Truy vấn chi tiết worker-show để lấy đúng model, worktree name, thời gian chạy
                 wt_name = "-"
                 wt_path = ""
-                agent_model_str = "-"
-                duration_str = "-"
-                files_mod_count = 0
+                ag_name = "-"
+                md_name = "-"
+                duration_secs = 0.0
+                last_out_idle_secs = None
 
                 ws_id = str((w.get("resource") or {}).get("worktreeId") or "")
                 if "::" in ws_id:
@@ -2301,6 +2527,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         w_info = ws_json.get("worker", {})
                         d_info = ws_json.get("dispatch", {})
                         t_info = ws_json.get("terminal") or {}
+                        w_phase = str(w_info.get("phase") or "-")
                         if t_info.get("worktreePath"):
                             wt_path = str(t_info.get("worktreePath"))
                         start_opts = w_info.get("startOptions", {})
@@ -2310,39 +2537,39 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                             wt_opt = str(start_opts.get("worktree"))
                             wt_name = wt_opt.rsplit("/", 1)[-1] if "/" in wt_opt else wt_opt.split(":", 1)[-1]
                         eff_launch = (start_opts.get("launch") or {}).get("effective") or {}
-                        ag_name = eff_launch.get("agent") or start_opts.get("agent") or "-"
-                        md_name = eff_launch.get("model") or ""
-                        ef_name = eff_launch.get("effort") or ""
-                        if md_name:
-                            agent_model_str = f"{ag_name} ({md_name})"
-                        else:
-                            agent_model_str = ag_name
+                        ag_name = str(eff_launch.get("agent") or start_opts.get("agent") or "-")
+                        md_name = str(eff_launch.get("model") or ag_name)
 
-                        # Tính thời lượng chạy (nếu worker đang active chưa có completedAt thì tính đến thời điểm UTC hiện tại)
                         c_at = str(d_info.get("dispatchedAt") or w_info.get("createdAt") or "")
                         raw_comp_at = d_info.get("completedAt")
+                        from datetime import datetime, timezone
+                        now_utc = datetime.now(timezone.utc)
                         if raw_comp_at:
-                            comp_at = str(raw_comp_at)
+                            comp_dt = _parse_iso_utc(str(raw_comp_at))
                         elif term_state == "active" or w_state not in ("succeeded", "failed", "stopped", "timed_out"):
-                            from datetime import datetime, timezone
-                            comp_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                            comp_dt = now_utc
                         else:
-                            comp_at = str(w_info.get("updatedAt") or "")
-                        if c_at and comp_at:
-                            try:
-                                from datetime import datetime
-                                c_clean = c_at.replace("T", " ").replace("Z", "").split(".")[0]
-                                comp_clean = comp_at.replace("T", " ").replace("Z", "").split(".")[0]
-                                dt1 = datetime.strptime(c_clean, "%Y-%m-%d %H:%M:%S")
-                                dt2 = datetime.strptime(comp_clean, "%Y-%m-%d %H:%M:%S")
-                                secs = max(0, int((dt2 - dt1).total_seconds()))
-                                duration_str = f"{secs // 60}m {secs % 60:02d}s" if secs >= 60 else f"{secs}s"
-                            except Exception:
-                                pass
+                            comp_dt = _parse_iso_utc(str(w_info.get("updatedAt") or ""))
+                        start_dt = _parse_iso_utc(c_at)
+                        if start_dt and comp_dt:
+                            duration_secs = max(0.0, (comp_dt - start_dt).total_seconds())
+
+                        last_out_raw = t_info.get("lastOutputAt") or w_info.get("lastHeartbeatAt")
+                        if last_out_raw:
+                            lo_dt = _parse_iso_utc(str(last_out_raw))
+                            if lo_dt:
+                                last_out_idle_secs = max(0.0, (now_utc - lo_dt).total_seconds())
                 except Exception:
                     pass
 
-                # Phân tích dữ liệu Task tương ứng để đo lường công việc đã offload khỏi Leader
+                # Khớp transcript thực tế của Worker CLI
+                tf_match = (
+                    cli_index["by_dispatch"].get(d_id)
+                    or cli_index["by_task"].get(t_id)
+                    or cli_index["by_term"].get(term)
+                )
+                t_metrics = _analyze_antigravity_transcript(tf_match) if tf_match else {}
+
                 t_obj_info = run_tasks.get(t_id, {})
                 spec_txt = str(t_obj_info.get("spec") or "")
                 res_raw = str(t_obj_info.get("result") or "")
@@ -2350,6 +2577,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 total_spec_tokens += spec_tok
 
                 rep_body = ""
+                files_mod_count = 0
                 if res_raw:
                     try:
                         res_parsed = json.loads(res_raw)
@@ -2358,48 +2586,79 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         files_mod_count = len(f_mod)
                     except Exception:
                         rep_body = res_raw
-                # Nếu worker không truyền --files-modified trong worker_done nhưng đã commit riêng trên nhánh của mình, tự động đếm từ git diff
-                if files_mod_count == 0 and w_state == "succeeded" and wt_path and os.path.isdir(wt_path):
-                    try:
-                        head_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2).stdout.strip()
-                        main_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "main"], capture_output=True, text=True, timeout=2).stdout.strip()
-                        dev_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "dev-worker"], capture_output=True, text=True, timeout=2).stdout.strip()
-                        if head_sha and head_sha != main_sha:
-                            if wt_name == "dev-worker" or head_sha != dev_sha:
-                                base_ref = dev_sha if (wt_name != "dev-worker" and dev_sha and dev_sha != head_sha) else (main_sha or "HEAD~1")
-                                g_diff = subprocess.run(
-                                    ["git", "-C", wt_path, "diff", "--name-only", f"{base_ref}..HEAD"],
-                                    capture_output=True, text=True, timeout=3
-                                )
-                                if g_diff.returncode == 0:
-                                    committed_files = [ln.strip() for ln in g_diff.stdout.splitlines() if ln.strip()]
-                                    files_mod_count = len(committed_files)
-                    except Exception:
-                        pass
-                total_offloaded_files += files_mod_count
                 rep_tok = estimate_tokens(rep_body)
                 total_report_tokens += rep_tok
 
-                # Ước tính lượng context đọc/sửa code/chạy test mà Worker đã gánh thay cho Leader
-                # Trung bình mỗi worker đọc/sửa file + chạy maven/jest test trong worktree tiêu tốn ~18,000 - 35,000 tokens
-                est_worker_ctx = max(15000, files_mod_count * 2200 + spec_tok * 4)
-                total_worker_work_tokens_est += est_worker_ctx
+                git_stats = _collect_git_diff_stats(wt_path, wt_name)
+                if files_mod_count == 0 and git_stats["files"] > 0:
+                    files_mod_count = git_stats["files"]
 
-                if term_state == "released":
-                    st_label = f"✅ {w_state} | 🧹 Đã thu hồi sau merge"
-                elif term_state in ["reclaimable", "retained"]:
-                    reclaimable_dispatches.append(d_id)
-                    st_label = f"🟢 {w_state} | 🔔 Đang hiển thị Badge/Chuông trên UI"
-                elif term_state == "active":
-                    st_label = f"🟡 Đang chạy ({w_state} - Spinner UI)"
+                # Chuẩn bị các cột hiển thị
+                role_col = f"{d_id[:10]}.. ({wt_name})"[:27]
+                model_col = md_name[:26]
+                wall_s = duration_secs if duration_secs > 0 else t_metrics.get("wall_secs", 0.0)
+                idle_s = t_metrics.get("idle_since_last_secs") if t_metrics else last_out_idle_secs
+                if w_state in ("succeeded", "failed", "stopped"):
+                    wall_idle_col = f"{_fmt_dur(wall_s)} / done"
+                elif idle_s is not None:
+                    wall_idle_col = f"{_fmt_dur(wall_s)} / {_fmt_dur(idle_s)}"
                 else:
-                    st_label = f"{w_state} ({term_state})"
+                    wall_idle_col = f"{_fmt_dur(wall_s)} / -"
 
-                print(f"   {d_id:<16} | {wt_name:<16} | {agent_model_str:<38} | {duration_str:<10} | {st_label}")
-                if t_obj_info:
-                    t_title = str(t_obj_info.get("task_title") or t_obj_info.get("display_name") or "")[:68]
-                    f_info = f", sửa {files_mod_count} files" if files_mod_count > 0 else ""
-                    print(f"      ↳ Task: \"{t_title}\" (Spec: ~{spec_tok} tok ➔ Báo cáo về Leader: chỉ ~{rep_tok} tok{f_info})")
+                if t_metrics:
+                    turns_tools_col = f"{t_metrics['turns']}t / {t_metrics['tool_calls']}c({t_metrics['tool_errors']}e)"
+                    llm_tool_col = f"{_fmt_dur(t_metrics['llm_secs'])} / {_fmt_dur(t_metrics['tool_secs'])}"
+                    speed_col = f"{t_metrics['out_tok_s']:>5.1f} | {_fmt_tok(int(t_metrics['prefill_tok_s'])):>6}/s"
+                    tok_col = f"{_fmt_tok(t_metrics['out_tok']):>5} / {_fmt_tok(t_metrics['peak_ctx']):>6} / {t_metrics['cache_hit_pct']:>4.1f}%"
+                else:
+                    turns_tools_col = "N/A (no log)"
+                    llm_tool_col = "- / -"
+                    speed_col = "N/A"
+                    tok_col = "N/A"
+
+                if term_state in ["reclaimable", "retained"]:
+                    reclaimable_dispatches.append(d_id)
+
+                state_col = f"{w_state}/{w_phase} ({term_state})"
+                print(
+                    f"   {role_col:<27} | {model_col:<26} | {wall_idle_col:<13} | "
+                    f"{turns_tools_col:<16} | {llm_tool_col:<15} | {speed_col:<23} | "
+                    f"{tok_col:<27} | {state_col}"
+                )
+
+                # Dòng phụ hiển thị chi tiết công việc kỹ thuật: Git diff, latency trung bình/turn, tool cuối, spec vs report
+                t_title = str(t_obj_info.get("task_title") or t_obj_info.get("display_name") or "")[:54]
+                git_str = f"git: {files_mod_count} files (+{git_stats['ins']}/-{git_stats['del']}, {git_stats['commits']} commits)"
+                if t_metrics:
+                    lat_str = f"avg_turn: {t_metrics['avg_turn_s']:.1f}s/turn | active_vel: {t_metrics['active_tok_s']:.1f} tok/s | in_fresh: {_fmt_tok(t_metrics['in_tok'])} | cache_read: {_fmt_tok(t_metrics['cache_tok'])} | last_tool: {t_metrics['last_tool']}"
+                else:
+                    lat_str = "transcript telemetry unavailable"
+                print(f"      ↳ Task: \"{t_title}\" | spec={spec_tok} tok -> report={rep_tok} tok | {git_str}")
+                print(f"      ↳ Perf: {lat_str}")
+
+                if t_metrics and w_state not in ("succeeded", "failed", "stopped") and (idle_s or 0) > 180:
+                    warning_issues.append(
+                        f"Worker {wt_name} ({d_id}) đang active nhưng không có bước thực thi mới trong {_fmt_dur(idle_s)} (last_tool={t_metrics['last_tool']})."
+                    )
+                if t_metrics and t_metrics["tool_errors"] >= 10:
+                    warning_issues.append(
+                        f"Worker {wt_name} ({d_id}) có {t_metrics['tool_errors']}/{t_metrics['tool_calls']} lệnh tool trả về mã lỗi (command retry overhead)."
+                    )
+
+                worker_metrics_list.append({
+                    "dispatch_id": d_id,
+                    "role": wt_name,
+                    "model": md_name,
+                    "state": w_state,
+                    "term_state": term_state,
+                    "wall_secs": wall_s,
+                    "spec_tok": spec_tok,
+                    "rep_tok": rep_tok,
+                    "files": files_mod_count,
+                    "ins": git_stats["ins"],
+                    "del": git_stats["del"],
+                    "telemetry": t_metrics,
+                })
 
             # Hiển thị các Task đang chờ tới lượt trong Task DAG (chưa dispatch)
             dispatched_task_ids = {str(w.get("taskId") or "") for w in workers}
@@ -2411,10 +2670,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 for pt in pending_dag_tasks:
                     pt_title = str(pt.get("task_title") or pt.get("display_name") or "")[:68]
                     pt_status = str(pt.get("status") or "ready")
-                    print(f"   ⏳ Chờ tới lượt trong Task DAG ({pt.get('id')} - {pt_status}): \"{pt_title}\"")
-
-            if reclaimable_dispatches:
-                print(f"  💡 Đang giữ {len(reclaimable_dispatches)} terminal worker để hiển thị chấm xanh (🟢) & chuông thông báo (🔔) trên Orca Sidebar cho đến khi duyệt Human Gate.")
+                    print(f"   ⏳ Queued in DAG ({pt.get('id')} - {pt_status}): \"{pt_title}\"")
 
             # Kiểm tra các Gate treo (pending) hoặc Task bị kẹt 'blocked'/'ready' sau khi toàn bộ worker đã succeeded & released ở Bước 4
             all_workers_settled_released = bool(workers) and all(
@@ -2448,7 +2704,6 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                                     tr = subprocess.run([orca_bin, "orchestration", "task-update", "--id", tid, "--status", "completed", "--json"], capture_output=True, text=True, timeout=4)
                                     if tr.returncode == 0:
                                         fixed_t += 1
-                            # Fallback qua SQLite nếu Run thuộc thế hệ Coordinator cũ đã bị fence (stable_pane_required)
                             if (len(pending_gates) > resolved_g) or (len(stuck_tasks) > fixed_t):
                                 try:
                                     import sqlite3
@@ -2469,15 +2724,15 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                                         conn.close()
                                 except Exception:
                                     pass
-                            actions_taken.append(f"Đã tự động đóng {len(pending_gates)} Gate treo & cập nhật {len(stuck_tasks)} Task về 'completed' cho Run {active_run_id}.")
+                            actions_taken.append(f"Đóng {len(pending_gates)} Gate pending & cập nhật {len(stuck_tasks)} Task về 'completed' cho Run {active_run_id}.")
                         else:
                             warning_issues.append(
-                                f"Run {active_run_id} đã thu hồi hết worker nhưng còn {len(pending_gates)} Gate 'pending' / {len(stuck_tasks)} Task '{stuck_tasks[0].get('status') if stuck_tasks else 'blocked'}' (chạy 'orca-monitor --fix' để đóng sạch)."
+                                f"Run {active_run_id} đã thu hồi hết worker nhưng còn {len(pending_gates)} Gate 'pending' / {len(stuck_tasks)} Task '{stuck_tasks[0].get('status') if stuck_tasks else 'blocked'}' (chạy 'orca-monitor --fix' để đồng bộ)."
                             )
                 except Exception:
                     pass
 
-            # 4.1b Kiểm tra Orca Agent Status Hooks (Hiển thị Loading Spinner & Chuông thông báo trên Orca UI)
+            # 4.1b Kiểm tra Orca Agent Status Hooks
             hooks_res = subprocess.run([orca_bin, "agent", "hooks", "status", "--json"], capture_output=True, text=True, timeout=5)
             if hooks_res.returncode == 0:
                 hooks_data = json.loads(hooks_res.stdout).get("result", {})
@@ -2507,21 +2762,21 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                             [orca_electron, "-e", f'require("{hook_ctrl}").installManagedAgentHooks(null, {{agents: {json.dumps(missing_hooks)}, shouldHydrateShellPath: true}})'],
                             env=env_hydrate, capture_output=True, text=True, timeout=8
                         )
-                        actions_taken.append(f"Đã tự động cài đặt Orca Status Hooks (loading spinner & bell icon) cho: {', '.join(missing_hooks)}")
-                        passed_items.append(f"Orca UI Status Hooks (Spinner & Chuông thông báo) đã kích hoạt cho: {', '.join(sorted(configured_agents))}.")
+                        actions_taken.append(f"Cài đặt Orca Status Hooks cho: {', '.join(missing_hooks)}")
+                        passed_items.append(f"Orca Status Hooks active cho: {', '.join(sorted(configured_agents))}.")
                     else:
-                        warning_issues.append(f"Agent {', '.join(missing_hooks)} chưa có Orca Status Hooks (sẽ thiếu loading spinner & chuông thông báo trên UI).")
+                        warning_issues.append(f"Agent {', '.join(missing_hooks)} thiếu Orca Status Hooks.")
                 else:
-                    passed_items.append(f"Orca UI Status Hooks (Spinner & Chuông thông báo) đã cài đặt đầy đủ cho: {', '.join(sorted(configured_agents))}.")
+                    passed_items.append(f"Orca Status Hooks active cho: {', '.join(sorted(configured_agents))}.")
 
-
-            # 4.2 Phân tích chi tiết Mailbox (Chứng minh Cơ chế Event-Driven vs Polling)
+            # 4.2 Phân tích Mailbox
             inbox_res = subprocess.run([orca_bin, "orchestration", "inbox", "--limit", "50", "--json"], capture_output=True, text=True, timeout=5)
+            hb_count = done_count = esc_count = handoff_count = done_tokens = 0
+            run_msgs = []
             if inbox_res.returncode == 0:
                 inbox_data = json.loads(inbox_res.stdout)
                 inbox_obj = inbox_data.get("result", inbox_data) if isinstance(inbox_data, dict) else {}
                 all_msgs = inbox_obj.get("messages", []) if isinstance(inbox_obj, dict) else []
-                # Lọc thông điệp thuộc Run hiện tại (nếu có)
                 run_msgs = [m for m in all_msgs if not active_run_id or m.get("run_id") == active_run_id]
                 if not run_msgs:
                     run_msgs = all_msgs[:20]
@@ -2532,87 +2787,153 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 handoff_count = sum(1 for m in run_msgs if m.get("type") in ["handoff", "dispatch", "status"])
                 done_tokens = sum(estimate_tokens(str(m.get("body") or "") + str(m.get("subject") or "")) for m in run_msgs if m.get("type") in ["worker_done", "handoff", "escalation", "question"])
 
-                print(f"\n📬 Phân tích Hộp thư Điều phối (Mailbox Event-Driven):")
-                print(f"   • Tổng thông điệp trong Run: {len(run_msgs)} tin ({hb_count} heartbeat ngầm, {done_count} worker_done, {handoff_count} handoff/dispatch, {esc_count} escalation/question).")
-                print(f"   • Cơ chế chống đốt token: {hb_count} tín hiệu heartbeat được xử lý ngầm trong SQLite của Orca (tiêu tốn 0 LLM token của Leader).")
-                print(f"   • Lượng dữ liệu thực tế đánh thức Leader: {done_count + handoff_count + esc_count} bản tin điều phối (~{done_tokens} tokens).")
+                print(f"\n📬 4.2 MAILBOX IPC TELEMETRY:")
+                print(f"   • Messages in Run: {len(run_msgs)} total | heartbeat={hb_count} (SQLite-handled, 0 LLM tokens) | worker_done={done_count} | handoff={handoff_count} | escalation/question={esc_count}")
+                print(f"   • Coordinator Wake Payload: {done_count + handoff_count + esc_count} event(s), payload={done_tokens:,} tokens (avg {done_tokens // max(1, done_count + handoff_count + esc_count)} tok/msg)")
 
-            # 4.3 BẢNG CHỨNG MINH ĐỊNH LƯỢNG: TỐI ƯU TOKEN & CHI PHÍ (SINGLE-AGENT VS ORCA MULTI-AGENT)
+            # 4.3 BẢNG TỔNG HỢP SỐ LIỆU ĐO ĐẠC THỰC TẾ (LEADER VS WORKERS TELEMETRY)
             if workers:
+                leader_tf = cli_index["by_leader_run"].get(active_run_id) if active_run_id else None
+                leader_m = _analyze_antigravity_transcript(leader_tf) if leader_tf else {}
+
+                w_with_m = [wm["telemetry"] for wm in worker_metrics_list if wm.get("telemetry")]
+                w_turns = sum(m["turns"] for m in w_with_m)
+                w_tools = sum(m["tool_calls"] for m in w_with_m)
+                w_errs = sum(m["tool_errors"] for m in w_with_m)
+                w_in_tok = sum(m["in_tok"] for m in w_with_m)
+                w_cache_tok = sum(m["cache_tok"] for m in w_with_m)
+                w_out_tok = sum(m["out_tok"] for m in w_with_m)
+                w_peak_max = max((m["peak_ctx"] for m in w_with_m), default=0)
+                w_llm_s = sum(m["llm_secs"] for m in w_with_m)
+                w_tool_s = sum(m["tool_secs"] for m in w_with_m)
+                w_out_speed = w_out_tok / max(1.0, w_llm_s)
+                w_prefill_speed = (w_in_tok + w_cache_tok + w_out_tok) / max(1.0, w_llm_s)
+                w_cache_pct = (w_cache_tok / max(1, w_in_tok + w_cache_tok)) * 100.0
+
                 released_cnt = sum(1 for w in workers if str(w.get("terminalState") or "") == "released")
                 retained_cnt = sum(1 for w in workers if str(w.get("terminalState") or "") in ["retained", "reclaimable"])
                 active_cnt = sum(1 for w in workers if str(w.get("terminalState") or "") == "active")
-                if active_cnt > 0 and retained_cnt > 0:
-                    rel_summary = f"{active_cnt} chạy, {retained_cnt} giữ, {released_cnt} thu hồi"
-                elif active_cnt > 0:
-                    rel_summary = f"{active_cnt} đang chạy, {released_cnt} đã thu hồi"
-                elif retained_cnt > 0:
-                    rel_summary = f"{retained_cnt} giữ badge, {released_cnt} đã thu hồi"
+
+                print(f"\n📈 4.3 BẢNG ĐỐI CHIẾU SỐ LIỆU ĐO ĐẠC THỰC TẾ (MEASURED TRANSCRIPT METRICS):")
+                print("   ┌──────────────────────────────────────────────┬─────────────────────────────────┬─────────────────────────────────┐")
+                print("   │ Chỉ số kỹ thuật (Đo trực tiếp từ Transcript) │ LEADER (Coordinator)            │ WORKERS (Tổng hợp các nhánh)    │")
+                print("   ├──────────────────────────────────────────────┼─────────────────────────────────┼─────────────────────────────────┤")
+                if leader_m:
+                    l_turns_str = f"{leader_m['turns']} turns / {leader_m['tool_calls']} tools ({leader_m['tool_errors']} err)"
+                    l_time_str = f"LLM {_fmt_dur(leader_m['llm_secs'])} | Tool {_fmt_dur(leader_m['tool_secs'])}"
+                    l_spd_str = f"{leader_m['out_tok_s']:.1f} out/s | {_fmt_tok(int(leader_m['prefill_tok_s']))} tot/s"
+                    l_in_str = f"{leader_m['in_tok']:,} tok"
+                    l_cache_str = f"{leader_m['cache_tok']:,} tok ({leader_m['cache_hit_pct']:.1f}%)"
+                    l_out_str = f"{leader_m['out_tok']:,} tok"
+                    l_peak_str = f"{leader_m['peak_ctx']:,} tok (last: {leader_m['last_ctx']:,})"
                 else:
-                    rel_summary = f"{released_cnt}/{len(workers)} terminals đã thu hồi"
+                    l_turns_str = "N/A (IDE/External Session)"
+                    l_time_str = "N/A"
+                    l_spd_str = "N/A"
+                    l_in_str = f"~{base_tokens + total_spec_tokens + total_report_tokens:,} tok (est)"
+                    l_cache_str = "N/A"
+                    l_out_str = f"~{total_spec_tokens:,} tok (spec)"
+                    l_peak_str = f"~{base_tokens + total_report_tokens:,} tok"
 
-                leader_actual_tok = base_tokens + total_spec_tokens + total_report_tokens
-                single_agent_est_tok = base_tokens + total_worker_work_tokens_est
-                saved_tok = max(0, single_agent_est_tok - leader_actual_tok)
-                saved_pct = int((saved_tok / single_agent_est_tok) * 100) if single_agent_est_tok > 0 else 0
+                w_turns_str = f"{w_turns} turns / {w_tools} tools ({w_errs} err)" if w_with_m else "N/A"
+                w_time_str = f"LLM {_fmt_dur(w_llm_s)} | Tool {_fmt_dur(w_tool_s)}" if w_with_m else "N/A"
+                w_spd_str = f"{w_out_speed:.1f} out/s | {_fmt_tok(int(w_prefill_speed))} tot/s" if w_with_m else "N/A"
+                w_in_str = f"{w_in_tok:,} tok" if w_with_m else "N/A"
+                w_cache_str = f"{w_cache_tok:,} tok ({w_cache_pct:.1f}%)" if w_with_m else "N/A"
+                w_out_str = f"{w_out_tok:,} tok" if w_with_m else "N/A"
+                w_peak_str = f"max {w_peak_max:,} tok" if w_with_m else "N/A"
+                l_term_str = f"active={active_cnt}, retain={retained_cnt}"
+                w_term_str = f"released={released_cnt}/{len(workers)}"
 
-                print(f"\n📊 BẢNG ĐỐI CHIẾU HIỆU QUẢ THỰC TẾ (TẠI SAO BẠN BIẾT NÓ ĐÃ TỐI ƯU THẬT?):")
-                print("   ┌────────────────────────────────────────────────────────┬──────────────────────────────┐")
-                print(f"   │ Chỉ số đo lường trên phiên chạy thực tế                │ Giá trị ghi nhận             │")
-                print("   ├────────────────────────────────────────────────────────┼──────────────────────────────┤")
-                print(f"   │ 1. Nếu 1 Agent (Leader) tự làm hết (Đọc file/Code/Test)│ ~{single_agent_est_tok:>7,} tokens (Nặng/Đắt)   │")
-                print(f"   │ 2. Thực tế Leader tiêu tốn (Nhờ đẩy sang {len(workers)} Worktrees)  │ ~{leader_actual_tok:>7,} tokens (Siêu nhẹ)   │")
-                print(f"   │ 3. Lượng Context rác đã cô lập khỏi bộ nhớ của Leader  │ ~{saved_tok:>7,} tokens (-{saved_pct}% context)│")
-                print(f"   │ 4. Phân tầng Model (Model Tiering)                     │ Tối ưu (Flash/Kimi gánh 85%) │")
-                print(f"   │ 5. Trạng thái giải phóng RAM / Terminal (Release)      │ {rel_summary:<28} │")
-                print("   └────────────────────────────────────────────────────────┴──────────────────────────────┘")
-                passed_items.append(f"Đã cô lập thành công ~{saved_tok:,} tokens code/test log sang {len(workers)} worker worktrees (tiết kiệm ~{saved_pct}% context cho Leader).")
+                print(f"   │ 1. Số lượt suy luận & gọi Tool (Turns/Tools) │ {l_turns_str:<31} │ {w_turns_str:<31} │")
+                print(f"   │ 2. Thời gian thực thi (LLM Inference / Tool) │ {l_time_str:<31} │ {w_time_str:<31} │")
+                print(f"   │ 3. Tốc độ xử lý (Out tok/s | Total tok/s)    │ {l_spd_str:<31} │ {w_spd_str:<31} │")
+                print(f"   │ 4. Fresh Input Tokens (Nạp mới lũy kế)       │ {l_in_str:<31} │ {w_in_str:<31} │")
+                print(f"   │ 5. Cache Read Tokens (Tái sử dụng Cache %)   │ {l_cache_str:<31} │ {w_cache_str:<31} │")
+                print(f"   │ 6. Output Tokens (Reasoning + Code sinh ra)  │ {l_out_str:<31} │ {w_out_str:<31} │")
+                print(f"   │ 7. Đỉnh Context Window (Peak Context / Turn) │ {l_peak_str:<31} │ {w_peak_str:<31} │")
+                print(f"   │ 8. Trạng thái Worker Terminals               │ {l_term_str:<31} │ {w_term_str:<31} │")
+                print("   └──────────────────────────────────────────────┴─────────────────────────────────┴─────────────────────────────────┘")
+
+                # Phân tích tốc độ theo từng dòng Model thực tế trong Run
+                model_buckets = {}
+                for wm in worker_metrics_list:
+                    tm = wm.get("telemetry")
+                    if not tm:
+                        continue
+                    m_key = wm["model"]
+                    b = model_buckets.setdefault(m_key, {"runs": 0, "turns": 0, "out_tok": 0, "in_tok": 0, "cache_tok": 0, "llm_s": 0.0, "tool_s": 0.0})
+                    b["runs"] += 1
+                    b["turns"] += tm["turns"]
+                    b["out_tok"] += tm["out_tok"]
+                    b["in_tok"] += tm["in_tok"]
+                    b["cache_tok"] += tm["cache_tok"]
+                    b["llm_s"] += tm["llm_secs"]
+                    b["tool_s"] += tm["tool_secs"]
+                if leader_m and config:
+                    l_mod = str((config.get("coordinator") or {}).get("model") or "coordinator-model")
+                    b = model_buckets.setdefault(f"{l_mod} (leader)", {"runs": 0, "turns": 0, "out_tok": 0, "in_tok": 0, "cache_tok": 0, "llm_s": 0.0, "tool_s": 0.0})
+                    b["runs"] += 1
+                    b["turns"] += leader_m["turns"]
+                    b["out_tok"] += leader_m["out_tok"]
+                    b["in_tok"] += leader_m["in_tok"]
+                    b["cache_tok"] += leader_m["cache_tok"]
+                    b["llm_s"] += leader_m["llm_secs"]
+                    b["tool_s"] += leader_m["tool_secs"]
+
+                if model_buckets:
+                    print("\n⏱️ 4.4 BENCHMARK TỐC ĐỘ THỰC TẾ THEO MODEL (MODEL SPEED & LATENCY PROFILE):")
+                    for m_key, b in model_buckets.items():
+                        out_s = b["out_tok"] / max(1.0, b["llm_s"])
+                        tot_s = (b["in_tok"] + b["cache_tok"] + b["out_tok"]) / max(1.0, b["llm_s"])
+                        avg_t = b["llm_s"] / max(1, b["turns"])
+                        c_pct = (b["cache_tok"] / max(1, b["in_tok"] + b["cache_tok"])) * 100.0
+                        llm_share = (b["llm_s"] / max(1.0, b["llm_s"] + b["tool_s"])) * 100.0
+                        print(
+                            f"   • {m_key:<32}: gen={out_s:>5.1f} out_tok/s | throughput={_fmt_tok(int(tot_s)):>6} tok/s | "
+                            f"latency={avg_t:>4.1f}s/turn | cache={c_pct:>4.1f}% | time_split: LLM {llm_share:.0f}% / Tool {100-llm_share:.0f}%"
+                        )
 
         else:
             print("ℹ️ Không thể kết nối Orca Runtime qua CLI (EPERM hoặc Orca đang đóng).")
-            print("  (Hãy chạy lệnh 'orca-monitor' trực tiếp trên Terminal để xem telemetry runtime chi tiết).")
+            print("  (Chạy 'orca-monitor' trực tiếp trên Terminal để truy xuất runtime telemetry).")
     except Exception as e:
         print(f"ℹ️ Bỏ qua kiểm tra runtime chi tiết do: {e}")
     print("")
 
     # ─────────────────────────────────────────────────────────────────────────────
-    # PHẦN 5: TỔNG KẾT & HƯỚNG DẪN TỐI ƯU CỤ THỂ (ACTIONABLE CHECKLIST)
+    # PHẦN 5: TỔNG KẾT PHÁT HIỆN KỸ THUẬT & LỆNH XỬ LÝ (DIAGNOSTIC SUMMARY)
     # ─────────────────────────────────────────────────────────────────────────────
-    print("🎯 5. BẢNG TỔNG KẾT & HƯỚNG DẪN TỐI ƯU TOKEN (ACTIONABLE AUDIT)")
-    print("═" * 85)
+    print("🎯 5. CHẨN ĐOÁN KỸ THUẬT & KHUYẾN NGHỊ HÀNH ĐỘNG (DIAGNOSTIC AUDIT)")
+    print("═" * 105)
 
     if actions_taken:
-        print("🛠️ CÁC HÀNH ĐỘNG AUTO-FIX ĐÃ THỰC HIỆN:")
+        print("🛠️ AUTO-FIX ĐÃ THỰC THI:")
         for act in actions_taken:
-            print(f"   ✅ {act}")
+            print(f"   • {act}")
         print("")
 
     if critical_issues:
-        print("🔴 NGUY CƠ CAO (GÂY RÒ RỈ TOKEN NGHIÊM TRỌNG):")
+        print("🔴 CRITICAL ISSUES (CẦN XỬ LÝ NGAY):")
         for idx, iss in enumerate(critical_issues, 1):
             print(f"   {idx}. {iss}")
         print("")
 
     if warning_issues:
-        print("🟡 ĐIỂM CẦN TỐI ƯU (TIẾT KIỆM THÊM TOKEN):")
+        print("🟡 WARNINGS / BOTTLENECKS (ĐIỂM NGHẼN HOẶC RÒ RỈ CONTEXT):")
         for idx, iss in enumerate(warning_issues, 1):
             print(f"   {idx}. {iss}")
         print("")
 
     if passed_items:
-        print("🟢 CÁC ĐIỂM ĐÃ TỐI ƯU RẤT TỐT:")
+        print("🟢 PASSED CHECKS:")
         for idx, item in enumerate(passed_items, 1):
             print(f"   {idx}. {item}")
         print("")
 
-    print("💡 LỜI KHUYÊN & LỆNH KHẮC PHỤC NHANH:")
-    if critical_issues or warning_issues:
-        print("   1. Tự động sửa nhanh các bẫy token thông dụng: orca-monitor --fix")
-        print("   2. Giữ context tinh gọn cho Antigravity:        orca-team link clean")
-        print("   3. Đảm bảo symlink chuẩn cho Claude/Codex:     orca-team link all")
-        print("   4. Dừng worker kẹt prompt hoặc cạn token:      orca-team watchdog --unblock\n")
-    else:
-        print("   🎉 Dự án của bạn đang ở trạng thái tối ưu token tuyệt vời! Không có rò rỉ nào được phát hiện.\n")
+    print("⌨️ LỆNH ĐIỀU KHIỂN NHANH:")
+    print("   • Tự động sửa lỗi cấu hình / đóng Gate treo:  orca-monitor --fix")
+    print("   • Kiểm tra & gỡ kẹt worker chờ prompt:        orca-team watchdog --unblock\n")
 
 def main():
     raw_args = sys.argv[1:]
