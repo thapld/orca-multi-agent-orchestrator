@@ -19,8 +19,49 @@ if [[ ! -x "$ORCA_TEAM_BIN" ]] && command -v curl >/dev/null 2>&1; then
   fi
 fi
 
-if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "--clean" ]]; then
-  TARGET_DIR="${2:-.}"
+ACTION_UNINSTALL=false
+AUTO_YES=false
+SHOW_HELP=false
+PROJECT_DIR=""
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help|help)
+      SHOW_HELP=true
+      ;;
+    -y|--yes|--force|-f)
+      AUTO_YES=true
+      ;;
+    -u|--uninstall|uninstall|--clean)
+      ACTION_UNINSTALL=true
+      ;;
+    -*)
+      echo "⚠️  Cảnh báo: Tùy chọn không nhận diện: $arg" >&2
+      ;;
+    *)
+      if [[ -z "$PROJECT_DIR" ]]; then
+        PROJECT_DIR="$arg"
+      fi
+      ;;
+  esac
+done
+
+PROJECT_DIR="${PROJECT_DIR:-.}"
+
+if [[ "$SHOW_HELP" == true ]]; then
+  echo "🐋 [Orca Project Init] Khởi tạo hệ thống Multi-Agent Orchestration cho dự án"
+  echo "Sử dụng:"
+  echo "  orca-project-init [options] [/path/to/project]"
+  echo ""
+  echo "Tùy chọn:"
+  echo "  -y, --yes         Khởi tạo tự động với cấu hình khuyến nghị (không hỏi tương tác)"
+  echo "  -u, --uninstall   Gỡ bỏ cấu hình Orchestrator khỏi dự án"
+  echo "  -h, --help        Hiển thị hướng dẫn sử dụng"
+  exit 0
+fi
+
+if [[ "$ACTION_UNINSTALL" == true ]]; then
+  TARGET_DIR="$PROJECT_DIR"
   TARGET_PATH=$(cd "$TARGET_DIR" 2>/dev/null && pwd || echo "$TARGET_DIR")
 
   if [[ -x "$ORCA_TEAM_BIN" ]]; then
@@ -52,7 +93,6 @@ if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "--clean" ]]; then
   exit 0
 fi
 
-PROJECT_DIR="${1:-.}"
 PROJECT_PATH=$(cd "$PROJECT_DIR" 2>/dev/null && pwd || echo "$PROJECT_DIR")
 AGENTS_DIR="$PROJECT_PATH/.agents"
 TARGET_RULE="$AGENTS_DIR/GEMINI.md"
@@ -75,6 +115,11 @@ AVAILABLE_AGENTS=(
 choose_agent() {
   local role_title="$1"
   local default_idx="${2:-5}"
+  if [[ "$AUTO_YES" == true ]]; then
+    SELECTED_AGENT="${AVAILABLE_AGENTS[$default_idx]}"
+    echo "   ➔ Đã chọn tự động ($role_title): $SELECTED_AGENT"
+    return
+  fi
   local menu_items=()
   for i in {1..${#AVAILABLE_AGENTS[@]}}; do
     local ag="${AVAILABLE_AGENTS[$i]}"
@@ -144,51 +189,53 @@ choose_model() {
   fi
 
   if (( ${#model_ids[@]} > 0 )); then
-    local menu_items=()
-    for i in {1..${#model_ids[@]}}; do
-      local marker=""
-      [[ "$i" == "$rec_model_idx" ]] && marker=" ⭐ (khuyến nghị cho $role_title)"
-      local m_id="${model_ids[$i]}"
-      local m_lbl="${model_labels[$i]}"
-      if [[ "$m_lbl" != "$m_id" && -n "$m_lbl" ]]; then
-        menu_items+=("$m_id — $m_lbl$marker")
-      else
-        menu_items+=("$m_id$marker")
-      fi
-    done
-    local custom_idx=$(( ${#model_ids[@]} + 1 ))
-    local default_idx=$(( ${#model_ids[@]} + 2 ))
-    menu_items+=("Nhập model ID tùy chỉnh...")
-    menu_items+=("Dùng mặc định của Orca ADE")
-
-    local chosen_idx
-    if [[ -x "$ORCA_TEAM_BIN" ]]; then
-      chosen_idx=$(python3 "$ORCA_TEAM_BIN" select \
-        --title "👉 [Chọn Model] cho agent '$agent' ($role_title) — Nguồn: $source_label" \
-        --options "${menu_items[@]}" \
-        --default-idx "$((rec_model_idx - 1))" \
-        --return-idx)
-    else
-      for i in {1..${#menu_items[@]}}; do
-        echo "   $i) ${menu_items[$i]}"
+    local chosen_idx="$rec_model_idx"
+    if [[ "$AUTO_YES" != true ]]; then
+      local menu_items=()
+      for i in {1..${#model_ids[@]}}; do
+        local marker=""
+        [[ "$i" == "$rec_model_idx" ]] && marker=" ⭐ (khuyến nghị cho $role_title)"
+        local m_id="${model_ids[$i]}"
+        local m_lbl="${model_labels[$i]}"
+        if [[ "$m_lbl" != "$m_id" && -n "$m_lbl" ]]; then
+          menu_items+=("$m_id — $m_lbl$marker")
+        else
+          menu_items+=("$m_id$marker")
+        fi
       done
-      printf "   Nhập số (Enter = $rec_model_idx): "
-      read -r chosen_idx
-      chosen_idx="${chosen_idx:-$rec_model_idx}"
+      local custom_idx=$(( ${#model_ids[@]} + 1 ))
+      local default_idx=$(( ${#model_ids[@]} + 2 ))
+      menu_items+=("Nhập model ID tùy chỉnh...")
+      menu_items+=("Dùng mặc định của Orca ADE")
+
+      if [[ -x "$ORCA_TEAM_BIN" ]]; then
+        chosen_idx=$(python3 "$ORCA_TEAM_BIN" select \
+          --title "👉 [Chọn Model] cho agent '$agent' ($role_title) — Nguồn: $source_label" \
+          --options "${menu_items[@]}" \
+          --default-idx "$((rec_model_idx - 1))" \
+          --return-idx)
+      else
+        for i in {1..${#menu_items[@]}}; do
+          echo "   $i) ${menu_items[$i]}"
+        done
+        printf "   Nhập số (Enter = $rec_model_idx): "
+        read -r chosen_idx
+        chosen_idx="${chosen_idx:-$rec_model_idx}"
+      fi
     fi
 
     if [[ "$chosen_idx" =~ ^[0-9]+$ ]] && (( chosen_idx >= 1 && chosen_idx <= ${#model_ids[@]} )); then
       SELECTED_MODEL="${model_ids[$chosen_idx]}"
       chosen_baked_effort="${model_baked_efforts[$chosen_idx]}"
       chosen_efforts_csv="${model_efforts_csv[$chosen_idx]}"
-    elif [[ "$chosen_idx" == "$custom_idx" ]]; then
+    elif [[ -n "$custom_idx" && "$chosen_idx" == "$custom_idx" ]]; then
       printf "   Nhập model ID tùy chỉnh: "
       read -r custom_model
       SELECTED_MODEL="$custom_model"
     else
       SELECTED_MODEL=""
     fi
-  else
+  elif [[ "$AUTO_YES" != true ]]; then
     printf "   ⚠️ Không tìm thấy danh sách model động từ CLI của '$agent'. Nhập model ID (Enter = mặc định): "
     read -r custom_model
     SELECTED_MODEL="$custom_model"
@@ -200,10 +247,24 @@ choose_model() {
       chosen_baked_effort="${match[1]:l}"
     fi
 
-    if [[ -n "$chosen_baked_effort" ]]; then
+    # Kiểm tra xem agent/model có hỗ trợ --effort khi chạy Orca worker-start không
+    local effort_supported=true
+    if ! [[ "${agent:l}" =~ ^(antigravity|claude|codex|cursor|muse|codebuddy)$ ]]; then
+      effort_supported=false
+    elif [[ "${agent:l}" == "claude" && "${SELECTED_MODEL:l}" == *haiku* ]]; then
+      effort_supported=false
+    elif [[ "${agent:l}" == "cursor" && "$SELECTED_MODEL" != "gpt-5.3-codex" && "$SELECTED_MODEL" != "claude-opus-4-8" ]]; then
+      effort_supported=false
+    fi
+
+    if [[ "$effort_supported" == false ]]; then
+      SELECTED_EFFORT=""
+    elif [[ -n "$chosen_baked_effort" ]]; then
       SELECTED_EFFORT="$chosen_baked_effort"
+    elif [[ "$AUTO_YES" == true ]]; then
+      SELECTED_EFFORT="$default_eff"
     else
-      if [[ -n "$chosen_efforts_csv" || "$SELECTED_MODEL" =~ (opus|argon|flash|gemini|o1|o3|gpt-5|r1|sonnet|fable|haiku|k1|k3|glm|thinking|reasoning) ]]; then
+      if [[ -n "$chosen_efforts_csv" || "$SELECTED_MODEL" =~ (opus|argon|flash|gemini|o1|o3|gpt-5|r1|sonnet|fable|k1|k3|glm|thinking|reasoning) ]]; then
         local eff_menu=("high (khuyến nghị suy luận cao)" "medium" "low" "none (tắt reasoning)")
         local def_eff_idx=0
         [[ "$default_eff" == "medium" ]] && def_eff_idx=1
@@ -312,6 +373,11 @@ fmt_worker_args() {
 choose_count() {
   local role_title="$1"
   local default_count="${2:-1}"
+  if [[ "$AUTO_YES" == true ]]; then
+    SELECTED_COUNT="$default_count"
+    echo "   ➔ Số lượng ($role_title): $SELECTED_COUNT agent(s) (--yes)"
+    return
+  fi
   local count_options=(
     "1 agent"
     "2 agents (khuyến nghị song song)"
@@ -339,6 +405,15 @@ choose_count() {
 
 choose_utilities() {
   local default_utils="$1"
+  if [[ "$AUTO_YES" == true ]]; then
+    if [[ "$default_utils" == "1,5" ]]; then
+      SELECTED_UTILS=("git-worktrees" "orca-skills-registry")
+    else
+      SELECTED_UTILS=("git-worktrees" "browser-design-mode" "orca-skills-registry")
+    fi
+    echo "   ➔ Tiện ích: ${(j:, :)SELECTED_UTILS} (--yes)"
+    return
+  fi
   local def_idx=0
   [[ "$default_utils" == "1,5" ]] && def_idx=1
 
@@ -393,6 +468,15 @@ utils_to_json() {
 ask_toggle() {
   local feature_name="$1"
   local default_val="${2:-y}"
+  if [[ "$AUTO_YES" == true ]]; then
+    if [[ "$default_val" == "n" || "$default_val" == "N" ]]; then
+      TOGGLE_RESULT=false
+    else
+      TOGGLE_RESULT=true
+    fi
+    echo "   ➔ Vai trò mở rộng ($feature_name): $TOGGLE_RESULT (--yes)"
+    return
+  fi
   local toggle_options=(
     "Có (Kích hoạt $feature_name)"
     "Không (Tắt $feature_name)"
@@ -431,7 +515,7 @@ echo "╚═══════════════════════�
 echo ""
 echo "📍 Thư mục dự án: $PROJECT_PATH"
 
-if [[ -f "$TARGET_RULE" ]]; then
+if [[ -f "$TARGET_RULE" && "$AUTO_YES" != true ]]; then
   if [[ -x "$ORCA_TEAM_BIN" ]]; then
     ow_choice=$(python3 "$ORCA_TEAM_BIN" select \
       --title "⚠️ Đã tồn tại cấu hình $TARGET_RULE. Bạn muốn làm gì?" \
@@ -588,7 +672,9 @@ host_menu=(
   "SSH target tùy chỉnh..."
 )
 host_choice_idx=1
-if [[ -x "$ORCA_TEAM_BIN" ]]; then
+if [[ "$AUTO_YES" == true ]]; then
+  host_choice_idx=1
+elif [[ -x "$ORCA_TEAM_BIN" ]]; then
   host_choice_idx=$(python3 "$ORCA_TEAM_BIN" select \
     --title "PHẦN 7: MÔI TRƯỜNG THỰC THI CHÍNH (Execution Host)" \
     --options "${host_menu[@]}" \
@@ -640,7 +726,9 @@ echo "│  Execution Host:  $HOST_LABEL"
 echo "└──────────────────────────────────────────────────────────────────────────┘"
 echo ""
 
-if [[ -x "$ORCA_TEAM_BIN" ]]; then
+if [[ "$AUTO_YES" == true ]]; then
+  echo "   ➔ Xác nhận tự động tạo cấu hình (--yes)"
+elif [[ -x "$ORCA_TEAM_BIN" ]]; then
   confirm_choice=$(python3 "$ORCA_TEAM_BIN" select \
     --title "👉 Xác nhận tạo cấu hình cho project?" \
     --options "Xác nhận tạo cấu hình cho project" "Hủy bỏ" \
@@ -903,7 +991,13 @@ ${EXTRA_STEP2_CMDS}  # Security Worker (khi có Task Security Audit):
   \`\`\`bash
   orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?" --options '["yes","wait"]' --json
   \`\`\`
-- Chỉ khi người dùng phản hồi \`"yes"\`: Thực hiện \`git merge\` vào nhánh chính, sau đó mới chạy \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\` để giải phóng retention và đóng các terminal worker.
+- Chỉ khi người dùng phản hồi \`"yes"\`:
+  1. Đóng Gate và khôi phục trạng thái \`completed\` cho \`<FINAL_TASK_ID>\` (vì \`gate-create\` chuyển task sang \`blocked\` và \`gate-resolve\` trong Orca đưa task về \`ready\`):
+     \`\`\`bash
+     orca orchestration gate-resolve --id <GATE_ID> --resolution "yes" --json
+     orca orchestration task-update --id <FINAL_TASK_ID> --status completed --json
+     \`\`\`
+  2. Thực hiện \`git merge\` vào nhánh chính, sau đó chạy \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\` để giải phóng retention và đóng các terminal worker.
 RULE
 
 # ── Quản lý symlink thông minh: Tránh nạp trùng lặp context & bảo vệ file thật ──

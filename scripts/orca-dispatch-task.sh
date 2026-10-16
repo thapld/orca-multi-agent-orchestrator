@@ -33,7 +33,7 @@ EFF_ROLE_QUERY="$ROLE_QUERY"
 CONFIG_AGENT=""
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   CONFIG_AGENT=$("$ORCA_TEAM_BIN" get "$ROLE_QUERY" 2>/dev/null || true)
-  if [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
+  if [[ -z "$CONFIG_AGENT" || "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
     EFF_ROLE_QUERY="coord"
     CONFIG_AGENT=$("$ORCA_TEAM_BIN" get coord 2>/dev/null || true)
   fi
@@ -49,16 +49,16 @@ fi
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
 TIMEOUT_MS="${TIMEOUT_MS:-300000}"
 
-# Lấy model và reasoning effort nếu đã được cấu hình trong orca-team (tuân thủ nghiêm ngặt catalog của Orca worker-start)
+# Lấy model và reasoning effort nếu đã được cấu hình trong orca-team (chỉ áp dụng khi AGENT khớp với CONFIG_AGENT của role)
 MODEL_ARGS=()
-if [[ -x "$ORCA_TEAM_BIN" ]]; then
+if [[ -x "$ORCA_TEAM_BIN" && "$AGENT" == "$CONFIG_AGENT" ]]; then
   DEV_MODEL=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field model 2>/dev/null || true)
   DEV_EFFORT=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field effort 2>/dev/null || true)
   if [[ "$AGENT" =~ ^(antigravity|claude|codex|cursor|muse|codebuddy|omp)$ ]] && [[ -n "$DEV_MODEL" && "$DEV_MODEL" != "null" && "$DEV_MODEL" != "(default)" ]]; then
     MODEL_ARGS+=(--model "$DEV_MODEL")
     if [[ -n "$DEV_EFFORT" && "$DEV_EFFORT" != "null" && "$DEV_EFFORT" != "-" && "$AGENT" != "omp" ]]; then
       ALLOW_EFFORT=true
-      if [[ "$AGENT" == "claude" && "$DEV_MODEL" == *haiku* ]]; then
+      if [[ "$AGENT" == "claude" && "${DEV_MODEL:l}" == *haiku* ]]; then
         ALLOW_EFFORT=false
       elif [[ "$AGENT" == "cursor" && "$DEV_MODEL" != "gpt-5.3-codex" && "$DEV_MODEL" != "claude-opus-4-8" ]]; then
         ALLOW_EFFORT=false

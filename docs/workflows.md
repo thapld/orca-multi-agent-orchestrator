@@ -47,7 +47,7 @@ sequenceDiagram
     Lead->>Orca: orca file open-changed --mode diff (Soi diff tổng thể)
     Lead->>Orca: orca orchestration gate-create (Xin phép Human User trước khi merge)
     User->>Lead: Duyệt Merge (Approved)
-    Lead->>Orca: git merge --no-ff & orca orchestration worker-release
+    Lead->>Orca: gate-resolve, task-update --status completed, git merge & worker-release
     Lead-->>User: Báo cáo hoàn tất
 ```
 

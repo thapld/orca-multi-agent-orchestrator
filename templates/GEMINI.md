@@ -102,4 +102,10 @@
   ```bash
   orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?" --options '["yes","wait"]' --json
   ```
-- Chỉ khi người dùng phản hồi `"yes"`: Thực hiện `git merge` vào nhánh chính, sau đó mới chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention và đóng các terminal worker.
+- Chỉ khi người dùng phản hồi `"yes"`:
+  1. Đóng Gate và khôi phục trạng thái `completed` cho `<FINAL_TASK_ID>` (vì `gate-create` chuyển task sang `blocked` và `gate-resolve` trong Orca đưa task về `ready`):
+     ```bash
+     orca orchestration gate-resolve --id <GATE_ID> --resolution "yes" --json
+     orca orchestration task-update --id <FINAL_TASK_ID> --status completed --json
+     ```
+  2. Thực hiện `git merge` vào nhánh chính, sau đó chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention và đóng các terminal worker.

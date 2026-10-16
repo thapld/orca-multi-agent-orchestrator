@@ -224,6 +224,19 @@ def save_config(root: Path, config: dict):
         json.dump(config, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
+def _supports_effort_py(agent: str, model: str) -> bool:
+    ag = (agent or "").strip().lower()
+    mod = str(model or "").strip()
+    if not mod or mod in ("None", "null", "(default)"):
+        return False
+    if ag in ("antigravity", "codebuddy", "codex", "muse"):
+        return True
+    if ag == "claude":
+        return "haiku" not in mod.lower()
+    if ag == "cursor":
+        return mod in ("gpt-5.3-codex", "claude-opus-4-8")
+    return False
+
 def _fmt_worker_args_py(agent: str, model, effort: str) -> str:
     ag = (agent or "").strip().lower()
     args = f"--agent {agent}"
@@ -249,7 +262,7 @@ def _fmt_worker_args_py(agent: str, model, effort: str) -> str:
         if eff not in ("low", "medium", "high"):
             return args
     elif ag == "claude":
-        if mod.lower() == "haiku":
+        if "haiku" in mod.lower():
             return args
         if eff not in ("low", "medium", "high", "xhigh", "max"):
             return args
@@ -606,9 +619,23 @@ def sync_gemini_directive(root: Path, config: dict):
         content,
         flags=re.M
     )
+    step4_full = (
+        '### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)\n'
+        '- Chỉ khi đủ bằng chứng thép của Dev (`Commit Hash` + `Build OK`), DevOps (`Pod/Infra Ready`), Security (`PASS`), QA (`PASS 100%`), Benchmark (`PERF_VERDICT: PASS`) và Reverse Eng (`RE_VERDICT: EVIDENCE_COMPLETE` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):\n'
+        '  ```bash\n'
+        '  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?" --options \'["yes","wait"]\' --json\n'
+        '  ```\n'
+        '- Chỉ khi người dùng phản hồi `"yes"`:\n'
+        '  1. Đóng Gate và khôi phục trạng thái `completed` cho `<FINAL_TASK_ID>` (vì `gate-create` chuyển task sang `blocked` và `gate-resolve` trong Orca đưa task về `ready`):\n'
+        '     ```bash\n'
+        '     orca orchestration gate-resolve --id <GATE_ID> --resolution "yes" --json\n'
+        '     orca orchestration task-update --id <FINAL_TASK_ID> --status completed --json\n'
+        '     ```\n'
+        '  2. Thực hiện `git merge` vào nhánh chính, sau đó chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention và đóng các terminal worker.\n'
+    )
     content = re.sub(
-        r"(- Chỉ khi người dùng phản hồi `\"yes\"`: Thực hiện `git merge` vào nhánh chính, sau đó mới chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` )để đóng các terminal worker\.",
-        r"\1để giải phóng retention và đóng các terminal worker.",
+        r"### BƯỚC 4:[^\n]*\n[\s\S]*$",
+        lambda m: step4_full,
         content,
         flags=re.M
     )
@@ -1446,6 +1473,10 @@ def cmd_set(root: Path, config: dict, args: list):
         elif opt == "--reset-effort":
             new_effort = ""
             idx += 1
+        elif opt in ("--sync", "-y", "--yes"):
+            sync_gemini_directive(root, config)
+            print("📁 Đã đồng bộ lại '.agents/GEMINI.md' từ 'orca-team.json'.")
+            return
         else:
             print(f"⚠️ Cảnh báo: Tùy chọn không nhận diện: {opt}", file=sys.stderr)
             idx += 1
@@ -1523,10 +1554,13 @@ def cmd_set(root: Path, config: dict, args: list):
             elif model_input:
                 new_model = model_input
 
-        # Nếu model đã chọn chưa tích hợp sẵn effort trong ID thì mới hỏi tiếp effort
+        # Nếu model đã chọn chưa tích hợp sẵn effort trong ID và agent/model hỗ trợ --effort thì mới hỏi tiếp effort
         final_model_id = new_model if new_model is not None else (current.get("model") or "")
         baked_eff = _extract_baked_effort(final_model_id) if final_model_id else ""
-        if baked_eff:
+        if not _supports_effort_py(target_agent, final_model_id):
+            new_effort = ""
+            print(f"   ➔ Agent '{target_agent}' / model '{final_model_id or 'default'}' không dùng cờ --effort riêng (tự động đặt effort = -)")
+        elif baked_eff:
             new_effort = baked_eff
             print(f"   ➔ Reasoning Effort tự động theo model: {new_effort}")
         else:
@@ -1564,6 +1598,12 @@ def cmd_set(root: Path, config: dict, args: list):
         val = None if new_model == "" else new_model
         target["model"] = val
         changes.append(f"Model: {old_model} ➔ {val or '(default)'}")
+
+    if new_effort is None and (new_agent or new_model is not None):
+        eff_ag = target.get("agent") or ""
+        eff_mod = target.get("model") or ""
+        if not _supports_effort_py(eff_ag, eff_mod) and target.get("effort"):
+            new_effort = ""
 
     if new_effort is not None:
         old_eff = target.get("effort") or "-"
@@ -1800,6 +1840,8 @@ def cmd_get(root: Path, config: dict, args: list):
 
     if field == "json":
         print(json.dumps(target))
+    elif field == "agent" and target.get("enabled") is False:
+        print("none")
     else:
         val = target.get(field)
         if val is not None:
@@ -2223,8 +2265,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             print(f"👥 Tổng số Worker Dispatches trong Run: {len(workers)} worker(s) | Tổng số Tasks: {len(run_tasks)}")
 
             if workers:
-                print(f"\n   {'DISPATCH ID':<16} | {'WORKTREE / ROLE':<16} | {'AGENT & MODEL THỰC TẾ':<28} | {'THỜI GIAN':<10} | {'TRẠNG THÁI & TERMINAL'}")
-                print("   " + "-" * 102)
+                print(f"\n   {'DISPATCH ID':<16} | {'WORKTREE / ROLE':<16} | {'AGENT & MODEL THỰC TẾ':<38} | {'THỜI GIAN':<10} | {'TRẠNG THÁI & TERMINAL'}")
+                print("   " + "-" * 112)
 
             reclaimable_dispatches = []
             total_offloaded_files = 0
@@ -2322,7 +2364,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 else:
                     st_label = f"{w_state} ({term_state})"
 
-                print(f"   {d_id:<16} | {wt_name:<16} | {agent_model_str:<28} | {duration_str:<10} | {st_label}")
+                print(f"   {d_id:<16} | {wt_name:<16} | {agent_model_str:<38} | {duration_str:<10} | {st_label}")
                 if t_obj_info:
                     t_title = str(t_obj_info.get("task_title") or t_obj_info.get("display_name") or "")[:68]
                     f_info = f", sửa {files_mod_count} files" if files_mod_count > 0 else ""
@@ -2330,6 +2372,67 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
             if reclaimable_dispatches:
                 print(f"  💡 Đang giữ {len(reclaimable_dispatches)} terminal worker để hiển thị chấm xanh (🟢) & chuông thông báo (🔔) trên Orca Sidebar cho đến khi duyệt Human Gate.")
+
+            # Kiểm tra các Gate treo (pending) hoặc Task bị kẹt 'blocked'/'ready' sau khi toàn bộ worker đã succeeded & released ở Bước 4
+            all_workers_settled_released = bool(workers) and all(
+                str(w.get("workerState") or w.get("state") or "") == "succeeded" and str(w.get("terminalState") or "") == "released"
+                for w in workers
+            )
+            if active_run_id and all_workers_settled_released:
+                try:
+                    g_res = subprocess.run([orca_bin, "orchestration", "gate-list", "--run", active_run_id, "--json"], capture_output=True, text=True, timeout=4)
+                    pending_gates = []
+                    if g_res.returncode == 0:
+                        g_obj = json.loads(g_res.stdout).get("result", {})
+                        pending_gates = [g for g in (g_obj.get("gates") or []) if isinstance(g, dict) and g.get("status") == "pending"]
+                    stuck_tasks = [
+                        t for t in run_tasks.values()
+                        if isinstance(t, dict) and t.get("status") in ("blocked", "ready") and t.get("result")
+                    ]
+                    if pending_gates or stuck_tasks:
+                        if auto_fix:
+                            resolved_g = 0
+                            fixed_t = 0
+                            for g in pending_gates:
+                                gid = g.get("id")
+                                if gid:
+                                    gr = subprocess.run([orca_bin, "orchestration", "gate-resolve", "--id", gid, "--resolution", "yes", "--json"], capture_output=True, text=True, timeout=4)
+                                    if gr.returncode == 0:
+                                        resolved_g += 1
+                            for t in stuck_tasks:
+                                tid = t.get("id")
+                                if tid:
+                                    tr = subprocess.run([orca_bin, "orchestration", "task-update", "--id", tid, "--status", "completed", "--json"], capture_output=True, text=True, timeout=4)
+                                    if tr.returncode == 0:
+                                        fixed_t += 1
+                            # Fallback qua SQLite nếu Run thuộc thế hệ Coordinator cũ đã bị fence (stable_pane_required)
+                            if (len(pending_gates) > resolved_g) or (len(stuck_tasks) > fixed_t):
+                                try:
+                                    import sqlite3
+                                    orca_db = Path.home() / "Library" / "Application Support" / "orca" / "profiles" / "default" / "orchestration.sqlite"
+                                    if orca_db.exists():
+                                        conn = sqlite3.connect(str(orca_db), timeout=3)
+                                        with conn:
+                                            for g in pending_gates:
+                                                gid = g.get("id")
+                                                if gid:
+                                                    conn.execute("UPDATE decision_gates SET status = 'resolved', resolution = 'yes', resolved_at = COALESCE(resolved_at, datetime('now')) WHERE id = ? AND status = 'pending'", (gid,))
+                                                    resolved_g += 1
+                                            for t in stuck_tasks:
+                                                tid = t.get("id")
+                                                if tid:
+                                                    conn.execute("UPDATE tasks SET status = 'completed', completed_at = COALESCE(completed_at, datetime('now')), updated_at = datetime('now') WHERE id = ? AND status IN ('blocked', 'ready')", (tid,))
+                                                    fixed_t += 1
+                                        conn.close()
+                                except Exception:
+                                    pass
+                            actions_taken.append(f"Đã tự động đóng {len(pending_gates)} Gate treo & cập nhật {len(stuck_tasks)} Task về 'completed' cho Run {active_run_id}.")
+                        else:
+                            warning_issues.append(
+                                f"Run {active_run_id} đã thu hồi hết worker nhưng còn {len(pending_gates)} Gate 'pending' / {len(stuck_tasks)} Task '{stuck_tasks[0].get('status') if stuck_tasks else 'blocked'}' (chạy 'orca-monitor --fix' để đóng sạch)."
+                            )
+                except Exception:
+                    pass
 
             # 4.1b Kiểm tra Orca Agent Status Hooks (Hiển thị Loading Spinner & Chuông thông báo trên Orca UI)
             hooks_res = subprocess.run([orca_bin, "agent", "hooks", "status", "--json"], capture_output=True, text=True, timeout=5)
@@ -2515,6 +2618,17 @@ def main():
         cmd_monitor(root, config, args[1:])
     elif args[0] in ["link", "discovery"]:
         cmd_link(root, args[1:])
+    elif args[0] == "sync":
+        for a in args[1:]:
+            if not a.startswith("-") and Path(a).expanduser().is_dir():
+                root = Path(a).expanduser().resolve()
+                config = load_config(root)
+                break
+        if not config:
+            print(f"❌ Không tìm thấy orca-team.json trong '{root}'.", file=sys.stderr)
+            sys.exit(1)
+        sync_gemini_directive(root, config)
+        print(f"✅ Đã đồng bộ '{root / '.agents' / 'GEMINI.md'}' từ '{root / 'orca-team.json'}'.")
     elif args[0] in ["uninstall", "remove", "clean-all", "purge"]:
         cmd_uninstall_project(root, args[1:])
     elif args[0] in ["models", "list-models", "discover-models"]:

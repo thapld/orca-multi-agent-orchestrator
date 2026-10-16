@@ -4,25 +4,38 @@
 
 set -e
 
-PR_NUM="${1:?Thiếu số PR. Dùng: $0 <pr-number> [agent]}"
+if [[ "$1" == "-h" || "$1" == "--help" || "$1" == "help" || $# -lt 1 ]]; then
+  echo "🐋 [Orca PR Review] Mở hoặc tái sử dụng worktree thẩm định GitHub Pull Request độc lập"
+  echo "Sử dụng:"
+  echo "  orca-review-pr <pr-number> [role|agent]"
+  echo ""
+  echo "Ví dụ:"
+  echo "  orca-review-pr 123"
+  echo "  orca-review-pr 123 claude"
+  exit 0
+fi
+
+PR_NUM="$1"
 if ! [[ "$PR_NUM" =~ ^[0-9]+$ ]]; then
   echo "❌ Số PR phải là số nguyên dương (ví dụ: 123). Giá trị nhận được: '$PR_NUM'"
   exit 1
 fi
 
 ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
+ROLE_OR_AGENT="${2:-pr}"
 CONFIG_AGENT=""
-CONFIG_MODEL=""
-CONFIG_EFFORT=""
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
-  CONFIG_AGENT=$("$ORCA_TEAM_BIN" get pr 2>/dev/null || true)
-  CONFIG_MODEL=$("$ORCA_TEAM_BIN" get pr --field model 2>/dev/null || true)
-  CONFIG_EFFORT=$("$ORCA_TEAM_BIN" get pr --field effort 2>/dev/null || true)
+  CONFIG_AGENT=$("$ORCA_TEAM_BIN" get "$ROLE_OR_AGENT" 2>/dev/null || true)
+  if [[ -z "$CONFIG_AGENT" || "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
+    CONFIG_AGENT=$("$ORCA_TEAM_BIN" get pr 2>/dev/null || true)
+  fi
   [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
-  [[ "$CONFIG_MODEL" == "none" || "$CONFIG_MODEL" == "null" ]] && CONFIG_MODEL=""
-  [[ "$CONFIG_EFFORT" == "none" || "$CONFIG_EFFORT" == "null" ]] && CONFIG_EFFORT=""
 fi
-AGENT="${2:-${CONFIG_AGENT:-antigravity}}"
+if [[ "$ROLE_OR_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$ ]]; then
+  AGENT="$ROLE_OR_AGENT"
+else
+  AGENT="${CONFIG_AGENT:-antigravity}"
+fi
 WORKTREE_NAME="review-pr-$PR_NUM"
 
 PR_PROMPT="[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: Thẩm định toàn diện Pull Request #${PR_NUM}. Chuẩn mực: (1) Đọc toàn bộ line-by-line diff qua 'orca file open-changed --mode diff --worktree active' và 'git diff', (2) Kiểm tra kiến trúc, Clean Code, OWASP Top 10, Race Conditions, Memory/Resource Leaks, (3) BẮT BUỘC chạy thực tế test suite và linter trong worktree PR (CẤM duyệt suông bằng mắt!). CẤM VƯỢT RÀO: Không tự ý sửa code tính năng của PR khi chưa được yêu cầu. BẰNG CHỨNG BẮT BUỘC: Xuất báo cáo review chi tiết từng file:line, kết quả chạy test thực tế (EXIT_CODE, số test pass/fail) và chốt PR_VERDICT: APPROVE hoặc REQUEST_CHANGES."
