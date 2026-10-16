@@ -427,15 +427,19 @@ def sync_gemini_directive(root: Path, config: dict):
         routing_parts.append("Khảo sát sâu, phản biện giả thuyết/kế hoạch của Leader & truy tìm root-cause ➔ **`critic-worker`**")
     routing_line = "> - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** " + " | ".join(routing_parts) + "."
     anti_autocracy_line = (
-        "> - **LUẬT CHỐNG ĐỘC ĐOÁN & QUY KẾT VỘI VÀNG (ANTI-AUTOCRACY & DIALECTICAL CONSENSUS):** "
-        "Leader **CẤM** tự suy diễn nguyên nhân gốc rễ (root cause), tự áp đặt thiết kế phức tạp khi chưa khảo sát sâu, "
-        "hoặc quy kết lỗi cho bất kỳ role nào khi chưa có bằng chứng `file:line` + log đối chiếu! "
-        "Với bài toán phức tạp, bug liên tầng mơ hồ hoặc xung đột giữa các worker, Leader **BẮT BUỘC** điều phối **`critic-worker`** "
-        "khảo sát độc lập và phản biện lại giả thuyết của Leader cho đến khi **cả hai đi đến thống nhất (`CRITIC_VERDICT: CONSENSUS_REACHED`)** mới khóa Spec giao việc."
+        "> - **LUẬT CHỐNG ĐỘC ĐOÁN & QUY KẾT VỘI VÀNG (ANTI-AUTOCRACY):** Leader **CẤM** quy kết lỗi cho bất kỳ role nào "
+        "hoặc khóa thiết kế/root-cause khi chưa có bằng chứng `file:line` + log. Gặp 1 trong 4 trigger ở Bước 3 ➔ **BẮT BUỘC** "
+        "qua vòng phản biện với **`critic-worker`** tới `CRITIC_VERDICT: CONSENSUS_REACHED` mới khóa Spec; "
+        "bất đồng sau 3 vòng ➔ Human Gate, Leader **CẤM** tự phán quyết."
     )
+    if not critic_enabled:
+        anti_autocracy_line = (
+            "> - **LUẬT CHỐNG ĐỘC ĐOÁN & QUY KẾT VỘI VÀNG:** Leader **CẤM** quy kết lỗi cho bất kỳ role nào "
+            "hoặc khóa thiết kế/root-cause khi chưa có bằng chứng `file:line` + log."
+        )
     content = re.sub(
         r"^> - \*\*BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:\*\*.*(?:\n> - \*\*LUẬT CHỐNG ĐỘC ĐOÁN[^\n]*)?$",
-        routing_line + ("\n" + anti_autocracy_line if critic_enabled else ""),
+        routing_line + "\n" + anti_autocracy_line,
         content,
         flags=re.M
     )
@@ -533,21 +537,19 @@ def sync_gemini_directive(root: Path, config: dict):
         '--body \'<Branch/Commit/Routes>\' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit." --json'
     )
     critic_spec_line = (
-        '  orca orchestration task-create --spec "[ROLE: PRINCIPAL RESEARCH & ADVERSARIAL CRITIC] Nhiệm vụ: [Khảo sát sâu & Phản biện độc lập giả thuyết/kế hoạch của Leader]. '
-        'Chuẩn: Kiểm chứng giả thuyết bằng bằng chứng thực tế (file:line, git blame/diff, call-graph, DB state, runtime logs); '
-        'đóng vai Devil\'s Advocate vạch trần điểm mù kiến trúc, giả định sai, race condition, hidden coupling hoặc quy kết nhầm role (App vs Infra/DB). '
-        'CẤM VƯỢT RÀO: Read-Only 100% đối với code ứng dụng & infra (không tự sửa code để giữ tính khách quan độc lập). '
-        'GIAO THỨC PHẢN BIỆN & ĐỒNG THUẬN 2 CHIỀU VỚI LEADER (BẮT BUỘC): '
-        '(1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) và khảo sát sâu trên nhánh liên quan, '
-        '(2) Nếu phát hiện giả thuyết/kế hoạch của Leader có lỗ hổng hoặc quy kết chưa chuẩn ➔ BẮT BUỘC phản biện thẳng thắn qua '
-        'orca orchestration send --from <worker_handle> --type escalation --subject \'Critic Challenge: Hypothesis Refuted\' '
-        '--body \'<Bằng chứng file:line bác bỏ giả định sai & Đề xuất phương án đối trọng>\' --task-id <task_id> --dispatch-id <dispatch_id> --json '
-        'và tranh biện với Coordinator cho tới khi thống nhất, '
-        '(3) Khi hai bên đã đạt đồng thuận dựa trên bằng chứng, gửi '
-        'orca orchestration send --from <worker_handle> --type handoff --subject \'Critic Consensus: Plan Verified\' '
-        '--body \'<Root-cause & Kiến trúc thống nhất để khóa Spec>\' --task-id <task_id> --dispatch-id <dispatch_id> --json '
-        'và chốt CRITIC_VERDICT: CONSENSUS_REACHED hoặc HYPOTHESIS_CHALLENGED." --json'
+        '  orca orchestration task-create --spec "[ROLE: PRINCIPAL RESEARCH & ADVERSARIAL CRITIC] Nhiệm vụ: Triệu chứng & bằng chứng thô: [...] | Giả thuyết/Kế hoạch của Leader: [...]. '
+        'Chuẩn: (1) Lập giả thuyết ĐỘC LẬP từ bằng chứng thô TRƯỚC khi đọc giả thuyết Leader (chống anchoring), kiểm chứng bằng file:line, git log/blame/diff, DB state, runtime logs; '
+        '(2) Chỉ ra giả định sai, điểm mù/blast radius, quy kết nhầm role (App vs Infra/DB) và phương án đối trọng. '
+        'CẤM VƯỢT RÀO: Read-Only 100% với code app & infra; CẤM hùa theo Leader khi chưa tự kiểm chứng; CẤM phản biện không kèm bằng chứng file:line/log. '
+        'GIAO THỨC TRANH BIỆN (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id từ Preamble): '
+        '(a) Bác bỏ ➔ orca orchestration ask --from <worker_handle> --question \'CRITIC_CHALLENGE vòng <n>/3: <bằng chứng file:line/log> | Đề xuất: <phương án>\' --timeout-ms 900000 --json '
+        '(lệnh chặn tới khi Leader reply; timeout thì chạy lại với --resume <message_id>), kiểm chứng phản hồi của Leader rồi lặp tối đa 3 vòng; '
+        '(b) Đồng thuận ➔ orca orchestration send --from <worker_handle> --type handoff --subject \'Critic Consensus\' '
+        '--body \'CRITIC_VERDICT: CONSENSUS_REACHED | <root-cause/spec đã thống nhất + file:line>\' --task-id <task_id> --dispatch-id <dispatch_id> --json; '
+        '(c) Hết 3 vòng vẫn bất đồng ➔ cùng lệnh send với --subject \'Critic Deadlock\' --body \'CRITIC_VERDICT: HYPOTHESIS_CHALLENGED | Phương án Leader vs Critic + bằng chứng mỗi bên\'. '
+        'CẤM gửi worker_done trước khi đã gửi (b) hoặc (c)." --json'
     )
+    critic_step1_comment = "  # Principal Research & Adversarial Critic (BẮT BUỘC khi gặp 1 trong 4 trigger Anti-Autocracy ở Bước 3):"
 
     def _wt_expr(w_name):
         return f"$(git worktree list | sed -n 's/^\\([^ ]*\\).*\\[{w_name}\\].*/--worktree path:\\1/p' | head -n 1 | grep . || echo \"--worktree new-child --name {w_name}\")"
@@ -585,7 +587,7 @@ def sync_gemini_directive(root: Path, config: dict):
         (
             critic_enabled,
             "ROLE: PRINCIPAL RESEARCH & ADVERSARIAL CRITIC",
-            f'  # Principal Research & Adversarial Critic (BẮT BUỘC khi thiết kế kiến trúc phức tạp, truy tìm root-cause liên tầng hoặc phản biện/chống quy kết):\n{critic_spec_line}\n',
+            f'{critic_step1_comment}\n{critic_spec_line}\n',
             "critic-worker",
             f'  # Research & Critic Worker (khi cần khảo sát sâu, phản biện kế hoạch Leader & thống nhất root-cause):\n  orca orchestration worker-start --task <CRITIC_TASK_ID> {_wt_expr("critic-worker")} {_fmt_worker_args_py(critic_spec.get("agent", "antigravity"), critic_spec.get("model"), critic_spec.get("effort"))} --json\n'
         ),
@@ -639,6 +641,12 @@ def sync_gemini_directive(root: Path, config: dict):
             flags=re.M
         )
     content = re.sub(
+        r'^[ \t]*#[ \t]*(?:\d+\.\s*)?Principal Research & Adversarial Critic[^\n]*$',
+        lambda m: critic_step1_comment,
+        content,
+        flags=re.M
+    )
+    content = re.sub(
         r'^[ \t]*#[ \t]*(?:\d+\.\s*)?Principal SDET / QA[^\n]*\n[ \t]*orca orchestration task-create --spec "\[ROLE: PRINCIPAL QA/SDET\][^\n]*$',
         lambda m: f'  # 4. Principal SDET / QA (Kiểm thử độc lập, Nghiệm thu & Kiểm toán Runtime Logs):\n{qa_spec_line}',
         content,
@@ -646,7 +654,7 @@ def sync_gemini_directive(root: Path, config: dict):
     )
     step2_header = (
         '### BƯỚC 2: FAN-OUT (1 ROLE = 1 WORKTREE ĐỊNH DANH DUY NHẤT & GOM NHÓM TERMINAL TABS)\n'
-        '- 🔴 **QUY TẮC GOM NHÓM TERMINAL TABS (CẤM ĐẺ THÊM WORKTREE TRÙNG LẶP `-2`, `-3` & TRÁNH XUNG ĐỘT ĐA REPO `selector_ambiguous`):** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`, `critic-worker`) chỉ dùng **1 Worktree định danh duy nhất**. Nếu worktree của role đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <role>-worker` ở lần chạy đầu tiên khi worktree chưa tồn tại:\n'
+        f'- 🔴 **QUY TẮC GOM NHÓM TERMINAL TABS (CẤM ĐẺ THÊM WORKTREE TRÙNG LẶP `-2`, `-3` & TRÁNH XUNG ĐỘT ĐA REPO `selector_ambiguous`):** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`{", `critic-worker`" if critic_enabled else ""}) chỉ dùng **1 Worktree định danh duy nhất**. Nếu worktree của role đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <role>-worker` ở lần chạy đầu tiên khi worktree chưa tồn tại:\n'
     )
     content = re.sub(
         r"### BƯỚC 2:[^\n]*\n- [^\n]*\n",
@@ -662,23 +670,33 @@ def sync_gemini_directive(root: Path, config: dict):
         '  ```\n'
         '- **Thẩm quyền Điều phối & Cơ chế Phản biện Chống Độc đoán (Dialectical Consensus & Anti-Autocracy):**\n'
         '  - **Worker KHÔNG tự ý đổi thiết kế của nhau:** Mỗi role có **Quyền Phủ quyết Chuyên môn (Domain Veto)** tại cổng của mình (`escalation`/`BLOCK`/`FAIL`) và trình bằng chứng lên **Lead Coordinator** (bỏ trống `--to`).\n'
-        '  - **Chống Leader Độc đoán & Quy kết Vội vàng:** Leader **CẤM** tự ý phán xét cảm tính hoặc quy kết lỗi cho `dev-worker`/`devops-worker`/`qa-worker` khi chưa có bằng chứng `file:line` + log thực tế! Khi gặp bug liên tầng hoặc nhận `Critic Challenge` (`escalation` từ `critic-worker`), Leader bắt buộc đối thoại cầu thị với `critic-worker` (`orca orchestration send --to dispatch:<CRITIC_DISPATCH_ID> --type dispatch --subject "Leader Counter-Analysis" --body "..." --json`) hoặc điều chỉnh kế hoạch theo bằng chứng của `critic-worker` cho đến khi hai bên đạt đồng thuận (**`CRITIC_VERDICT: CONSENSUS_REACHED`**) rồi mới khóa Spec giao việc (nếu bất đồng về trade-off kiến trúc lớn thì trình cả 2 phương án qua `gate-create` để sếp quyết).\n'
-        '  - **Nhận `question` (từ `ask`):** Coordinator phản hồi qua `orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json`.\n'
-        '  - **Nhận `handoff` (từ Critic/RE/Dev/DevOps/UI):** Coordinator kiểm duyệt bằng chứng (`CONSENSUS_REACHED`, Commit Hash, Clean-Room Spec, Pod/Port/Log sạch) rồi quyết định bàn giao cho role kế tiếp.\n'
-        '  - **Nhận `escalation` (từ Critic/DevOps/QA/Sec/Bench):** Coordinator đối chiếu bằng chứng với `critic-worker`, phân xử khách quan và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` vào đúng worktree định danh của role đó (`--worktree path:<abs_path>`), rồi điều phối `devops-worker` & `qa-worker` kiểm toán lại.\n'
+        + (
+            '  - **Phản biện 2 chiều với `critic-worker` (Anti-Autocracy):** BẮT BUỘC giao `critic-worker` TRƯỚC khi khóa Spec/kết luận root-cause nếu gặp 1 trong 4 trigger: '
+            '(a) bug đã fix ≥1 lần vẫn tái phát, (b) escalation quy lỗi sang role khác hoặc bug liên tầng App↔DB↔Infra↔Network, '
+            '(c) thay đổi schema/API contract/auth/payment hoặc chạm ≥2 tầng, (d) các worker báo cáo mâu thuẫn. '
+            'Spec giao Critic phải tách riêng *Triệu chứng + bằng chứng thô* và *Giả thuyết Leader*. '
+            'Nhận `question` `CRITIC_CHALLENGE` ➔ trả lời bằng `orca orchestration reply --id <MSG_ID> --body "..." --json` kèm phản chứng `file:line`/log HOẶC chấp nhận & sửa kế hoạch (CẤM bác bỏ suông hoặc lờ câu hỏi). '
+            '`Critic Consensus` ➔ khóa Spec giao việc; `Critic Deadlock` ➔ Leader CẤM tự quyết, BẮT BUỘC '
+            '`orca orchestration gate-create --task <CRITIC_TASK_ID> --question "Leader vs Critic bất đồng: <2 phương án + bằng chứng>" --options \'["leader","critic","wait"]\' --json` cho sếp chọn.\n'
+            if critic_enabled else
+            '  - **Chống quy kết vội vàng:** Leader **CẤM** quy kết lỗi cho bất kỳ role nào khi chưa có bằng chứng `file:line` + log thực tế.\n'
+        )
+        + '  - **Nhận `question` (từ `ask`):** Coordinator phản hồi qua `orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json`.\n'
+        f'  - **Nhận `handoff` (từ {"Critic/" if critic_enabled else ""}RE/Dev/DevOps/UI):** Coordinator kiểm duyệt bằng chứng ({"`CONSENSUS_REACHED`, " if critic_enabled else ""}Commit Hash, Clean-Room Spec, Pod/Port/Log sạch) rồi quyết định bàn giao cho role kế tiếp.\n'
+        f'  - **Nhận `escalation` (từ DevOps/QA/Sec/Bench):** Coordinator phân xử dựa trên bằng chứng{" (gặp trigger Anti-Autocracy ➔ qua `critic-worker` trước)" if critic_enabled else ""} và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` vào đúng worktree định danh của role đó (`--worktree path:<abs_path>`), rồi điều phối `devops-worker` & `qa-worker` kiểm toán lại.\n'
         '- **Nghiệm thu Zero-Trust:** Đọc `orca orchestration worker-read --dispatch <DISPATCH_ID> --json` và `orca orchestration inbox --json`. '
         '**BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:\n'
         '  1. **Báo sạch giả (Fake Clean):** Báo `succeeded` nhưng thiếu `EXIT_CODE=0`, thiếu `git commit` (Commit Hash), '
-        '`Tests Run = 0`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence từ `rea` (`re-worker`), thiếu bằng chứng `file:line` khi phản biện (`critic-worker`), '
+        f'`Tests Run = 0`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence từ `rea` (`re-worker`), {"thiếu bằng chứng `file:line` khi phản biện (`critic-worker`), " if critic_enabled else ""}'
         'hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ chưa merge commit mới của Dev.\n'
         '  2. **Bỏ sót/Che giấu Lỗi Runtime (Log Blindness/Masking):** DevOps/QA báo `PASS` nhưng thiếu bằng chứng quét '
         '**Full Container/Pod Logs** (từ lúc start trên toàn bộ App + DB + Kafka/Broker sau chu kỳ background job), dùng `--since` ngắn '
         'cắt lỗi, bỏ sót pod phụ trợ (`postgres`, `kafka`), hoặc QA sửa test script nới lỏng assert / '
         'phớt lờ trạng thái lỗi (`ERROR`, `FATAL`, `Exception`, `SQL error`, `SSLHandshakeException`, `health: ERROR`, `close_status: FAILED`) '
         'thay vì gửi `escalation`.\n'
-        '  3. **Còn lỗi tồn đọng hoặc Chưa đạt Đồng thuận:** Lỗi compile, test fail, lỗi runtime logs, `CRITIC_VERDICT: HYPOTHESIS_CHALLENGED` (Leader chưa giải trình/thống nhất với `critic-worker`), `SECURITY_VERDICT: BLOCK`, `QA_VERDICT: FAIL`, '
+        f'  3. **Còn lỗi tồn đọng{" hoặc Chưa đạt Đồng thuận" if critic_enabled else ""}:** Lỗi compile, test fail, lỗi runtime logs, {"`Critic Deadlock` chưa được sếp phân xử qua Gate, " if critic_enabled else ""}`SECURITY_VERDICT: BLOCK`, `QA_VERDICT: FAIL`, '
         '`PERF_VERDICT: BOTTLENECK_FOUND`, `RE_VERDICT: BLOCKED_BY_UNKNOWN`, hoặc pod `CrashLoopBackOff`/`ErrImagePull`.\n'
-        '  4. **Vượt rào (Boundary Crossing):** Critic/QA/Bench/RE tự sửa code app, Dev xóa/skip test cũ, DevOps sửa business logic, hoặc Worker tự ý đổi kiến trúc không qua Coordinator.\n'
+        f'  4. **Vượt rào (Boundary Crossing):** {"Critic/" if critic_enabled else ""}QA/Bench/RE tự sửa code app, Dev xóa/skip test cũ, DevOps sửa business logic, hoặc Worker tự ý đổi kiến trúc không qua Coordinator.\n'
         '- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao `dev-worker`/`devops-worker` sửa (mở tab mới ngay trong worktree định danh hiện hữu) và bắt buộc chạy lại `qa-worker`/`sec-worker`/`bench-worker` xác nhận đến khi PASS 100%.\n'
         '- ⚠️ **GIỮ TERMINAL WORKER SỐNG Ở BƯỚC 3 BẰNG `worker-retain` (KHÔNG GỌI `worker-release` Ở BƯỚC 3):** Khi một worker đã hoàn tất (`worker_done`), gọi `orca orchestration worker-retain --dispatch <DISPATCH_ID> --json` để thỏa mãn Completion Accounting của Orca đồng thời giữ nguyên terminal worker trên Orca Sidebar (hiển thị **chấm xanh `🟢`**, **icon Agent `✓`** và **chuông thông báo `🔔`** cho tới Bước 4)!\n\n'
     )
@@ -690,9 +708,9 @@ def sync_gemini_directive(root: Path, config: dict):
     )
     step4_full = (
         '### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)\n'
-        '- Chỉ khi đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` nếu có Critic) và đủ bằng chứng thép của Dev (`Commit Hash` + `Build OK`), DevOps (`Pod/Infra Ready`), Security (`PASS`), QA (`PASS 100%`), Benchmark (`PERF_VERDICT: PASS`) và Reverse Eng (`RE_VERDICT: EVIDENCE_COMPLETE` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):\n'
+        f'- Chỉ khi {"đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` khi có trigger Anti-Autocracy) và " if critic_enabled else ""}đủ bằng chứng thép của Dev (`Commit Hash` + `Build OK`), DevOps (`Pod/Infra Ready`), Security (`PASS`), QA (`PASS 100%`), Benchmark (`PERF_VERDICT: PASS`) và Reverse Eng (`RE_VERDICT: EVIDENCE_COMPLETE` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):\n'
         '  ```bash\n'
-        '  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng Đồng thuận (Critic), Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?" --options \'["yes","wait"]\' --json\n'
+        f'  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng {"Đồng thuận (Critic), " if critic_enabled else ""}Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?" --options \'["yes","wait"]\' --json\n'
         '  ```\n'
         '- Chỉ khi người dùng phản hồi `"yes"`:\n'
         '  1. Đóng Gate và khôi phục trạng thái `completed` cho `<FINAL_TASK_ID>` (vì `gate-create` chuyển task sang `blocked` và `gate-resolve` trong Orca đưa task về `ready`):\n'
@@ -2515,8 +2533,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             size_str = f"{size_b/1024:.1f} KB" if size_b > 1024 else f"{size_b} B"
             tokens_str = f"~{tokens} tokens"
             base_tokens += tokens
-            if tokens > 7000:
-                status = "WARN (>7.0k tok)"
+            if tokens > 5900:
+                status = "WARN (>5.9k tok)"
                 warning_issues.append(f"File '{rel_name}' nặng ~{tokens} tokens (nạp lại vào context trên mỗi turn).")
             else:
                 status = "OK"
@@ -2541,9 +2559,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
     print("-" * 88)
     print(f"👉 Base Directive Overhead: ~{base_tokens:,} tokens/turn")
-    if base_tokens < 7800:
-        passed_items.append(f"Base Directive Overhead: ~{base_tokens:,} tokens/turn (< 7,800 tokens threshold).")
-    elif base_tokens < 8800:
+    if base_tokens < 6400:
+        passed_items.append(f"Base Directive Overhead: ~{base_tokens:,} tokens/turn (< 6,400 tokens threshold).")
+    elif base_tokens < 7400:
         warning_issues.append(f"Base Directive Overhead ở mức trung bình (~{base_tokens:,} tokens/turn).")
     else:
         critical_issues.append(f"Base Directive Overhead vượt ngưỡng (~{base_tokens:,} tokens/turn).")

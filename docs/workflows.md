@@ -153,13 +153,13 @@ sequenceDiagram
 
 ## 6. Quy Trình Ra Quyết Định Trung Tâm, Bàn Giao & Xử Lý Sự Cố (3-Tier Decision Hierarchy & Escalation)
 
-Tình huống: Worker (Dev/DevOps/QA/Sec/Bench/RE) cần quyết định kiến trúc (`ask`), gửi kết quả bàn giao (`handoff`), hoặc thực thi Quyền Phủ quyết Chuyên môn (`escalation`) khi phát hiện lỗi Runtime Log/Security/Performance. **Lead Coordinator là Người Ra Quyết Định Kỹ Thuật & Điều Phối Duy Nhất** trong các bước thực thi (Steps 1–3), và **Human User** giữ quyền quyết định cuối cùng ở Step 4 (`gate-create`).
+Tình huống: Worker (Dev/DevOps/QA/Sec/Bench/RE) cần quyết định kiến trúc (`ask`), gửi kết quả bàn giao (`handoff`), hoặc thực thi Quyền Phủ quyết Chuyên môn (`escalation`) khi phát hiện lỗi Runtime Log/Security/Performance. **Lead Coordinator điều phối và ra quyết định kỹ thuật** trong các bước thực thi (Steps 1–3) nhưng chịu đối trọng của `critic-worker` khi gặp trigger Anti-Autocracy (xem mục 6.1), và **Human User** giữ quyền quyết định cuối cùng (Step 4 `gate-create`, hoặc khi Leader–Critic bế tắc).
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as 👤 Người dùng (Human Gate)
-    participant Lead as 🏛️ Lead Coordinator (Sole Decision-Maker)
+    participant Lead as 🏛️ Lead Coordinator
     participant Orca as 🐋 Orca Mailbox & CLI
     participant Worker as 🤖 Worker (Dev/DevOps/QA/Sec/Bench/RE)
 
@@ -190,6 +190,44 @@ sequenceDiagram
         User->>Lead: Phản hồi quyết định
     end
 ```
+
+
+### 6.1. Vòng Phản Biện Leader ↔ Critic (Anti-Autocracy & Dialectical Consensus)
+
+Kích hoạt khi gặp 1 trong 4 trigger: (a) bug đã fix ≥1 lần vẫn tái phát, (b) escalation quy lỗi sang role khác hoặc bug liên tầng App ↔ DB ↔ Infra ↔ Network, (c) thay đổi schema/API contract/auth/payment hoặc chạm ≥2 tầng, (d) các worker báo cáo mâu thuẫn. Critic dùng `ask` (lệnh **chặn** tới khi Leader `reply`) nên đây là đối thoại 2 chiều thật; tối đa 3 vòng để chặn tranh cãi vô hạn đốt token.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 👤 Người dùng (Human Gate)
+    participant Lead as 🏛️ Lead Coordinator
+    participant Orca as 🐋 Orca Mailbox
+    participant Critic as 🔎 critic-worker (Read-Only)
+
+    Lead->>Orca: task-create [ROLE: PRINCIPAL RESEARCH & ADVERSARIAL CRITIC] gồm Triệu chứng + bằng chứng thô và Giả thuyết Leader
+    Orca->>Critic: worker-start --worktree critic-worker
+    Critic->>Critic: Lập giả thuyết độc lập TRƯỚC khi đọc giả thuyết Leader, kiểm chứng file:line, git blame, DB, runtime log
+    loop Tối đa 3 vòng
+        Critic->>Orca: ask --question "CRITIC_CHALLENGE vòng n/3: bằng chứng + phương án" (chặn chờ)
+        Orca-->>Lead: Sự kiện question (id MSG_ID)
+        Lead->>Orca: reply --id MSG_ID kèm phản chứng file:line/log HOẶC chấp nhận và sửa kế hoạch
+        Orca-->>Critic: Mở khóa ask, trả về phản hồi của Leader
+        Critic->>Critic: Tự kiểm chứng lại phản chứng của Leader
+    end
+    alt Đồng thuận
+        Critic->>Orca: send --type handoff --subject "Critic Consensus" (CRITIC_VERDICT: CONSENSUS_REACHED)
+        Orca-->>Lead: Sự kiện handoff
+        Lead->>Orca: Khóa Spec, giao dev-worker / devops-worker
+    else Bế tắc sau 3 vòng
+        Critic->>Orca: send --type handoff --subject "Critic Deadlock" (CRITIC_VERDICT: HYPOTHESIS_CHALLENGED)
+        Orca-->>Lead: Sự kiện handoff
+        Lead->>Orca: gate-create --options leader,critic,wait (CẤM Leader tự phán quyết)
+        Orca-->>User: Trình 2 phương án + bằng chứng mỗi bên
+        User->>Lead: Chọn phương án
+    end
+```
+
+> **Giới hạn:** Đây là ràng buộc ở tầng chỉ dẫn + kiểm tra Zero-Trust; Orca CLI không chặn cứng việc Leader bỏ qua Critic. Dấu vết kiểm toán nằm ở hộp thư Run (`orca orchestration inbox --json`): thiếu `Critic Consensus`/`Critic Deadlock` cho một task có trigger là vi phạm có thể phát hiện được.
 
 ---
 

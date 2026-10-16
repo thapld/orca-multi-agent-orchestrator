@@ -36,6 +36,7 @@ Tài liệu này giải thích chi tiết cấu trúc kiến trúc, các tầng 
 │  • QA / SDET (qa-worker)             │ │  • Desktop Computer Use       │
 │  • Bench & Perf (bench-worker)       │ │  • Reverse Eng (morluto/rea)  │
 │  • Reverse Eng / REA (re-worker)     │ │  • Mobile Simulators (iOS/adb)│
+│  • Research & Critic (critic-worker) │ │                               │
 │  • UI/UX, PR Review, Issue Hotfix    │ │  • Per-Worktree Env & Diff    │
 └──────────────────────────────────────┘ └───────────────────────────────┘
 ```
@@ -46,10 +47,11 @@ Tài liệu này giải thích chi tiết cấu trúc kiến trúc, các tầng 
 
 ### 2.1. Tầng Điều Phối (Orchestrator Layer)
 * **Thành phần chính:** Model cấp cao đảm nhiệm vai trò **Lead Coordinator (`Principal Chief Architect`)** (ví dụ Claude Opus, Gemini Argon, hoặc OpenAI Codex).
-* **Nhiệm vụ & Thẩm quyền Quyết định Trung tâm (Sole Technical & Orchestration Decision-Maker):**
+* **Nhiệm vụ & Thẩm quyền Điều phối Trung tâm (có đối trọng phản biện):**
   1. Phân tích yêu cầu từ người dùng hoặc issue trên GitHub, lập bản kế hoạch kiến trúc (`plan.md`) và chia nhỏ thành các nhiệm vụ nguyên tử (atomic tasks).
   2. Sử dụng lệnh `orca orchestration run-create` và `task-create` để nạp đồ thị phụ thuộc (DAG) vào Orca.
-  3. **Là Người Ra Quyết Định Kỹ Thuật & Điều Phối Duy Nhất trong các bước thực thi (Steps 1–3):**
+  3. **Điều phối & ra quyết định kỹ thuật trong các bước thực thi (Steps 1–3), chịu đối trọng của `critic-worker`:**
+     - Khi gặp 1 trong 4 trigger Anti-Autocracy (bug tái phát sau fix, escalation quy lỗi liên role/liên tầng, thay đổi schema/API/auth/payment hoặc ≥2 tầng, worker báo cáo mâu thuẫn): bắt buộc giao `critic-worker` điều tra độc lập, trả lời `CRITIC_CHALLENGE` (`ask`) bằng phản chứng `file:line`/log qua `reply`; bế tắc sau 3 vòng ➔ `gate-create` để người dùng chọn, Leader không tự phán quyết.
      - Giải đáp câu hỏi kiến trúc (`question` từ `orca orchestration ask`) qua `orca orchestration reply --id <MSG_ID>`.
      - Kiểm duyệt kết quả bàn giao (`handoff`) trước khi truyền cho role kế tiếp.
      - Phân xử các cảnh báo phủ quyết chuyên môn (`escalation` từ DevOps/QA/Sec/Bench/RE) và quyết định điều phối bản vá (`send --to dispatch:<LIVE_ID> --type dispatch` cho worker đang chạy hoặc `task-create` + `worker-start` cho worker đã kết thúc).
@@ -59,7 +61,7 @@ Tài liệu này giải thích chi tiết cấu trúc kiến trúc, các tầng 
 Orca hoạt động như một hệ điều hành thu nhỏ dành cho các AI Agent (Agent Development Environment):
 * **`Run`:** Là không gian làm việc bền vững (durable namespace) lưu trữ toàn bộ lịch sử trao đổi, danh sách task và trạng thái của một phiên làm việc.
 * **`Task & Dispatch`:** Mỗi task có vòng đời chặt chẽ (`pending` ➔ `ready` ➔ `dispatched` ➔ `completed` / `failed`). Mỗi lần chạy thử nghiệm một task là một `Dispatch`.
-* **`Git Worktree Isolation Engine (1 Role = 1 Worktree Định Danh + Gom Nhóm Terminal Tabs)`:** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`) sở hữu **1 Git Worktree định danh duy nhất**. Ở lần chạy đầu tiên khi worktree chưa tồn tại, hệ thống tạo `--worktree new-child --name <role>-worker`; ở mọi nhiệm vụ tiếp theo của cùng vai trò, hệ thống truyền `--worktree path:<abs_path>` (trích xuất từ `git worktree list`) để mở và **gom nhóm các Terminal Tab mới ngay bên trong worktree định danh đó** (tránh đẻ worktree trùng lặp `-2`, `-3` và tránh xung đột `selector_ambiguous` khi mở nhiều dự án).
+* **`Git Worktree Isolation Engine (1 Role = 1 Worktree Định Danh + Gom Nhóm Terminal Tabs)`:** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`, `critic-worker`) sở hữu **1 Git Worktree định danh duy nhất**. Ở lần chạy đầu tiên khi worktree chưa tồn tại, hệ thống tạo `--worktree new-child --name <role>-worker`; ở mọi nhiệm vụ tiếp theo của cùng vai trò, hệ thống truyền `--worktree path:<abs_path>` (trích xuất từ `git worktree list`) để mở và **gom nhóm các Terminal Tab mới ngay bên trong worktree định danh đó** (tránh đẻ worktree trùng lặp `-2`, `-3` và tránh xung đột `selector_ambiguous` khi mở nhiều dự án).
 * **`Lifecycle Mailbox`:** Hộp thư trao đổi typed message chuẩn hóa theo hàng đợi FIFO giữa Coordinator và Workers (`heartbeat`, `question` / `ask` / `reply`, `handoff`, `escalation`, `dispatch`, `worker_done`) với cơ chế xác nhận `--ack <delivery_id>`.
 
 ### 2.3. Tầng Thực Thi (Worker Swarm Layer)
