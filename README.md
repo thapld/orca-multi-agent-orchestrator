@@ -89,17 +89,20 @@ orca-project-init /path/to/project
 
 ---
 
-### Các bước wizard sẽ hướng dẫn:
-1. Chọn agent làm **Lead Coordinator** (ví dụ: `claude`).
-2. Chọn agent & số lượng song song cho **Developers** (ví dụ: 2 agents `kimi`).
-3. Chọn agent & số lượng song song cho **QA Testers** (ví dụ: 1 agent `kimi`).
-4. Chọn agent cho **Bug Hunter & Security** (ví dụ: `codex`).
-5. Chọn agent cho **PR Reviewer** và **Git Issue Resolver**.
-6. Bật/tắt các vai trò mở rộng: **UI/UX Designer** (Design Mode) và **DevOps** (SSH Worktrees).
+### Các bước wizard (điều hướng 100% bằng phím mũi tên `↑`/`↓` & `Enter`):
+1. Chọn agent & model cho **Lead Coordinator** (ví dụ: `antigravity` / `claude`).
+2. Chọn agent, model, số lượng song song & gói tiện ích cho **Developers**.
+3. Chọn agent, model, số lượng song song & gói tiện ích cho **QA Testers**.
+4. Chọn agent, model & gói tiện ích cho **Bug Hunter & Security**.
+5. Chọn agent & model cho **PR Reviewer** và **Git Issue Resolver**.
+6. Bật/tắt các vai trò mở rộng: **UI/UX Designer** (Design Mode) và **DevOps Specialist** (Docker/K8s/DB/SSH).
 7. Chọn môi trường thực thi: **Local** hoặc **SSH (`orb`)**.
 
-### Vận hành:
-Sau khi khởi tạo, bạn mở dự án trong Antigravity, Claude Code (`claude`), hoặc Orca. Bất kỳ yêu cầu nào bạn đưa ra đều được tự động vận hành theo đúng quy trình 6 bước và chính sách đa luồng đã thiết lập mà không cần dán prompt.
+### Vận hành tự động sau khi khởi tạo:
+* Tự động tạo `.agents/GEMINI.md` (~1,380 tokens tinh gọn) cùng các symlink `GEMINI.md`, `AGENTS.md` / `CLAUDE.md` ở thư mục gốc.
+* Tự động thêm toàn bộ file cấu hình & thư mục runtime của Orchestrator vào `.gitignore` để giữ sạch Git status của dự án.
+* Tự động kích hoạt **Orca Agent Status Hooks** để hiển thị vòng xoay loading (`⟳`), chấm xanh (`🟢`), icon hoàn thành (`✓`) và chuông thông báo (`🔔`) trên thanh bên của Orca ADE.
+* Mở dự án trong Antigravity, Claude Code (`claude`), Codex hoặc Orca ADE: mọi yêu cầu của bạn sẽ tự động vận hành theo đúng **Quy trình 4 Bước** (Tách Task theo vai trò ➔ Fan-out sang Child Worktrees ➔ Reactive Wait `check --wait` ➔ Human Gate xin phép trước khi merge).
 
 ---
 

@@ -5,9 +5,27 @@
 
 set -e
 
+SCRIPT_DIR="${0:A:h}"
+ORCA_TEAM_BIN="$SCRIPT_DIR/orca-team"
+if [[ ! -x "$ORCA_TEAM_BIN" ]] && command -v orca-team >/dev/null 2>&1; then
+  ORCA_TEAM_BIN="$(command -v orca-team)"
+fi
+if [[ ! -x "$ORCA_TEAM_BIN" ]] && command -v curl >/dev/null 2>&1; then
+  TMP_ORCA_TEAM="/tmp/orca-team-$$"
+  if curl -fsSL "https://raw.githubusercontent.com/thapld/orca-multi-agent-orchestrator/main/scripts/orca-team" -o "$TMP_ORCA_TEAM" 2>/dev/null; then
+    chmod +x "$TMP_ORCA_TEAM"
+    ORCA_TEAM_BIN="$TMP_ORCA_TEAM"
+    trap 'rm -f "$TMP_ORCA_TEAM"' EXIT
+  fi
+fi
+
 if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "--clean" ]]; then
   TARGET_DIR="${2:-.}"
   TARGET_PATH=$(cd "$TARGET_DIR" 2>/dev/null && pwd || echo "$TARGET_DIR")
+
+  if [[ -x "$ORCA_TEAM_BIN" ]]; then
+    exec python3 "$ORCA_TEAM_BIN" uninstall "$TARGET_PATH" -y
+  fi
 
   # Bảo vệ: Không bao giờ tự gỡ bỏ chính kho mã nguồn của framework
   if [[ -d "$TARGET_PATH/templates" && -f "$TARGET_PATH/package.json" ]]; then
@@ -20,27 +38,14 @@ if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "--clean" ]]; then
   fi
 
   echo "🐋 [Orca Orchestrator Uninstaller] Đang gỡ bỏ cấu hình khỏi: $TARGET_PATH..."
-  
-  if [[ -f "$TARGET_PATH/orca-team.json" ]]; then
-    rm -f "$TARGET_PATH/orca-team.json"
-    echo "  🗑️  Đã xóa: orca-team.json"
-  fi
-  if [[ -L "$TARGET_PATH/CLAUDE.md" ]]; then
-    rm -f "$TARGET_PATH/CLAUDE.md"
-    echo "  🗑️  Đã xóa symlink: CLAUDE.md"
-  fi
-  if [[ -L "$TARGET_PATH/AGENTS.md" ]]; then
-    rm -f "$TARGET_PATH/AGENTS.md"
-    echo "  🗑️  Đã xóa symlink: AGENTS.md"
-  fi
-  if [[ -f "$TARGET_PATH/.agents/GEMINI.md" ]]; then
-    FIRST_LINE=$(head -n 1 "$TARGET_PATH/.agents/GEMINI.md" 2>/dev/null || true)
-    if [[ "$FIRST_LINE" == "# Orca Multi-Agent Orchestration Directive" ]]; then
-      rm -f "$TARGET_PATH/.agents/GEMINI.md"
-      echo "  🗑️  Đã xóa: .agents/GEMINI.md"
-      rmdir "$TARGET_PATH/.agents" 2>/dev/null || true
+  rm -f "$TARGET_PATH/orca-team.json"
+  for link_name in GEMINI.md CLAUDE.md AGENTS.md; do
+    if [[ -L "$TARGET_PATH/$link_name" ]]; then
+      rm -f "$TARGET_PATH/$link_name"
+      echo "  🗑️  Đã xóa symlink: $link_name"
     fi
-  fi
+  done
+  rm -rf "$TARGET_PATH/.agents" "$TARGET_PATH/.orca" "$TARGET_PATH/.orca-cache"
   echo "🎉 Dự án đã được khôi phục về trạng thái ban đầu sạch sẽ!"
   exit 0
 fi
@@ -62,12 +67,6 @@ AVAILABLE_AGENTS=(
   "goose"
   "copilot"
 )
-
-SCRIPT_DIR="${0:A:h}"
-ORCA_TEAM_BIN="$SCRIPT_DIR/orca-team"
-if [[ ! -x "$ORCA_TEAM_BIN" ]] && command -v orca-team >/dev/null 2>&1; then
-  ORCA_TEAM_BIN="$(command -v orca-team)"
-fi
 
 choose_agent() {
   local role_title="$1"
@@ -259,6 +258,16 @@ fmt_md_cell() {
   fi
 }
 
+fmt_worker_args() {
+  local agent="$1"
+  local model="$2"
+  local effort="$3"
+  local args="--agent ${agent}"
+  [[ -n "$model" ]] && args="${args} --model \"${model}\""
+  [[ -n "$effort" ]] && args="${args} --effort ${effort}"
+  echo "$args"
+}
+
 choose_count() {
   local role_title="$1"
   local default_count="${2:-1}"
@@ -289,22 +298,46 @@ choose_count() {
 
 choose_utilities() {
   local default_utils="$1"
-  echo "   Tiện ích Orca cấp quyền (1: Worktrees, 2: Browser/Design Mode, 3: SSH, 4: Computer Use, 5: Skills Registry)"
-  printf "   Nhập các số cách nhau bằng dấu phẩy (Enter = $default_utils): "
-  read -r utils_input
-  utils_input="${utils_input:-$default_utils}"
-  
-  SELECTED_UTILS=()
-  for u in ${(s:,:)utils_input}; do
-    u=$(echo "$u" | tr -d ' ')
-    case "$u" in
-      1) SELECTED_UTILS+=("git-worktrees") ;;
-      2) SELECTED_UTILS+=("browser-design-mode") ;;
-      3) SELECTED_UTILS+=("ssh-remote-execution") ;;
-      4) SELECTED_UTILS+=("desktop-computer-use") ;;
-      5) SELECTED_UTILS+=("orca-skills-registry") ;;
+  local def_idx=0
+  [[ "$default_utils" == "1,5" ]] && def_idx=1
+
+  local util_bundles=(
+    "Gói Tiêu chuẩn: Git Worktrees + Browser Design Mode + Skills Registry ⭐"
+    "Gói Bảo mật & Backend: Git Worktrees + Skills Registry"
+    "Gói Full-Stack + SSH Remote: Worktrees + Browser + SSH + Skills Registry"
+    "Gói Toàn diện: Tất cả 5 tiện ích (kèm Desktop Computer Use)"
+  )
+
+  if [[ -x "$ORCA_TEAM_BIN" ]]; then
+    local bundle_idx
+    bundle_idx=$(python3 "$ORCA_TEAM_BIN" select \
+      --title "👉 Chọn gói tiện ích Orca cấp quyền cho nhóm này:" \
+      --options "${util_bundles[@]}" \
+      --default-idx "$def_idx" \
+      --return-idx)
+    case "$bundle_idx" in
+      2) SELECTED_UTILS=("git-worktrees" "orca-skills-registry") ;;
+      3) SELECTED_UTILS=("git-worktrees" "browser-design-mode" "ssh-remote-execution" "orca-skills-registry") ;;
+      4) SELECTED_UTILS=("git-worktrees" "browser-design-mode" "ssh-remote-execution" "desktop-computer-use" "orca-skills-registry") ;;
+      *) SELECTED_UTILS=("git-worktrees" "browser-design-mode" "orca-skills-registry") ;;
     esac
-  done
+  else
+    echo "   Tiện ích Orca cấp quyền (1: Worktrees, 2: Browser/Design Mode, 3: SSH, 4: Computer Use, 5: Skills Registry)"
+    printf "   Nhập các số cách nhau bằng dấu phẩy (Enter = $default_utils): "
+    read -r utils_input
+    utils_input="${utils_input:-$default_utils}"
+    SELECTED_UTILS=()
+    for u in ${(s:,:)utils_input}; do
+      u=$(echo "$u" | tr -d ' ')
+      case "$u" in
+        1) SELECTED_UTILS+=("git-worktrees") ;;
+        2) SELECTED_UTILS+=("browser-design-mode") ;;
+        3) SELECTED_UTILS+=("ssh-remote-execution") ;;
+        4) SELECTED_UTILS+=("desktop-computer-use") ;;
+        5) SELECTED_UTILS+=("orca-skills-registry") ;;
+      esac
+    done
+  fi
   echo "   ➔ Tiện ích: ${(j:, :)SELECTED_UTILS}"
 }
 
@@ -622,7 +655,7 @@ if [[ "$ENABLE_DEVOPS" == true ]]; then
   EXTRA_STEP1_RULES="${EXTRA_STEP1_RULES}  # DevOps (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):
   orca orchestration task-create --spec \"DevOps: [Đóng gói Docker, K8s deploy, migration, kiểm tra pod]\" --json"$'\n'
   EXTRA_STEP2_CMDS="${EXTRA_STEP2_CMDS}  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):
-  orca orchestration worker-start --task <DEVOPS_TASK_ID> --worktree new-child --name devops-worker --agent ${DEVOPS_AGENT} --model \"${DEVOPS_MODEL}\" --effort ${DEVOPS_EFFORT:-high} --json"$'\n'
+  orca orchestration worker-start --task <DEVOPS_TASK_ID> --worktree new-child --name devops-worker $(fmt_worker_args "$DEVOPS_AGENT" "$DEVOPS_MODEL" "${DEVOPS_EFFORT:-high}") --json"$'\n'
 fi
 
 if [[ "$ENABLE_UI" == true ]]; then
@@ -630,7 +663,7 @@ if [[ "$ENABLE_UI" == true ]]; then
   EXTRA_STEP1_RULES="${EXTRA_STEP1_RULES}  # UI/UX (Khi có Frontend, CSS/DOM, Design Mode):
   orca orchestration task-create --spec \"UI: [Thiết kế giao diện, CSS/DOM và kiểm tra hiển thị]\" --json"$'\n'
   EXTRA_STEP2_CMDS="${EXTRA_STEP2_CMDS}  # UI Worker (khi có Task Frontend/UI):
-  orca orchestration worker-start --task <UI_TASK_ID> --worktree new-child --name ui-worker --agent ${UI_AGENT} --model \"${UI_MODEL}\" --effort ${UI_EFFORT:-medium} --json"$'\n'
+  orca orchestration worker-start --task <UI_TASK_ID> --worktree new-child --name ui-worker $(fmt_worker_args "$UI_AGENT" "$UI_MODEL" "${UI_EFFORT:-medium}") --json"$'\n'
 fi
 
 # ── Ghi file Directive GEMINI.md (Token-Optimized) ──
@@ -682,11 +715,11 @@ ${EXTRA_STEP1_RULES}  # Security (BẮT BUỘC khi có API mới, Auth/JWT, inpu
 - Khởi chạy từng worker tương ứng với các Task ở Bước 1 (dùng đúng Agent & Model trong bảng Topology):
   \`\`\`bash
   # Dev Worker:
-  orca orchestration worker-start --task <DEV_TASK_ID> --worktree new-child --name dev-worker --agent ${DEV_AGENT} --model "${DEV_MODEL}" --effort ${DEV_EFFORT:-high} --json
+  orca orchestration worker-start --task <DEV_TASK_ID> --worktree new-child --name dev-worker $(fmt_worker_args "$DEV_AGENT" "$DEV_MODEL" "${DEV_EFFORT:-high}") --json
 ${EXTRA_STEP2_CMDS}  # Security Worker (khi có Task Security Audit):
-  orca orchestration worker-start --task <SEC_TASK_ID> --worktree new-child --name sec-worker --agent ${SEC_AGENT} --model "${SEC_MODEL}" --effort ${SEC_EFFORT:-high} --json
+  orca orchestration worker-start --task <SEC_TASK_ID> --worktree new-child --name sec-worker $(fmt_worker_args "$SEC_AGENT" "$SEC_MODEL" "${SEC_EFFORT:-high}") --json
   # QA Worker (Test nghiệm thu):
-  orca orchestration worker-start --task <QA_TASK_ID> --worktree new-child --name qa-worker --agent ${QA_AGENT} --model "${QA_MODEL}" --effort ${QA_EFFORT:-medium} --json
+  orca orchestration worker-start --task <QA_TASK_ID> --worktree new-child --name qa-worker $(fmt_worker_args "$QA_AGENT" "$QA_MODEL" "${QA_EFFORT:-medium}") --json
   \`\`\`
   *(On-demand Git: Review PR dùng \`orca-review-pr <PR_NUM>\` | Sửa Issue dùng \`orca-hotfix <ISSUE_ID>\`)*
 
