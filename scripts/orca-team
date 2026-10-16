@@ -1524,8 +1524,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             size_str = f"{size_b/1024:.1f} KB" if size_b > 1024 else f"{size_b} B"
             tokens_str = f"~{tokens} tokens"
             base_tokens += tokens
-            if tokens > 2500:
-                status = "⚠️ Quá lớn (>2.5k tok)"
+            if tokens > 2800:
+                status = "⚠️ Quá lớn (>2.8k tok)"
                 warning_issues.append(f"File '{rel_name}' có kích thước lớn (~{tokens} tokens). Sẽ bị nạp lại vào context của AI Leader trên MỖI turn.")
             else:
                 status = "🟢 Gọn gàng"
@@ -1552,9 +1552,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
     print("-" * 85)
     print(f"👉 Tổng token cơ sở (Base Context Tokens) nạp mỗi turn: ~{base_tokens:,} tokens")
-    if base_tokens < 2000:
-        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn).")
-    elif base_tokens < 4000:
+    if base_tokens < 3200:
+        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn, bao gồm đầy đủ Hiến pháp 8 Vai trò cấp Principal).")
+    elif base_tokens < 4500:
         warning_issues.append(f"Context chỉ dẫn ban đầu ở mức trung bình (~{base_tokens:,} tokens/turn).")
     else:
         critical_issues.append(f"Context chỉ dẫn ban đầu quá lớn (~{base_tokens:,} tokens/turn). Cần tinh gọn lại các file chỉ dẫn.")

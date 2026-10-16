@@ -11,22 +11,15 @@ if ! [[ "$PR_NUM" =~ ^[0-9]+$ ]]; then
 fi
 
 CONFIG_AGENT=""
-MODEL_ARGS=()
 if command -v orca-team &>/dev/null; then
   CONFIG_AGENT=$(orca-team get pr 2>/dev/null || true)
-  PR_MODEL=$(orca-team get pr --field model 2>/dev/null || true)
-  PR_EFFORT=$(orca-team get pr --field effort 2>/dev/null || true)
-  if [[ -n "$PR_MODEL" && "$PR_MODEL" != "null" && "$PR_MODEL" != "(default)" ]]; then
-    MODEL_ARGS+=(--model "$PR_MODEL")
-    if [[ -n "$PR_EFFORT" && "$PR_EFFORT" != "null" && "$PR_EFFORT" != "-" ]]; then
-      MODEL_ARGS+=(--effort "$PR_EFFORT")
-    fi
-  fi
 fi
 AGENT="${2:-${CONFIG_AGENT:-antigravity}}"
 WORKTREE_NAME="review-pr-$PR_NUM"
 
-echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_NUM bằng agent: $AGENT ${MODEL_ARGS[*]}..."
+PR_PROMPT="[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: Thẩm định toàn diện Pull Request #${PR_NUM}. Chuẩn mực: (1) Đọc toàn bộ line-by-line diff qua 'orca file open-changed --mode diff --worktree active' và 'git diff', (2) Kiểm tra kiến trúc, Clean Code, OWASP Top 10, Race Conditions, Memory/Resource Leaks, (3) BẮT BUỘC chạy thực tế test suite và linter trong worktree PR (CẤM duyệt suông bằng mắt!). CẤM VƯỢT RÀO: Không tự ý sửa code tính năng của PR khi chưa được yêu cầu. BẰNG CHỨNG BẮT BUỘC: Xuất báo cáo review chi tiết từng file:line, kết quả chạy test thực tế (EXIT_CODE, số test pass/fail) và chốt PR_VERDICT: APPROVE hoặc REQUEST_CHANGES."
+
+echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_NUM bằng agent: $AGENT..."
 
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
 
@@ -34,7 +27,7 @@ RECEIPT=$($ORCA_BIN worktree create \
   --name "$WORKTREE_NAME" \
   --pr "$PR_NUM" \
   --agent "$AGENT" \
-  "${MODEL_ARGS[@]}" \
+  --prompt "$PR_PROMPT" \
   --setup run \
   --json 2>&1) || true
 
@@ -57,4 +50,4 @@ if [[ -z "$WT_NAME" ]]; then
 fi
 
 echo "✅ Đã tạo thành công worktree review PR: $WT_NAME"
-echo "👉 Mã nguồn PR #$PR_NUM đã được checkout tự động để bắt đầu review line-by-line diff."
+echo "👉 Mã nguồn PR #$PR_NUM đã được checkout tự động kèm chỉ dẫn Principal PR Reviewer."

@@ -56,6 +56,27 @@ fi
 
 echo "🐋 [Orca Dispatch] Đang khởi tạo task: '$TASK_TITLE' cho agent: $AGENT ${MODEL_ARGS[*]}..."
 
+# Tự động tiêm Hiến pháp Vai trò Cấp Principal (Chống vượt rào & Chống báo sạch giả) nếu SPEC chưa có
+if [[ "$SPEC" != "[ROLE:"* ]]; then
+  case "${ROLE_QUERY:l}" in
+    devops|infra|sre|ops)
+      SPEC="[ROLE: PRINCIPAL DEVOPS & SRE] Nhiệm vụ: ${SPEC}. Chuẩn mực: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. CẤM VƯỢT RÀO: Chỉ sửa tầng Infra/Docker/K8s/DB/CI; CẤM tự ý sửa business logic của Dev (nếu container crash do lỗi code Dev, phải xuất container log và báo failed/escalation). BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: (1) Nếu build/deploy code mới của Dev, phải git merge --no-edit <nhánh-dev> trước để tránh build nhầm code cũ, (2) CẤM chỉ sửa file YAML/Dockerfile rồi báo xong — phải chạy build/rollout thật, xác nhận pod Running (1/1 Ready, 0 Restarts, không CrashLoopBackOff), log sạch lỗi và git commit."
+      ;;
+    sec|security|bug|auditor)
+      SPEC="[ROLE: PRINCIPAL SECURITY AUDITOR] Nhiệm vụ: ${SPEC}. Chuẩn mực: Kiểm toán độc lập (Red-Team) từng dòng git diff theo OWASP Top 10 (SQLi, Injection, Broken Auth/JWT, IDOR, SSRF, XSS), Race Conditions/Deadlock, Resource/Memory Leaks và Secret Leaks. CẤM VƯỢT RÀO: Read-Only Audit & PoC; CẤM tự ý sửa code tính năng của Dev. BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: Diff đúng commit mới của Dev; CẤM phán chung chung ('Code an toàn') — phải liệt kê rõ file:line theo 4 mục [OWASP, Concurrency, Leaks, Secrets] và chốt rõ SECURITY_VERDICT: PASS hoặc BLOCK."
+      ;;
+    qa|test|tester|sdet)
+      SPEC="[ROLE: PRINCIPAL QA & SDET] Nhiệm vụ: ${SPEC}. Chuẩn mực: Tư duy bẻ gãy hệ thống (Adversarial Testing) — phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) và 100% Acceptance Criteria. CẤM VƯỢT RÀO: Chỉ viết/chạy test và nghiệm thu; CẤM TUYỆT ĐỐI tự sửa code business logic của Dev để ép test xanh; CẤM xóa assert hoặc mock giả luôn trả về true. BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: (1) Phải git merge --no-edit <nhánh-dev> để lấy code mới trước khi test (chống test nhầm nhánh cũ!), (2) CẤM duyệt bằng mắt — phải chạy lệnh test thật đạt EXIT_CODE=0, Tests Run > 0, Failed = 0, (3) Xuất log thật và chốt QA_VERDICT: PASS hoặc FAIL."
+      ;;
+    ui|ux|frontend|design)
+      SPEC="[ROLE: PRINCIPAL UI/UX ARCHITECT] Nhiệm vụ: ${SPEC}. Chuẩn mực: Tinh chỉnh chuẩn xác CSS/DOM qua Orca Design Mode, đảm bảo Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. CẤM VƯỢT RÀO: Chỉ sửa tầng UI/Frontend; CẤM sửa backend core/DB schema. BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: Build/typecheck EXIT_CODE=0, không lỗi Console, kiểm tra snapshot/screenshot thực tế và git commit kèm Commit Hash."
+      ;;
+    *)
+      SPEC="[ROLE: PRINCIPAL FULL-STACK DEV] Nhiệm vụ: ${SPEC}. Chuẩn mực: Clean Architecture, type-safe 100%, xử lý triệt để edge cases (null, timeout, thread-safety/concurrency, backward-compat), không để TODO/mock giả/hardcode secret. CẤM VƯỢT RÀO: Chỉ sửa code ứng dụng & unit test của mình; CẤM sửa K8s/Docker/CI của DevOps; CẤM xóa/skip/comment-out (@Ignore, .skip) test cũ đang fail để lách lỗi. BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: (1) Chạy compile/build & unit test thực tế đạt EXIT_CODE=0, (2) git add & git commit sạch sẽ vào nhánh worktree (git status rỗng), (3) Báo rõ Branch, Commit Hash và log test."
+      ;;
+  esac
+fi
+
 # 0. Đảm bảo có Run đang bound trong Orca
 CHECK_RUN=$($ORCA_BIN orchestration task-list --json 2>&1 || true)
 if echo "$CHECK_RUN" | grep -q "No Run is bound"; then

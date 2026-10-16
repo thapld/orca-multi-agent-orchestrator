@@ -11,22 +11,15 @@ if ! [[ "$ISSUE_NUM" =~ ^[0-9]+$ ]]; then
 fi
 
 CONFIG_AGENT=""
-MODEL_ARGS=()
 if command -v orca-team &>/dev/null; then
   CONFIG_AGENT=$(orca-team get issue 2>/dev/null || true)
-  ISSUE_MODEL=$(orca-team get issue --field model 2>/dev/null || true)
-  ISSUE_EFFORT=$(orca-team get issue --field effort 2>/dev/null || true)
-  if [[ -n "$ISSUE_MODEL" && "$ISSUE_MODEL" != "null" && "$ISSUE_MODEL" != "(default)" ]]; then
-    MODEL_ARGS+=(--model "$ISSUE_MODEL")
-    if [[ -n "$ISSUE_EFFORT" && "$ISSUE_EFFORT" != "null" && "$ISSUE_EFFORT" != "-" ]]; then
-      MODEL_ARGS+=(--effort "$ISSUE_EFFORT")
-    fi
-  fi
 fi
 AGENT="${2:-${CONFIG_AGENT:-antigravity}}"
 WORKTREE_NAME="hotfix-issue-$ISSUE_NUM"
 
-echo "🐋 [Orca Hotfix] Đang khởi tạo worktree song song cho Issue #$ISSUE_NUM bằng agent: $AGENT ${MODEL_ARGS[*]}..."
+ISSUE_PROMPT="[ROLE: PRINCIPAL ISSUE RESOLVER & BUGFIX ENGINEER] Nhiệm vụ: Xử lý triệt để GitHub Issue #${ISSUE_NUM}. Chuẩn mực bắt buộc: (1) Đọc kỹ mô tả Issue và tìm đúng nguyên nhân gốc rễ (Root Cause Analysis), (2) BẮT BUỘC viết Reproduction Test tái hiện đúng lỗi (chạy test xác nhận FAIL trước khi sửa), (3) Sửa mã nguồn tối thiểu, chuẩn kiến trúc cho đến khi Reproduction Test chuyển sang PASS, (4) Chạy toàn bộ regression test suite đảm bảo EXIT_CODE=0 và không làm vỡ tính năng cũ. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ để lách lỗi; CẤM refactor lan man ngoài phạm vi Issue. BẰNG CHỨNG BẮT BUỘC: Commit sạch với thông điệp 'fix(#${ISSUE_NUM}): <mô tả>' và xuất đầy đủ Commit Hash + log chạy test."
+
+echo "🐋 [Orca Hotfix] Đang khởi tạo worktree song song cho Issue #$ISSUE_NUM bằng agent: $AGENT..."
 
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
 
@@ -34,7 +27,7 @@ RECEIPT=$($ORCA_BIN worktree create \
   --name "$WORKTREE_NAME" \
   --issue "$ISSUE_NUM" \
   --agent "$AGENT" \
-  "${MODEL_ARGS[@]}" \
+  --prompt "$ISSUE_PROMPT" \
   --setup run \
   --json 2>&1) || true
 
@@ -57,4 +50,4 @@ if [[ -z "$WT_NAME" ]]; then
 fi
 
 echo "✅ Đã tạo thành công worktree độc lập: $WT_NAME"
-echo "👉 Mã nguồn Issue #$ISSUE_NUM đã được kéo về tự động và cô lập trong worktree."
+echo "👉 Mã nguồn Issue #$ISSUE_NUM đã được kéo về tự động kèm chỉ dẫn Principal Issue Resolver."
