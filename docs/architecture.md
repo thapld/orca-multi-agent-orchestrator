@@ -59,13 +59,13 @@ Tài liệu này giải thích chi tiết cấu trúc kiến trúc, các tầng 
 Orca hoạt động như một hệ điều hành thu nhỏ dành cho các AI Agent (Agent Development Environment):
 * **`Run`:** Là không gian làm việc bền vững (durable namespace) lưu trữ toàn bộ lịch sử trao đổi, danh sách task và trạng thái của một phiên làm việc.
 * **`Task & Dispatch`:** Mỗi task có vòng đời chặt chẽ (`pending` ➔ `ready` ➔ `dispatched` ➔ `completed` / `failed`). Mỗi lần chạy thử nghiệm một task là một `Dispatch`.
-* **`Git Worktree Isolation Engine`:** Tự động tạo thư mục git checkout riêng cho từng task thông qua `git worktree add`. Đảm bảo code của các agent không bao giờ đè lên nhau, không cần stash, không lo xung đột nhánh.
+* **`Git Worktree Isolation Engine (1 Role = 1 Worktree Định Danh + Gom Nhóm Terminal Tabs)`:** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`) sở hữu **1 Git Worktree định danh duy nhất**. Ở lần chạy đầu tiên khi worktree chưa tồn tại, hệ thống tạo `--worktree new-child --name <role>-worker`; ở mọi nhiệm vụ tiếp theo của cùng vai trò, hệ thống truyền `--worktree path:<abs_path>` (trích xuất từ `git worktree list`) để mở và **gom nhóm các Terminal Tab mới ngay bên trong worktree định danh đó** (tránh đẻ worktree trùng lặp `-2`, `-3` và tránh xung đột `selector_ambiguous` khi mở nhiều dự án).
 * **`Lifecycle Mailbox`:** Hộp thư trao đổi typed message chuẩn hóa theo hàng đợi FIFO giữa Coordinator và Workers (`heartbeat`, `question` / `ask` / `reply`, `handoff`, `escalation`, `dispatch`, `worker_done`) với cơ chế xác nhận `--ack <delivery_id>`.
 
 ### 2.3. Tầng Thực Thi (Worker Swarm Layer)
 Bao gồm các agent chuyên biệt được khởi chạy có giám sát:
-* Chạy trong terminal riêng của Orca (`orca orchestration worker-start`).
-* Được cấp các cờ tự động hóa (ví dụ `--auto` cho Kimi, `--dangerously-skip-permissions` cho Claude).
+* Chạy trong terminal tab được gom nhóm theo từng Worktree vai trò của Orca (`orca orchestration worker-start`).
+* Được giữ sống trên Sidebar ở Bước 3 bằng `orca orchestration worker-retain --dispatch <DISPATCH_ID> --json` (để thỏa mãn Completion Accounting của Orca đồng thời hiển thị chấm xanh `🟢`, icon Agent `✓` và chuông thông báo `🔔` cho đến khi người dùng duyệt Human Gate ở Bước 4 mới gọi `worker-release`).
 * Tuân thủ **Orca Worker Contract**:
   - Giữ nguyên bộ cờ định danh từ Orca Preamble (`--from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id>` cho `send`/`ask` và `--terminal <worker_handle>` cho `check`).
   - Gửi `heartbeat` định kỳ để báo còn sống và kiểm tra chỉ đạo mới từ Leader qua `orca orchestration check --terminal <worker_handle> --peek --json`.

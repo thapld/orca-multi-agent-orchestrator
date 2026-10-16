@@ -12,20 +12,39 @@ fi
 
 ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
 CONFIG_AGENT=""
+CONFIG_MODEL=""
+CONFIG_EFFORT=""
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   CONFIG_AGENT=$("$ORCA_TEAM_BIN" get issue 2>/dev/null || true)
+  CONFIG_MODEL=$("$ORCA_TEAM_BIN" get issue --field model 2>/dev/null || true)
+  CONFIG_EFFORT=$("$ORCA_TEAM_BIN" get issue --field effort 2>/dev/null || true)
   [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
+  [[ "$CONFIG_MODEL" == "none" || "$CONFIG_MODEL" == "null" ]] && CONFIG_MODEL=""
+  [[ "$CONFIG_EFFORT" == "none" || "$CONFIG_EFFORT" == "null" ]] && CONFIG_EFFORT=""
 fi
 AGENT="${2:-${CONFIG_AGENT:-antigravity}}"
 WORKTREE_NAME="hotfix-issue-$ISSUE_NUM"
 
 ISSUE_PROMPT="[ROLE: PRINCIPAL ISSUE RESOLVER & BUGFIX ENGINEER] Nhiệm vụ: Xử lý triệt để GitHub Issue #${ISSUE_NUM}. Chuẩn mực bắt buộc: (1) Đọc kỹ mô tả Issue và tìm đúng nguyên nhân gốc rễ (Root Cause Analysis), (2) BẮT BUỘC viết Reproduction Test tái hiện đúng lỗi (chạy test xác nhận FAIL trước khi sửa), (3) Sửa mã nguồn tối thiểu, chuẩn kiến trúc cho đến khi Reproduction Test chuyển sang PASS, (4) Chạy toàn bộ regression test suite đảm bảo EXIT_CODE=0 và không làm vỡ tính năng cũ. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ để lách lỗi; CẤM refactor lan man ngoài phạm vi Issue. BẰNG CHỨNG BẮT BUỘC: Commit sạch với thông điệp 'fix(#${ISSUE_NUM}): <mô tả>' và xuất đầy đủ Commit Hash + log chạy test."
 
+ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+
+# Kiểm tra xem worktree định danh hotfix-issue-<ISSUE_NUM> đã tồn tại trong repo chưa (tránh đẻ worktree trùng lặp -2, -3)
+EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\).*\[${WORKTREE_NAME}\].*/\1/p" | head -n 1)
+
+if [[ -n "$EXISTING_WT_PATH" ]]; then
+  echo "♻️  [Orca Hotfix] Tái sử dụng worktree định danh hiện có: $WORKTREE_NAME ($EXISTING_WT_PATH)..."
+  DISPATCH_SCRIPT="${0:A:h}/orca-dispatch-task.sh"
+  if [[ -x "$DISPATCH_SCRIPT" ]]; then
+    exec "$DISPATCH_SCRIPT" "$WORKTREE_NAME" "$ISSUE_PROMPT" "$AGENT" "$CONFIG_MODEL" "$CONFIG_EFFORT"
+  fi
+fi
+
 echo "🐋 [Orca Hotfix] Đang khởi tạo worktree song song cho Issue #$ISSUE_NUM bằng agent: $AGENT..."
 
-ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
-
 RECEIPT=$($ORCA_BIN worktree create \
+  --repo "path:$REPO_ROOT" \
   --name "$WORKTREE_NAME" \
   --issue "$ISSUE_NUM" \
   --no-parent \

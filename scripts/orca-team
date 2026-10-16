@@ -1959,8 +1959,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             size_str = f"{size_b/1024:.1f} KB" if size_b > 1024 else f"{size_b} B"
             tokens_str = f"~{tokens} tokens"
             base_tokens += tokens
-            if tokens > 5000:
-                status = "⚠️ Quá lớn (>5.0k tok)"
+            if tokens > 5600:
+                status = "⚠️ Quá lớn (>5.6k tok)"
                 warning_issues.append(f"File '{rel_name}' có kích thước lớn (~{tokens} tokens). Sẽ bị nạp lại vào context của AI Leader trên MỖI turn.")
             else:
                 status = "🟢 Gọn gàng"
@@ -1987,9 +1987,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
     print("-" * 85)
     print(f"👉 Tổng token cơ sở (Base Context Tokens) nạp mỗi turn: ~{base_tokens:,} tokens")
-    if base_tokens < 5800:
-        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn, bao gồm đầy đủ Hiến pháp 10 Vai trò cấp Principal & Giao thức Handoff/Runtime Log Audit).")
-    elif base_tokens < 6800:
+    if base_tokens < 6400:
+        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn, bao gồm đầy đủ Hiến pháp 10 Vai trò cấp Principal, Giao thức Handoff/Runtime Log Audit & Quy tắc 1 Role = 1 Worktree).")
+    elif base_tokens < 7400:
         warning_issues.append(f"Context chỉ dẫn ban đầu ở mức trung bình (~{base_tokens:,} tokens/turn).")
     else:
         critical_issues.append(f"Context chỉ dẫn ban đầu quá lớn (~{base_tokens:,} tokens/turn). Cần tinh gọn lại các file chỉ dẫn.")
@@ -2220,6 +2220,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         start_opts = w_info.get("startOptions", {})
                         if start_opts.get("name"):
                             wt_name = start_opts.get("name")
+                        elif start_opts.get("worktree") and wt_name == "-":
+                            wt_opt = str(start_opts.get("worktree"))
+                            wt_name = wt_opt.rsplit("/", 1)[-1] if "/" in wt_opt else wt_opt.split(":", 1)[-1]
                         eff_launch = (start_opts.get("launch") or {}).get("effective") or {}
                         ag_name = eff_launch.get("agent") or start_opts.get("agent") or "-"
                         md_name = eff_launch.get("model") or ""

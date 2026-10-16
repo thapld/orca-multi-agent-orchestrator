@@ -4,23 +4,23 @@ Orca không chỉ là một trình chạy CLI mà là một **Agent Development 
 
 ---
 
-## 1. Git Worktree Isolation (`orca worktree`)
+## 1. Git Worktree Isolation (`orca worktree` — 1 Role = 1 Worktree Định Danh + Gom Nhóm Terminal Tabs)
 
-Mỗi agent hoặc task trong Orca được cấp một Git Worktree riêng biệt, giải quyết triệt để vấn đề xung đột mã nguồn.
+Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`) trong Orca được cấp **1 Git Worktree định danh duy nhất**. Ở các task tiếp theo của cùng vai trò, hệ thống truyền `--worktree path:<abs_path>` vào `orca orchestration worker-start` để **mở và gom nhóm các Terminal Tab mới ngay bên trong worktree đó**, giải quyết triệt để xung đột mã nguồn mà không đẻ ra các worktree trùng lặp (`-2`, `-3`).
 
 ### Các lệnh phổ biến:
 ```bash
 # Xem danh sách các worktree đang hoạt động
 orca worktree ps --json
 
-# Tạo một worktree con mới từ nhánh hiện tại
-orca worktree create --repo id:<repoId> --name "feature-auth" --parent-worktree active --json
+# Khởi chạy worker và tự động tái sử dụng worktree định danh hiện có (hoặc tạo mới ở lần đầu)
+orca orchestration worker-start --task <TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[dev-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name dev-worker") --agent antigravity --json
 
 # Tạo worktree gắn liền với GitHub Issue (độc lập, không kế thừa context dở dang)
-orca worktree create --repo id:<repoId> --name "fix-login" --issue 42 --no-parent --agent kimi --setup run --json
+orca worktree create --repo path:$(git rev-parse --show-toplevel) --name "hotfix-issue-42" --issue 42 --no-parent --agent antigravity --setup run --json
 
 # Tạo worktree để review GitHub PR (độc lập)
-orca worktree create --repo id:<repoId> --name "review-pr-123" --pr 123 --no-parent --agent claude --json
+orca worktree create --repo path:$(git rev-parse --show-toplevel) --name "review-pr-123" --pr 123 --no-parent --agent antigravity --setup run --json
 
 # Mở toàn bộ diff thay đổi của worktree để review
 orca file open-changed --mode diff --worktree active --json

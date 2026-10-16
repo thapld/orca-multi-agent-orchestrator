@@ -12,20 +12,39 @@ fi
 
 ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
 CONFIG_AGENT=""
+CONFIG_MODEL=""
+CONFIG_EFFORT=""
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   CONFIG_AGENT=$("$ORCA_TEAM_BIN" get pr 2>/dev/null || true)
+  CONFIG_MODEL=$("$ORCA_TEAM_BIN" get pr --field model 2>/dev/null || true)
+  CONFIG_EFFORT=$("$ORCA_TEAM_BIN" get pr --field effort 2>/dev/null || true)
   [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
+  [[ "$CONFIG_MODEL" == "none" || "$CONFIG_MODEL" == "null" ]] && CONFIG_MODEL=""
+  [[ "$CONFIG_EFFORT" == "none" || "$CONFIG_EFFORT" == "null" ]] && CONFIG_EFFORT=""
 fi
 AGENT="${2:-${CONFIG_AGENT:-antigravity}}"
 WORKTREE_NAME="review-pr-$PR_NUM"
 
 PR_PROMPT="[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: Thẩm định toàn diện Pull Request #${PR_NUM}. Chuẩn mực: (1) Đọc toàn bộ line-by-line diff qua 'orca file open-changed --mode diff --worktree active' và 'git diff', (2) Kiểm tra kiến trúc, Clean Code, OWASP Top 10, Race Conditions, Memory/Resource Leaks, (3) BẮT BUỘC chạy thực tế test suite và linter trong worktree PR (CẤM duyệt suông bằng mắt!). CẤM VƯỢT RÀO: Không tự ý sửa code tính năng của PR khi chưa được yêu cầu. BẰNG CHỨNG BẮT BUỘC: Xuất báo cáo review chi tiết từng file:line, kết quả chạy test thực tế (EXIT_CODE, số test pass/fail) và chốt PR_VERDICT: APPROVE hoặc REQUEST_CHANGES."
 
+ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+
+# Kiểm tra xem worktree định danh review-pr-<PR_NUM> đã tồn tại trong repo chưa (tránh đẻ worktree trùng lặp -2, -3)
+EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\).*\[${WORKTREE_NAME}\].*/\1/p" | head -n 1)
+
+if [[ -n "$EXISTING_WT_PATH" ]]; then
+  echo "♻️  [Orca PR Review] Tái sử dụng worktree định danh hiện có: $WORKTREE_NAME ($EXISTING_WT_PATH)..."
+  DISPATCH_SCRIPT="${0:A:h}/orca-dispatch-task.sh"
+  if [[ -x "$DISPATCH_SCRIPT" ]]; then
+    exec "$DISPATCH_SCRIPT" "$WORKTREE_NAME" "$PR_PROMPT" "$AGENT" "$CONFIG_MODEL" "$CONFIG_EFFORT"
+  fi
+fi
+
 echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_NUM bằng agent: $AGENT..."
 
-ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
-
 RECEIPT=$($ORCA_BIN worktree create \
+  --repo "path:$REPO_ROOT" \
   --name "$WORKTREE_NAME" \
   --pr "$PR_NUM" \
   --no-parent \
