@@ -192,8 +192,29 @@ def sync_gemini_directive(root: Path, config: dict):
         re.MULTILINE
     )
     if pattern.search(content):
-        new_content = pattern.sub(lambda m: m.group(1) + table_text + "\n", content)
-        gemini_file.write_text(new_content, encoding="utf-8")
+        content = pattern.sub(lambda m: m.group(1) + table_text + "\n", content)
+
+    # Đồng bộ luôn các dòng lệnh worker-start trong BƯỚC 2 của .agents/GEMINI.md
+    worker_map = {
+        "dev-worker": (d_agent, d_model, dev.get("effort") or "high"),
+        "qa-worker": (q_agent, q_model, qa.get("effort") or "medium"),
+        "sec-worker": (s_agent, s_model, sec.get("effort") or "high"),
+        "devops-worker": (devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort") or "high"),
+        "ui-worker": (ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort") or "medium"),
+    }
+    for w_name, (w_ag, w_mod, w_eff) in worker_map.items():
+        if not w_ag or w_ag == "none":
+            continue
+        mod_part = f' --model "{w_mod}"' if w_mod else ""
+        eff_part = f" --effort {w_eff}" if w_eff else ""
+        w_pat = re.compile(
+            rf"(--name\s+{re.escape(w_name)}\s+)--agent\s+\S+(?:\s+--model\s+\"[^\"]*\")?(?:\s+--effort\s+\S+)?",
+            re.MULTILINE
+        )
+        content = w_pat.sub(rf"\1--agent {w_ag}{mod_part}{eff_part}", content)
+
+    gemini_file.write_text(content, encoding="utf-8")
+
 
 def _build_discovery_env():
     env = os.environ.copy()

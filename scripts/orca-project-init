@@ -619,26 +619,18 @@ EXTRA_STEP2_CMDS=""
 
 if [[ "$ENABLE_DEVOPS" == true ]]; then
   EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **DevOps Specialist** | $(fmt_md_cell "$DEVOPS_AGENT" "$DEVOPS_MODEL") | On-demand | DB migrations, Docker/Orb, SSH worktrees |"$'\n'
-  EXTRA_STEP1_RULES="${EXTRA_STEP1_RULES}  - **Task cho DevOps** *(BẮT BUỘC kích hoạt khi yêu cầu có Docker, Dockerfile, Kubernetes/K8s, pod, Helm, CI/CD, DB migration, \`.env\`, triển khai hạ tầng)*:
-    \`\`\`bash
-    orca orchestration task-create --spec \"DevOps: [Mô tả đóng gói Docker, cấu hình/deploy K8s, migration, kiểm tra pod/infra]\" --json
-    \`\`\`"$'\n'
-  EXTRA_STEP2_CMDS="${EXTRA_STEP2_CMDS}- **Khởi chạy DevOps Worker (khi có Task DevOps — Docker / K8s / DB / Infra):**
-  \`\`\`bash
-  orca orchestration worker-start --task <DEVOPS_TASK_ID> --worktree new-child --name devops-worker --agent ${DEVOPS_AGENT} --model \"${DEVOPS_MODEL}\" --effort ${DEVOPS_EFFORT:-high} --json
-  \`\`\`"$'\n'
+  EXTRA_STEP1_RULES="${EXTRA_STEP1_RULES}  # DevOps (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):
+  orca orchestration task-create --spec \"DevOps: [Đóng gói Docker, K8s deploy, migration, kiểm tra pod]\" --json"$'\n'
+  EXTRA_STEP2_CMDS="${EXTRA_STEP2_CMDS}  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):
+  orca orchestration worker-start --task <DEVOPS_TASK_ID> --worktree new-child --name devops-worker --agent ${DEVOPS_AGENT} --model \"${DEVOPS_MODEL}\" --effort ${DEVOPS_EFFORT:-high} --json"$'\n'
 fi
 
 if [[ "$ENABLE_UI" == true ]]; then
   EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | $(fmt_md_cell "$UI_AGENT" "$UI_MODEL") | On-demand | Design Mode (Click-to-code), live inspection |"$'\n'
-  EXTRA_STEP1_RULES="${EXTRA_STEP1_RULES}  - **Task cho UI/UX Specialist** *(BẮT BUỘC kích hoạt khi yêu cầu có giao diện Frontend, CSS/DOM, Design Mode)*:
-    \`\`\`bash
-    orca orchestration task-create --spec \"UI: [Mô tả thiết kế giao diện, CSS/DOM và kiểm tra hiển thị]\" --json
-    \`\`\`"$'\n'
-  EXTRA_STEP2_CMDS="${EXTRA_STEP2_CMDS}- **Khởi chạy UI Worker (khi có Task Frontend / UI):**
-  \`\`\`bash
-  orca orchestration worker-start --task <UI_TASK_ID> --worktree new-child --name ui-worker --agent ${UI_AGENT} --model \"${UI_MODEL}\" --effort ${UI_EFFORT:-medium} --json
-  \`\`\`"$'\n'
+  EXTRA_STEP1_RULES="${EXTRA_STEP1_RULES}  # UI/UX (Khi có Frontend, CSS/DOM, Design Mode):
+  orca orchestration task-create --spec \"UI: [Thiết kế giao diện, CSS/DOM và kiểm tra hiển thị]\" --json"$'\n'
+  EXTRA_STEP2_CMDS="${EXTRA_STEP2_CMDS}  # UI Worker (khi có Task Frontend/UI):
+  orca orchestration worker-start --task <UI_TASK_ID> --worktree new-child --name ui-worker --agent ${UI_AGENT} --model \"${UI_MODEL}\" --effort ${UI_EFFORT:-medium} --json"$'\n'
 fi
 
 # ── Ghi file Directive GEMINI.md (Token-Optimized) ──
@@ -671,63 +663,45 @@ ${EXTRA_TABLE_ROWS}
 
 ## ⚡ QUY TRÌNH 4 BƯỚC BẮT BUỘC KHI NHẬN TASK CỦA USER:
 
-### BƯỚC 1: KHỞI TẠO RUN & PHÂN RÃ TASKS THEO ĐÚNG VAI TRÒ (KHÔNG GỘP VIỆC)
-- Khi nhận yêu cầu, phân tích kiến trúc và tạo một Run mới:
+### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ (CẤM GỘP VIỆC)
+- Tạo Run mới và **tách Task riêng cho từng vai trò có liên quan** (tuyệt đối không gộp việc của DevOps/Security vào cho Dev/QA):
   \`\`\`bash
-  orca orchestration run-create --objective "[Mô tả tổng thể tính năng]" --json
+  orca orchestration run-create --objective "[Mô tả tổng thể]" --json
+  # Dev (Code/API/Logic):
+  orca orchestration task-create --spec "Dev: [Chi tiết code, API và file paths]" --json
+${EXTRA_STEP1_RULES}  # Security (BẮT BUỘC khi có API mới, Auth/JWT, input validation, race conditions, OWASP):
+  orca orchestration task-create --spec "Security: [Kiểm toán OWASP, concurrency, memory/resource leak]" --json
+  # QA (Kiểm thử độc lập):
+  orca orchestration task-create --spec "QA: [Chi tiết unit/integration/acceptance test cases]" --json
   \`\`\`
-- 🔴 **QUY TẮC BẮT BUỘC PHÂN VAI (ROLE DISPATCH RULES):** Tuyệt đối KHÔNG gộp việc của DevOps hay Security vào cho Dev/QA! Phải tạo Task độc lập cho từng vai trò có liên quan trong yêu cầu:
-  - **Task cho Dev** *(khi viết code, API, business logic)*:
-    \`\`\`bash
-    orca orchestration task-create --spec "Dev: [Mô tả chi tiết task code và đường dẫn file]" --json
-    \`\`\`
-${EXTRA_STEP1_RULES}  - **Task cho Security & Bug Hunter** *(BẮT BUỘC kích hoạt khi thêm API mới, Auth/JWT, xử lý dữ liệu đầu vào, concurrency/race conditions, kiểm toán lỗ hổng OWASP)*:
-    \`\`\`bash
-    orca orchestration task-create --spec "Security: [Mô tả kiểm toán bảo mật OWASP, race conditions, memory/resource leak]" --json
-    \`\`\`
-  - **Task cho QA** *(viết và chạy bộ test kiểm thử độc lập)*:
-    \`\`\`bash
-    orca orchestration task-create --spec "QA: [Mô tả chi tiết test case và tiêu chí nghiệm thu pass 100%]" --json
-    \`\`\`
 
-### BƯỚC 2: FAN-OUT (KHỞI CHẠY ĐÚNG WORKER TRONG CÁC WORKTREE RIÊNG BIỆT)
-- Khởi chạy các worker tương ứng với các Task đã tạo ở Bước 1, áp dụng đúng Agent và Model đã cấu hình:
-- **Khởi chạy Dev Worker:**
+### BƯỚC 2: FAN-OUT (GIAO VIỆC ĐÚNG WORKER & MODEL TRONG CHILD WORKTREE)
+- Khởi chạy từng worker tương ứng với các Task ở Bước 1 (dùng đúng Agent & Model trong bảng Topology):
   \`\`\`bash
+  # Dev Worker:
   orca orchestration worker-start --task <DEV_TASK_ID> --worktree new-child --name dev-worker --agent ${DEV_AGENT} --model "${DEV_MODEL}" --effort ${DEV_EFFORT:-high} --json
-  \`\`\`
-${EXTRA_STEP2_CMDS}- **Khởi chạy Security Worker (khi có Task Security Audit / Bug Hunt):**
-  \`\`\`bash
+${EXTRA_STEP2_CMDS}  # Security Worker (khi có Task Security Audit):
   orca orchestration worker-start --task <SEC_TASK_ID> --worktree new-child --name sec-worker --agent ${SEC_AGENT} --model "${SEC_MODEL}" --effort ${SEC_EFFORT:-high} --json
-  \`\`\`
-- **Khởi chạy Test Worker (QA):**
-  \`\`\`bash
+  # QA Worker (Test nghiệm thu):
   orca orchestration worker-start --task <QA_TASK_ID> --worktree new-child --name qa-worker --agent ${QA_AGENT} --model "${QA_MODEL}" --effort ${QA_EFFORT:-medium} --json
   \`\`\`
-- **Khi xử lý Pull Request hoặc GitHub/GitLab Issue (On-demand):**
-  - Review PR: \`orca-review-pr <PR_NUMBER>\`
-  - Xử lý Issue: \`orca-hotfix <ISSUE_ID>\`
+  *(On-demand Git: Review PR dùng \`orca-review-pr <PR_NUM>\` | Sửa Issue dùng \`orca-hotfix <ISSUE_ID>\`)*
 
-### BƯỚC 3: WAITING & VERIFY LOOP (CHỐNG ĐỐT TOKEN & GIỮ TRẠNG THÁI UI ORCA)
-- 🔴 **BẮT BUỘC DÙNG LỆNH CHỜ REACTIVE (KHÔNG POLL VÒNG LẶP):**
+### BƯỚC 3: WAITING & VERIFY LOOP (CHỐNG ĐỐT TOKEN & GIỮ BADGE/CHUÔNG UI ORCA)
+- 🔴 **BẮT BUỘC dùng lệnh chờ (KHÔNG poll vòng lặp) và DỪNG GỌI TOOL sau khi chạy:**
   \`\`\`bash
   orca orchestration check --wait --types "worker_done,escalation" --timeout-ms 900000 --json
   \`\`\`
-  Sau khi chạy lệnh trên hoặc lệnh dispatch, **DỪNG GỌI TOOL** để đợi tín hiệu thông báo từ worker.
-- Khi nhận tín hiệu hoàn tất:
-  - Đọc báo cáo: \`orca orchestration worker-read --dispatch <DISPATCH_ID> --json\`
-  - ⚠️ **TUYỆT ĐỐI KHÔNG GỌI \`worker-release\` Ở BƯỚC NÀY:** Giữ nguyên terminal của worker (hoặc gọi \`orca orchestration worker-retain --dispatch <DISPATCH_ID> --reason "Waiting for Human Gate" --json\`) để Sidebar của Orca hiển thị **chấm xanh hoàn tất (\`🟢\`)**, **icon Agent kèm dấu tích (\`✓\`)** và **chuông thông báo (\`🔔\`)** trên từng worktree!
-- **Tự động chữa lỗi nếu QA fail:** Không tự sửa code ở root! Tạo Task mới mô tả chi tiết log lỗi và start một Dev Worker mới để fix. Lặp lại bước chờ cho đến khi QA báo pass 100%.
+- Khi nhận tín hiệu: Đọc kết quả bằng \`orca orchestration worker-read --dispatch <DISPATCH_ID> --json\`.
+- ⚠️ **KHÔNG GỌI \`worker-release\` Ở BƯỚC 3:** Giữ nguyên terminal của worker để Orca Sidebar hiển thị **chấm xanh (\`🟢\`)**, **icon Agent (\`✓\`)** và **chuông thông báo (\`🔔\`)**!
+- **Tự chữa lỗi nếu QA fail:** Không tự sửa ở root! Tạo Task mới kèm log lỗi và start Dev/DevOps Worker mới để fix, lặp lại bước chờ đến khi QA pass 100%.
 
-### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU KHI MERGE (CHỐT CHẶN CUỐI)
-- Khi toàn bộ task đều xanh (pass 100%), **KHÔNG ĐƯỢC tự ý merge code**.
-- Tạo một cổng kiểm duyệt (Gate) để chặn luồng và báo thông báo chuông về màn hình/điện thoại của người dùng:
+### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)
+- Khi toàn bộ task xanh 100%, **KHÔNG tự ý merge**. Tạo Gate báo chuông xin phép người dùng:
   \`\`\`bash
   orca orchestration gate-create --task <FINAL_TASK_ID> --question "Tất cả test đã xanh. Merge code vào nhánh chính chứ sếp?" --options '["yes","wait"]' --json
   \`\`\`
-- Chỉ khi người dùng phản hồi \`"yes"\`:
-  1. Thực hiện lệnh Git merge code vào nhánh chính.
-  2. Sau khi merge xong mới giải phóng các terminal worker: \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\`.
+- Chỉ khi người dùng phản hồi \`"yes"\`: Thực hiện \`git merge\` vào nhánh chính, sau đó mới chạy \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\` để đóng các terminal worker.
 RULE
 
 # ── Quản lý symlink thông minh: Tránh nạp trùng lặp context & bảo vệ file thật ──

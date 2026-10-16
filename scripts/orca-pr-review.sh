@@ -11,21 +11,30 @@ if ! [[ "$PR_NUM" =~ ^[0-9]+$ ]]; then
 fi
 
 CONFIG_AGENT=""
+MODEL_ARGS=()
 if command -v orca-team &>/dev/null; then
   CONFIG_AGENT=$(orca-team get pr 2>/dev/null || true)
+  PR_MODEL=$(orca-team get pr --field model 2>/dev/null || true)
+  PR_EFFORT=$(orca-team get pr --field effort 2>/dev/null || true)
+  if [[ -n "$PR_MODEL" && "$PR_MODEL" != "null" && "$PR_MODEL" != "(default)" ]]; then
+    MODEL_ARGS+=(--model "$PR_MODEL")
+    if [[ -n "$PR_EFFORT" && "$PR_EFFORT" != "null" && "$PR_EFFORT" != "-" ]]; then
+      MODEL_ARGS+=(--effort "$PR_EFFORT")
+    fi
+  fi
 fi
-AGENT="${2:-${CONFIG_AGENT:-claude}}"
+AGENT="${2:-${CONFIG_AGENT:-antigravity}}"
 WORKTREE_NAME="review-pr-$PR_NUM"
 
-echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_NUM bằng agent: $AGENT..."
+echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_NUM bằng agent: $AGENT ${MODEL_ARGS[*]}..."
 
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
 
 RECEIPT=$($ORCA_BIN worktree create \
   --name "$WORKTREE_NAME" \
   --pr "$PR_NUM" \
-  --no-parent \
   --agent "$AGENT" \
+  "${MODEL_ARGS[@]}" \
   --setup run \
   --json 2>&1) || true
 
