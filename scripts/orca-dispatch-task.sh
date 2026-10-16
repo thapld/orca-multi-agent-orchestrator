@@ -40,7 +40,7 @@ if [[ -x "$ORCA_TEAM_BIN" ]]; then
 fi
 [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
 
-if [[ "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse)$ ]]; then
+if [[ "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$ ]]; then
   AGENT="$REQ_AGENT"
 else
   AGENT="${CONFIG_AGENT:-antigravity}"
@@ -49,15 +49,25 @@ fi
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
 TIMEOUT_MS="${TIMEOUT_MS:-300000}"
 
-# Lấy model và reasoning effort nếu đã được cấu hình trong orca-team
+# Lấy model và reasoning effort nếu đã được cấu hình trong orca-team (tuân thủ nghiêm ngặt catalog của Orca worker-start)
 MODEL_ARGS=()
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   DEV_MODEL=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field model 2>/dev/null || true)
   DEV_EFFORT=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field effort 2>/dev/null || true)
-  if [[ -n "$DEV_MODEL" && "$DEV_MODEL" != "null" && "$DEV_MODEL" != "(default)" ]]; then
+  if [[ "$AGENT" =~ ^(antigravity|claude|codex|cursor|muse|codebuddy|omp)$ ]] && [[ -n "$DEV_MODEL" && "$DEV_MODEL" != "null" && "$DEV_MODEL" != "(default)" ]]; then
     MODEL_ARGS+=(--model "$DEV_MODEL")
-    if [[ -n "$DEV_EFFORT" && "$DEV_EFFORT" != "null" && "$DEV_EFFORT" != "-" ]]; then
-      MODEL_ARGS+=(--effort "$DEV_EFFORT")
+    if [[ -n "$DEV_EFFORT" && "$DEV_EFFORT" != "null" && "$DEV_EFFORT" != "-" && "$AGENT" != "omp" ]]; then
+      ALLOW_EFFORT=true
+      if [[ "$AGENT" == "claude" && "$DEV_MODEL" == *haiku* ]]; then
+        ALLOW_EFFORT=false
+      elif [[ "$AGENT" == "cursor" && "$DEV_MODEL" != "gpt-5.3-codex" && "$DEV_MODEL" != "claude-opus-4-8" ]]; then
+        ALLOW_EFFORT=false
+      elif [[ ( "$AGENT" == "antigravity" || "$AGENT" == "codebuddy" || "$AGENT" == "cursor" ) && ! "$DEV_EFFORT" =~ ^(low|medium|high)$ ]]; then
+        ALLOW_EFFORT=false
+      fi
+      if [[ "$ALLOW_EFFORT" == true ]]; then
+        MODEL_ARGS+=(--effort "$DEV_EFFORT")
+      fi
     fi
   fi
 fi
@@ -66,15 +76,21 @@ echo "🐋 [Orca Dispatch] Đang khởi tạo task: '$TASK_TITLE' cho agent: $AG
 
 # Xác định định danh worktree cố định theo từng vai trò (1 Role = 1 Worktree định danh duy nhất, gom nhóm các Terminal Tabs bên trong)
 ROLE_WORKTREE="dev-worker"
-case "${ROLE_QUERY:l}" in
-  devops|infra|sre|ops) ROLE_WORKTREE="devops-worker" ;;
-  sec|security|bug|auditor) ROLE_WORKTREE="sec-worker" ;;
-  qa|test|tester|sdet) ROLE_WORKTREE="qa-worker" ;;
-  ui|ux|frontend|design) ROLE_WORKTREE="ui-worker" ;;
-  bench|benchmark|perf|performance) ROLE_WORKTREE="bench-worker" ;;
-  re|reverse|rea|respecialist) ROLE_WORKTREE="re-worker" ;;
-  *) ROLE_WORKTREE="dev-worker" ;;
-esac
+if [[ "$TASK_TITLE" =~ ^(review-pr-[0-9]+|hotfix-issue-[0-9]+|[a-z]+-worker)$ ]]; then
+  ROLE_WORKTREE="$TASK_TITLE"
+else
+  case "${ROLE_QUERY:l}" in
+    devops|infra|sre|ops) ROLE_WORKTREE="devops-worker" ;;
+    sec|security|bug|auditor) ROLE_WORKTREE="sec-worker" ;;
+    qa|test|tester|sdet) ROLE_WORKTREE="qa-worker" ;;
+    ui|ux|frontend|design) ROLE_WORKTREE="ui-worker" ;;
+    bench|benchmark|perf|performance) ROLE_WORKTREE="bench-worker" ;;
+    re|reverse|rea|respecialist) ROLE_WORKTREE="re-worker" ;;
+    pr|prreviewer|reviewer) ROLE_WORKTREE="pr-worker" ;;
+    issue|issueresolver|hotfix) ROLE_WORKTREE="issue-worker" ;;
+    *) ROLE_WORKTREE="dev-worker" ;;
+  esac
+fi
 
 # Tự động tiêm Hiến pháp Vai trò Cấp Principal (Chống vượt rào & Chống báo sạch giả) nếu SPEC chưa có
 if [[ "$SPEC" != "[ROLE:"* ]]; then

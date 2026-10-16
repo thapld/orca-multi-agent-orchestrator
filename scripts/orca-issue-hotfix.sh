@@ -37,7 +37,7 @@ if [[ -n "$EXISTING_WT_PATH" ]]; then
   echo "♻️  [Orca Hotfix] Tái sử dụng worktree định danh hiện có: $WORKTREE_NAME ($EXISTING_WT_PATH)..."
   DISPATCH_SCRIPT="${0:A:h}/orca-dispatch-task.sh"
   if [[ -x "$DISPATCH_SCRIPT" ]]; then
-    exec "$DISPATCH_SCRIPT" "$WORKTREE_NAME" "$ISSUE_PROMPT" "$AGENT" "$CONFIG_MODEL" "$CONFIG_EFFORT"
+    exec "$DISPATCH_SCRIPT" "$WORKTREE_NAME" "${2:-issue}" "$ISSUE_PROMPT"
   fi
 fi
 

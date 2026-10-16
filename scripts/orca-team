@@ -225,11 +225,44 @@ def save_config(root: Path, config: dict):
         f.write("\n")
 
 def _fmt_worker_args_py(agent: str, model, effort: str) -> str:
+    ag = (agent or "").strip().lower()
     args = f"--agent {agent}"
-    if model:
-        args += f' --model "{model}"'
-    if effort:
-        args += f" --effort {effort}"
+    mod = str(model).strip() if (model and str(model).strip() not in ("None", "null", "(default)")) else ""
+    eff = str(effort).strip().lower() if (effort and str(effort).strip() not in ("None", "null", "-")) else ""
+
+    # Orca worker-start chỉ hỗ trợ --model trên: antigravity, claude, codex, cursor, muse, codebuddy, omp
+    # (kimi, gemini, opencode khi tạo new-child, aider, goose, copilot tự lấy model từ config riêng)
+    model_supported_agents = {"antigravity", "claude", "codex", "cursor", "muse", "codebuddy", "omp"}
+    if not mod or ag not in model_supported_agents:
+        return args
+
+    args += f' --model "{mod}"'
+
+    # --effort bắt buộc phải đi kèm --model và chỉ hỗ trợ trên một số agent/model nhất định trong Orca
+    if not eff or ag == "omp":
+        return args
+    if ag == "antigravity" or ag == "codebuddy":
+        if eff in ("xhigh", "max", "ultra"):
+            eff = "high"
+        elif eff == "minimal":
+            eff = "low"
+        if eff not in ("low", "medium", "high"):
+            return args
+    elif ag == "claude":
+        if mod.lower() == "haiku":
+            return args
+        if eff not in ("low", "medium", "high", "xhigh", "max"):
+            return args
+    elif ag == "cursor":
+        if mod not in ("gpt-5.3-codex", "claude-opus-4-8") or eff not in ("low", "medium", "high"):
+            return args
+    elif ag in ("codex", "muse"):
+        if eff not in ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
+            return args
+    else:
+        return args
+
+    args += f" --effort {eff}"
     return args
 
 def _is_role_enabled(data: dict, is_optional: bool = True) -> bool:
@@ -453,28 +486,28 @@ def sync_gemini_directive(root: Path, config: dict):
             "ROLE: PRINCIPAL DEVOPS/SRE",
             f'  # Principal DevOps/SRE (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):\n{devops_spec_line}\n',
             "devops-worker",
-            f'  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):\n  orca orchestration worker-start --task <DEVOPS_TASK_ID> {_wt_expr("devops-worker")} {_fmt_worker_args_py(devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort") or "high")} --json\n'
+            f'  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):\n  orca orchestration worker-start --task <DEVOPS_TASK_ID> {_wt_expr("devops-worker")} {_fmt_worker_args_py(devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort"))} --json\n'
         ),
         (
             ui_enabled,
             "ROLE: PRINCIPAL UI/UX",
             f'  # Principal UI/UX (Khi có Frontend, CSS/DOM, Design Mode):\n{ui_spec_line}\n',
             "ui-worker",
-            f'  # UI Worker (khi có Task Frontend/UI):\n  orca orchestration worker-start --task <UI_TASK_ID> {_wt_expr("ui-worker")} {_fmt_worker_args_py(ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort") or "medium")} --json\n'
+            f'  # UI Worker (khi có Task Frontend/UI):\n  orca orchestration worker-start --task <UI_TASK_ID> {_wt_expr("ui-worker")} {_fmt_worker_args_py(ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort"))} --json\n'
         ),
         (
             bench_enabled,
             "ROLE: PRINCIPAL BENCHMARK & PERF",
             f'  # Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):\n{bench_spec_line}\n',
             "bench-worker",
-            f'  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):\n  orca orchestration worker-start --task <BENCH_TASK_ID> {_wt_expr("bench-worker")} {_fmt_worker_args_py(bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort") or "high")} --json\n'
+            f'  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):\n  orca orchestration worker-start --task <BENCH_TASK_ID> {_wt_expr("bench-worker")} {_fmt_worker_args_py(bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort"))} --json\n'
         ),
         (
             re_enabled,
             "ROLE: PRINCIPAL REVERSE ENGINEER (REA)",
             f'  # Principal Reverse Engineer - REA (BẮT BUỘC khi dịch ngược binary/JAR/ASAR/APK/firmware/network capture hoặc tái tạo giao thức đóng):\n{re_spec_line}\n',
             "re-worker",
-            f'  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):\n  orca orchestration worker-start --task <RE_TASK_ID> {_wt_expr("re-worker")} {_fmt_worker_args_py(re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort") or "high")} --json\n'
+            f'  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):\n  orca orchestration worker-start --task <RE_TASK_ID> {_wt_expr("re-worker")} {_fmt_worker_args_py(re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort"))} --json\n'
         ),
     ]
 
@@ -582,19 +615,17 @@ def sync_gemini_directive(root: Path, config: dict):
 
     # Đồng bộ luôn các dòng lệnh worker-start trong BƯỚC 2 của .agents/GEMINI.md
     worker_map = {
-        "dev-worker": (d_agent, d_model, dev.get("effort") or "high"),
-        "qa-worker": (q_agent, q_model, qa.get("effort") or "medium"),
-        "sec-worker": (s_agent, s_model, sec.get("effort") or "high"),
-        "devops-worker": (devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort") or "high"),
-        "ui-worker": (ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort") or "medium"),
-        "bench-worker": (bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort") or "high"),
-        "re-worker": (re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort") or "high"),
+        "dev-worker": (d_agent, d_model, dev.get("effort")),
+        "qa-worker": (q_agent, q_model, qa.get("effort")),
+        "sec-worker": (s_agent, s_model, sec.get("effort")),
+        "devops-worker": (devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort")),
+        "ui-worker": (ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort")),
+        "bench-worker": (bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort")),
+        "re-worker": (re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort")),
     }
     for w_name, (w_ag, w_mod, w_eff) in worker_map.items():
         if not w_ag or w_ag == "none":
             continue
-        mod_part = f' --model "{w_mod}"' if w_mod else ""
-        eff_part = f" --effort {w_eff}" if w_eff else ""
         # Nâng cấp dòng worker-start cũ sang biểu thức tái sử dụng worktree path:<abs_path>
         old_wt_pat = re.compile(
             rf"(orca orchestration worker-start\s+--task\s+<[^>]+>\s+)(?:--worktree\s+new-child\s+--name\s+{re.escape(w_name)}|\$\(git worktree list[^\n]*--name\s+{re.escape(w_name)}\"\))(?=\s+--agent)",
@@ -605,7 +636,8 @@ def sync_gemini_directive(root: Path, config: dict):
             rf"(--name\s+{re.escape(w_name)}\"?\)?\s+)--agent\s+\S+(?:\s+--model\s+\"[^\"]*\")?(?:\s+--effort\s+\S+)?",
             re.MULTILINE
         )
-        content = w_pat.sub(rf"\1--agent {w_ag}{mod_part}{eff_part}", content)
+        formatted_args = _fmt_worker_args_py(w_ag, w_mod, w_eff)
+        content = w_pat.sub(lambda m, fa=formatted_args: m.group(1) + fa, content)
 
     gemini_file.write_text(content, encoding="utf-8")
 
@@ -1836,7 +1868,13 @@ def cmd_watchdog(root: Path, args: list = None):
                                     if t_read.returncode == 0:
                                         t_data = json.loads(t_read.stdout)
                                         t_res = t_data.get("result", t_data) if isinstance(t_data, dict) else {}
-                                        out_low = str(t_res.get("content") or t_res.get("screen") or t_read.stdout).lower()
+                                        term_obj = t_res.get("terminal", {}) if isinstance(t_res, dict) else {}
+                                        tail_lines = term_obj.get("tail") if isinstance(term_obj, dict) else None
+                                        if isinstance(tail_lines, list):
+                                            non_empty = [str(line) for line in tail_lines if str(line).strip()]
+                                            out_low = "\n".join(non_empty[-12:]).lower()
+                                        else:
+                                            out_low = str(t_res.get("content") or t_res.get("screen") or t_read.stdout).lower()
 
                                         deny_list = [
                                             "rm -r", "rm -fr", "rm -rf", "git reset --hard", "git clean", 
@@ -2426,23 +2464,37 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
         print("   🎉 Dự án của bạn đang ở trạng thái tối ưu token tuyệt vời! Không có rò rỉ nào được phát hiện.\n")
 
 def main():
-    root = find_project_root()
+    raw_args = sys.argv[1:]
+    explicit_root = None
+    args = []
+    i = 0
+    while i < len(raw_args):
+        if raw_args[i] in ("--path", "-C") and i + 1 < len(raw_args):
+            explicit_root = Path(raw_args[i + 1]).expanduser().resolve()
+            i += 2
+        elif raw_args[i].startswith("--path="):
+            explicit_root = Path(raw_args[i].split("=", 1)[1]).expanduser().resolve()
+            i += 1
+        else:
+            args.append(raw_args[i])
+            i += 1
+
+    root = explicit_root if explicit_root is not None else find_project_root()
     config = load_config(root)
 
     # Nếu được gọi trực tiếp qua alias 'orca-monitor'
     prog_name = Path(sys.argv[0]).name
     if prog_name == "orca-monitor":
-        for a in sys.argv[1:]:
+        for a in args:
             if not a.startswith("-") and Path(a).expanduser().is_dir():
                 root = Path(a).expanduser().resolve()
                 config = load_config(root)
                 break
-        cmd_monitor(root, config, sys.argv[1:])
+        cmd_monitor(root, config, args)
         return
 
-    args = sys.argv[1:]
-    if not args or args[0] in ["status", "list", "show"]:
-        for a in args[1:]:
+    if not args or args[0] in ["status", "list", "show"] or Path(args[0]).expanduser().is_dir():
+        for a in args:
             if not a.startswith("-") and Path(a).expanduser().is_dir():
                 root = Path(a).expanduser().resolve()
                 config = load_config(root)
