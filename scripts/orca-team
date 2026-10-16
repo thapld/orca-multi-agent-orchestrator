@@ -114,9 +114,10 @@ def ensure_rea_skill(agent: str = "antigravity"):
             existing_src = st
             break
 
-    # 2. Nếu chưa có ở bất kỳ đâu, thử chạy rea setup hoặc git clone từ https://github.com/morluto/rea.git
+    # 2. Nếu chưa có ở bất kỳ đâu, thử chạy rea setup, npx rea-agents, hoặc git clone từ https://github.com/morluto/rea.git
     env = _build_discovery_env()
     rea_bin = _find_cli_binary(["rea"], env)
+    npx_bin = _find_cli_binary(["npx"], env)
     rea_client = REA_CLIENT_MAP.get((agent or "antigravity").lower(), "antigravity")
 
     if not existing_src:
@@ -124,6 +125,11 @@ def ensure_rea_skill(agent: str = "antigravity"):
         if rea_bin:
             try:
                 subprocess.run([rea_bin, "setup", "--client", rea_client, "--yes"], capture_output=True, text=True, env=env, timeout=30)
+            except Exception:
+                pass
+        elif npx_bin:
+            try:
+                subprocess.run([npx_bin, "-y", "rea-agents@latest", "setup", "--client", rea_client, "--yes"], capture_output=True, text=True, env=env, timeout=45)
             except Exception:
                 pass
         for st in skill_targets:
@@ -217,6 +223,14 @@ def save_config(root: Path, config: dict):
         json.dump(config, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
+def _fmt_worker_args_py(agent: str, model, effort: str) -> str:
+    args = f"--agent {agent}"
+    if model:
+        args += f' --model "{model}"'
+    if effort:
+        args += f" --effort {effort}"
+    return args
+
 def sync_gemini_directive(root: Path, config: dict):
     gemini_file = root / ".agents" / "GEMINI.md"
     if not gemini_file.exists():
@@ -277,7 +291,8 @@ def sync_gemini_directive(root: Path, config: dict):
 
     # UI Specialist
     ui = roles.get("uiSpecialist", {})
-    if ui.get("enabled", True) and ui.get("agent") and ui.get("agent") != "none":
+    ui_enabled = bool(ui.get("enabled", True) and ui.get("agent") and ui.get("agent") != "none")
+    if ui_enabled:
         u_agent = ui.get("agent", "claude")
         u_model = ui.get("model")
         u_display = f"`{u_agent}`" + (f" ({u_model})" if u_model else "")
@@ -285,7 +300,8 @@ def sync_gemini_directive(root: Path, config: dict):
 
     # DevOps Specialist
     devops = roles.get("devopsSpecialist", {})
-    if devops.get("enabled", True) and devops.get("agent") and devops.get("agent") != "none":
+    devops_enabled = bool(devops.get("enabled", True) and devops.get("agent") and devops.get("agent") != "none")
+    if devops_enabled:
         do_agent = devops.get("agent", "codex")
         do_model = devops.get("model")
         do_display = f"`{do_agent}`" + (f" ({do_model})" if do_model else "")
@@ -293,7 +309,8 @@ def sync_gemini_directive(root: Path, config: dict):
 
     # Bench & Perf Specialist
     bench = roles.get("benchSpecialist", {})
-    if bench.get("enabled", False) and bench.get("agent") and bench.get("agent") != "none":
+    bench_enabled = bool(bench.get("enabled", False) and bench.get("agent") and bench.get("agent") != "none")
+    if bench_enabled:
         b_agent = bench.get("agent", "antigravity")
         b_model = bench.get("model")
         b_display = f"`{b_agent}`" + (f" ({b_model})" if b_model else "")
@@ -301,7 +318,8 @@ def sync_gemini_directive(root: Path, config: dict):
 
     # Reverse Engineering Specialist (REA)
     re_spec = roles.get("reSpecialist", {})
-    if re_spec.get("enabled", False) and re_spec.get("agent") and re_spec.get("agent") != "none":
+    re_enabled = bool(re_spec.get("enabled", False) and re_spec.get("agent") and re_spec.get("agent") != "none")
+    if re_enabled:
         r_agent = re_spec.get("agent", "antigravity")
         r_model = re_spec.get("model")
         r_display = f"`{r_agent}`" + (f" ({r_model})" if r_model else "")
@@ -316,6 +334,68 @@ def sync_gemini_directive(root: Path, config: dict):
     )
     if pattern.search(content):
         content = pattern.sub(lambda m: m.group(1) + table_text + "\n", content)
+
+    # Tự động thêm các dòng Step 1 (task-create) và Step 2 (worker-start) nếu role vừa được bật động qua 'orca-team set <role> --enable'
+    optional_directives = [
+        (
+            devops_enabled,
+            "ROLE: PRINCIPAL DEVOPS/SRE",
+            '  # Principal DevOps/SRE (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):\n  orca orchestration task-create --spec "[ROLE: PRINCIPAL DEVOPS/SRE] Nhiệm vụ: [Docker/K8s/DB/Infra]. Chuẩn: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. CẤM VƯỢT RÀO: Chỉ sửa Infra/Docker/K8s/DB/CI; CẤM sửa business logic của Dev (nếu container crash do code Dev, phải gửi container log và báo failed/escalation). BẰNG CHỨNG BẮT BUỘC: (1) Phải git merge --no-edit <nhánh-dev> trước khi build code mới, (2) CẤM chỉ sửa YAML/Dockerfile rồi báo xong — phải chạy build/rollout thật, xác nhận pod Running (1/1 Ready, 0 Restarts, không CrashLoopBackOff), log sạch và git commit." --json\n',
+            "devops-worker",
+            f'  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):\n  orca orchestration worker-start --task <DEVOPS_TASK_ID> --worktree new-child --name devops-worker {_fmt_worker_args_py(devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort") or "high")} --json\n'
+        ),
+        (
+            ui_enabled,
+            "ROLE: PRINCIPAL UI/UX",
+            '  # Principal UI/UX (Khi có Frontend, CSS/DOM, Design Mode):\n  orca orchestration task-create --spec "[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: [Giao diện, CSS/DOM, Responsive & a11y]. CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend/DB. BẰNG CHỨNG BẮT BUỘC: Build/typecheck EXIT_CODE=0, không lỗi Console, kiểm tra snapshot/screenshot Mobile/Desktop và git commit." --json\n',
+            "ui-worker",
+            f'  # UI Worker (khi có Task Frontend/UI):\n  orca orchestration worker-start --task <UI_TASK_ID> --worktree new-child --name ui-worker {_fmt_worker_args_py(ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort") or "medium")} --json\n'
+        ),
+        (
+            bench_enabled,
+            "ROLE: PRINCIPAL BENCHMARK & PERF",
+            '  # Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):\n  orca orchestration task-create --spec "[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: [Đo tải, benchmark & profiling]. Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! BẰNG CHỨNG BẮT BUỘC: (1) Phải git merge --no-edit <nhánh-dev> để đo trên code mới nhất, (2) CẤM nhận xét cảm tính (\'Hệ thống mượt\') — bắt buộc xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM, chỉ rõ file:line gây nghẽn và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND." --json\n',
+            "bench-worker",
+            f'  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):\n  orca orchestration worker-start --task <BENCH_TASK_ID> --worktree new-child --name bench-worker {_fmt_worker_args_py(bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort") or "high")} --json\n'
+        ),
+        (
+            re_enabled,
+            "ROLE: PRINCIPAL REVERSE ENGINEER (REA)",
+            '  # Principal Reverse Engineer - REA (BẮT BUỘC khi dịch ngược binary/JAR/ASAR/APK/firmware/network capture hoặc tái tạo giao thức đóng):\n  orca orchestration task-create --spec "[ROLE: PRINCIPAL REVERSE ENGINEER (REA)] Nhiệm vụ: [Giải phẫu artifact/binary/protocol]. Chuẩn: Bắt buộc kích hoạt skill reverse-engineer-anything (morluto/rea) & công cụ rea/rea-agents (open_binary, inspect_artifact, analyze_javascript_application, inspect_web_network_capture...). CẤM VƯỢT RÀO: (1) Read-Only đối với source code dự án (chỉ xuất Đặc tả Kỹ thuật Clean-Room cho dev-worker cài đặt, CẤM copy code decompile rối rắm vào repo), (2) CẤM dùng REA cho source code repo thông thường, (3) CẤM đoán mò hành vi hộp đen khi không có Evidence từ REA! BẰNG CHỨNG BẮT BUỘC: Xuất Hồ sơ Evidence thực tế (Target SHA-256/Path, REA tool đã chạy, Symbol/Offset/Decompiled Function/Struct/Protocol contract, Unknowns/Limitations) và chốt RE_VERDICT: EVIDENCE_COMPLETE hoặc BLOCKED_BY_UNKNOWN." --json\n',
+            "re-worker",
+            f'  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):\n  orca orchestration worker-start --task <RE_TASK_ID> --worktree new-child --name re-worker {_fmt_worker_args_py(re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort") or "high")} --json\n'
+        ),
+    ]
+
+    for is_en, step1_marker, step1_block, w_name, step2_block in optional_directives:
+        if is_en:
+            if step1_marker not in content:
+                # Chèn vào trước # Principal AppSec Auditor hoặc cuối khối bash của Bước 1
+                anchor_s1 = re.search(r"^[ \t]*#[ \t]*(?:\d+\.\s*)?Principal AppSec Auditor.*$", content, re.M)
+                if anchor_s1:
+                    content = content[:anchor_s1.start()] + step1_block + content[anchor_s1.start():]
+            if f"--name {w_name}" not in content:
+                # Chèn vào trước # Security Worker hoặc sau dev-worker trong Bước 2
+                anchor_s2 = re.search(r"^[ \t]*#[ \t]*Security Worker.*$", content, re.M)
+                if anchor_s2:
+                    content = content[:anchor_s2.start()] + step2_block + content[anchor_s2.start():]
+                else:
+                    dev_w = re.search(r"^.*--name\s+dev-worker.*\n", content, re.M)
+                    if dev_w:
+                        content = content[:dev_w.end()] + step2_block + content[dev_w.end():]
+        else:
+            if step1_marker in content:
+                s1_pat = re.compile(
+                    rf"(?:^[ \t]*#[^\n]*\n)?^[ \t]*orca orchestration task-create --spec \"\[{re.escape(step1_marker)}\][^\n]*\n",
+                    re.M
+                )
+                content = s1_pat.sub("", content)
+            if f"--name {w_name}" in content:
+                s2_pat = re.compile(
+                    rf"(?:^[ \t]*#[^\n]*\n)?^[ \t]*orca orchestration worker-start[^\n]*--name\s+{re.escape(w_name)}\b[^\n]*\n",
+                    re.M
+                )
+                content = s2_pat.sub("", content)
 
     # Đồng bộ luôn các dòng lệnh worker-start trong BƯỚC 2 của .agents/GEMINI.md
     worker_map = {
@@ -1273,6 +1353,23 @@ def cmd_set(root: Path, config: dict, args: list):
         old_en = target.get("enabled", True)
         target["enabled"] = toggle_enable
         changes.append(f"Enabled: {old_en} ➔ {toggle_enable}")
+        if toggle_enable and not new_agent and target.get("agent") in (None, "", "none"):
+            fallback_role = config.get("roles", {}).get("security" if role_key == "reSpecialist" else "developer", {})
+            fb_agent = fallback_role.get("agent") or config.get("coordinator", {}).get("agent") or "antigravity"
+            if fb_agent == "none":
+                fb_agent = "antigravity"
+            target["agent"] = fb_agent
+            changes.append(f"Agent: none ➔ {fb_agent} (tự động kế thừa khi bật role)")
+            if new_model is None and not target.get("model") and fallback_role.get("model"):
+                target["model"] = fallback_role.get("model")
+                changes.append(f"Model: (default) ➔ {target['model']}")
+            if new_effort is None and not target.get("effort"):
+                target["effort"] = "medium" if role_key == "uiSpecialist" else "high"
+                changes.append(f"Effort: - ➔ {target['effort']}")
+    elif role_key in ("uiSpecialist", "devopsSpecialist", "benchSpecialist", "reSpecialist"):
+        if (new_agent or new_model is not None) and target.get("enabled") is False:
+            target["enabled"] = True
+            changes.append("Enabled: False ➔ True (tự động kích hoạt khi gán Agent/Model)")
 
     if not changes:
         print("ℹ️ Không có thay đổi nào được yêu cầu.")

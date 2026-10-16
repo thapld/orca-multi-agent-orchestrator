@@ -26,16 +26,21 @@ else
   SPEC="$3"
 fi
 
-# Tự động lấy agent của dev/qa/sec từ orca-team nếu truyền role name
+# Tự động lấy agent của dev/qa/sec/devops/bench/re từ orca-team nếu truyền role name
 ROLE_QUERY="${REQ_AGENT:-dev}"
 CONFIG_AGENT=""
 if command -v orca-team &>/dev/null; then
   CONFIG_AGENT=$(orca-team get "$ROLE_QUERY" 2>/dev/null || true)
+  if [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
+    CONFIG_AGENT=$(orca-team get coord 2>/dev/null || true)
+  fi
 fi
+[[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
 
-AGENT="${CONFIG_AGENT:-${REQ_AGENT:-antigravity}}"
-if [[ "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot)$ ]]; then
+if [[ "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse)$ ]]; then
   AGENT="$REQ_AGENT"
+else
+  AGENT="${CONFIG_AGENT:-antigravity}"
 fi
 
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"

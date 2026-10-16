@@ -646,6 +646,15 @@ if [[ "$ENABLE_RE" == true ]]; then
       fi
     done
   fi
+  if command -v rea >/dev/null 2>&1; then
+    rea_client="gemini"
+    case "${RE_AGENT:l}" in
+      claude) rea_client="claude" ;;
+      codex)  rea_client="codex" ;;
+      cursor) rea_client="cursor" ;;
+    esac
+    rea setup --client "$rea_client" --yes >/dev/null 2>&1 || true
+  fi
 fi
 
 # ── Ghi file config JSON ──
