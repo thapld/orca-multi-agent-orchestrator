@@ -2283,11 +2283,14 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
                 # Truy vấn chi tiết worker-show để lấy đúng model, worktree name, thời gian chạy
                 wt_name = "-"
+                wt_path = ""
                 agent_model_str = "-"
                 duration_str = "-"
                 files_mod_count = 0
 
                 ws_id = str((w.get("resource") or {}).get("worktreeId") or "")
+                if "::" in ws_id:
+                    wt_path = ws_id.split("::", 1)[1]
                 if "/" in ws_id:
                     wt_name = ws_id.rsplit("/", 1)[-1]
 
@@ -2297,6 +2300,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         ws_json = json.loads(ws_res.stdout).get("result", {})
                         w_info = ws_json.get("worker", {})
                         d_info = ws_json.get("dispatch", {})
+                        t_info = ws_json.get("terminal") or {}
+                        if t_info.get("worktreePath"):
+                            wt_path = str(t_info.get("worktreePath"))
                         start_opts = w_info.get("startOptions", {})
                         if start_opts.get("name"):
                             wt_name = start_opts.get("name")
@@ -2312,9 +2318,16 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         else:
                             agent_model_str = ag_name
 
-                        # Tính thời lượng chạy
+                        # Tính thời lượng chạy (nếu worker đang active chưa có completedAt thì tính đến thời điểm UTC hiện tại)
                         c_at = str(d_info.get("dispatchedAt") or w_info.get("createdAt") or "")
-                        comp_at = str(d_info.get("completedAt") or w_info.get("updatedAt") or "")
+                        raw_comp_at = d_info.get("completedAt")
+                        if raw_comp_at:
+                            comp_at = str(raw_comp_at)
+                        elif term_state == "active" or w_state not in ("succeeded", "failed", "stopped", "timed_out"):
+                            from datetime import datetime, timezone
+                            comp_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            comp_at = str(w_info.get("updatedAt") or "")
                         if c_at and comp_at:
                             try:
                                 from datetime import datetime
@@ -2343,9 +2356,27 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         rep_body = str(res_parsed.get("body") or "")
                         f_mod = res_parsed.get("filesModified") or []
                         files_mod_count = len(f_mod)
-                        total_offloaded_files += files_mod_count
                     except Exception:
                         rep_body = res_raw
+                # Nếu worker không truyền --files-modified trong worker_done nhưng đã commit riêng trên nhánh của mình, tự động đếm từ git diff
+                if files_mod_count == 0 and w_state == "succeeded" and wt_path and os.path.isdir(wt_path):
+                    try:
+                        head_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2).stdout.strip()
+                        main_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "main"], capture_output=True, text=True, timeout=2).stdout.strip()
+                        dev_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "dev-worker"], capture_output=True, text=True, timeout=2).stdout.strip()
+                        if head_sha and head_sha != main_sha:
+                            if wt_name == "dev-worker" or head_sha != dev_sha:
+                                base_ref = dev_sha if (wt_name != "dev-worker" and dev_sha and dev_sha != head_sha) else (main_sha or "HEAD~1")
+                                g_diff = subprocess.run(
+                                    ["git", "-C", wt_path, "diff", "--name-only", f"{base_ref}..HEAD"],
+                                    capture_output=True, text=True, timeout=3
+                                )
+                                if g_diff.returncode == 0:
+                                    committed_files = [ln.strip() for ln in g_diff.stdout.splitlines() if ln.strip()]
+                                    files_mod_count = len(committed_files)
+                    except Exception:
+                        pass
+                total_offloaded_files += files_mod_count
                 rep_tok = estimate_tokens(rep_body)
                 total_report_tokens += rep_tok
 
@@ -2369,6 +2400,18 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     t_title = str(t_obj_info.get("task_title") or t_obj_info.get("display_name") or "")[:68]
                     f_info = f", sửa {files_mod_count} files" if files_mod_count > 0 else ""
                     print(f"      ↳ Task: \"{t_title}\" (Spec: ~{spec_tok} tok ➔ Báo cáo về Leader: chỉ ~{rep_tok} tok{f_info})")
+
+            # Hiển thị các Task đang chờ tới lượt trong Task DAG (chưa dispatch)
+            dispatched_task_ids = {str(w.get("taskId") or "") for w in workers}
+            pending_dag_tasks = [
+                t for tid, t in run_tasks.items()
+                if tid not in dispatched_task_ids and isinstance(t, dict) and t.get("status") in ("ready", "pending", "blocked")
+            ]
+            if pending_dag_tasks:
+                for pt in pending_dag_tasks:
+                    pt_title = str(pt.get("task_title") or pt.get("display_name") or "")[:68]
+                    pt_status = str(pt.get("status") or "ready")
+                    print(f"   ⏳ Chờ tới lượt trong Task DAG ({pt.get('id')} - {pt_status}): \"{pt_title}\"")
 
             if reclaimable_dispatches:
                 print(f"  💡 Đang giữ {len(reclaimable_dispatches)} terminal worker để hiển thị chấm xanh (🟢) & chuông thông báo (🔔) trên Orca Sidebar cho đến khi duyệt Human Gate.")
@@ -2497,9 +2540,14 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             # 4.3 BẢNG CHỨNG MINH ĐỊNH LƯỢNG: TỐI ƯU TOKEN & CHI PHÍ (SINGLE-AGENT VS ORCA MULTI-AGENT)
             if workers:
                 released_cnt = sum(1 for w in workers if str(w.get("terminalState") or "") == "released")
+                retained_cnt = sum(1 for w in workers if str(w.get("terminalState") or "") in ["retained", "reclaimable"])
                 active_cnt = sum(1 for w in workers if str(w.get("terminalState") or "") == "active")
-                if active_cnt > 0:
+                if active_cnt > 0 and retained_cnt > 0:
+                    rel_summary = f"{active_cnt} chạy, {retained_cnt} giữ, {released_cnt} thu hồi"
+                elif active_cnt > 0:
                     rel_summary = f"{active_cnt} đang chạy, {released_cnt} đã thu hồi"
+                elif retained_cnt > 0:
+                    rel_summary = f"{retained_cnt} giữ badge, {released_cnt} đã thu hồi"
                 else:
                     rel_summary = f"{released_cnt}/{len(workers)} terminals đã thu hồi"
 
