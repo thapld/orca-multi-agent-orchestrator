@@ -423,14 +423,16 @@ def sync_gemini_directive(root: Path, config: dict):
     devops_spec_line = (
         '  orca orchestration task-create --spec "[ROLE: PRINCIPAL DEVOPS/SRE] Nhiệm vụ: [Docker/K8s/DB/Infra]. '
         'Chuẩn: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. '
-        'CẤM VƯỢT RÀO: Chỉ sửa Infra/Docker/K8s/DB/CI; CẤM sửa business logic của Dev. '
+        'CẤM VƯỢT RÀO & CHỐNG TREO (ANTI-RABBIT-HOLE): Chỉ sửa Infra/Docker/K8s/DB/CI; CẤM sửa business logic của Dev; '
+        'CẤM TUYỆT ĐỐI tự ý dịch ngược hoặc đọc/cat/strings/grep trực tiếp file binary trong container (nếu cần giải phẫu binary phải báo Coordinator giao re-worker); '
+        'CẤM đặt dấu backtick (`) bên trong chuỗi nháy kép (\\"...\\") của bash/zsh/python -c vì shell sẽ thực thi command substitution gây biến rỗng và treo vòng lặp stdout! '
         'RÀ SOÁT RUNTIME LOGS & BÁO CÁO COORDINATOR (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): '
         '(1) Chạy orca orchestration check --terminal <worker_handle> --json nhận nhánh/commit đã được Coordinator duyệt và '
         'chạy git merge --no-edit main && git merge --no-edit dev-worker trước khi build, (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! '
         'Bắt buộc chờ qua chu kỳ chạy thật của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start '
         '(kubectl logs/docker logs KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) '
         'cùng trạng thái DB, (3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, '
-        'SSLHandshakeException, Auth 401/403 hay health=ERROR nào lúc runtime ➔ BẮT BUỘC trình báo ngay lên Coordinator: '
+        'SSLHandshakeException, Auth 401/403 hay health=ERROR nào lúc runtime (hoặc nếu vướng lỗi quá 15 turns chưa xử lý được ở tầng Infra/DB) ➔ BẮT BUỘC dừng đào bới và trình báo ngay lên Coordinator: '
         'orca orchestration send --from <worker_handle> --type escalation --subject \'Runtime Log Error\' '
         '--body \'<Chi tiết pod & log lỗi trình Coordinator phán quyết>\' --task-id <task_id> --dispatch-id <dispatch_id> --json '
         '(KHÔNG dùng --to \'@all\'!) rồi chờ chỉ đạo hoặc báo worker_done --outcome failed '
@@ -2111,6 +2113,17 @@ def _analyze_antigravity_transcript(tf_path: Path) -> dict:
     now_utc = datetime.now(timezone.utc)
     idle_since_last = max(0.0, (now_utc - tN).total_seconds()) if tN else 0.0
 
+    bloated_logs = []
+    tasks_dir = tf_path.parent.parent / "tasks"
+    if tasks_dir.is_dir():
+        try:
+            for tl in tasks_dir.glob("*.log"):
+                sz = tl.stat().st_size
+                if sz > 10 * 1024 * 1024:
+                    bloated_logs.append((tl, sz))
+        except Exception:
+            pass
+
     return {
         "transcript_path": str(tf_path),
         "steps": len(steps),
@@ -2135,6 +2148,7 @@ def _analyze_antigravity_transcript(tf_path: Path) -> dict:
         "avg_turn_s": llm_secs / max(1, turns),
         "last_tool": last_tool_name,
         "last_step_at": steps[-1].get("created_at") or "",
+        "bloated_logs": bloated_logs,
     }
 
 
@@ -2527,7 +2541,15 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         w_info = ws_json.get("worker", {})
                         d_info = ws_json.get("dispatch", {})
                         t_info = ws_json.get("terminal") or {}
-                        w_phase = str(w_info.get("phase") or "-")
+                        p_info = ws_json.get("projection") or {}
+                        if w_info.get("state"):
+                            w_state = str(w_info.get("state"))
+                        elif d_info.get("status") in ("succeeded", "failed", "stopped", "timed_out"):
+                            w_state = str(d_info.get("status"))
+                        w_phase = str(w_info.get("phase") or w_info.get("stage") or (p_info.get("stage") or {}).get("detail") or "-")
+                        res_info = p_info.get("resource") or {}
+                        if res_info.get("terminalState"):
+                            term_state = str(res_info.get("terminalState"))
                         if t_info.get("worktreePath"):
                             wt_path = str(t_info.get("worktreePath"))
                         start_opts = w_info.get("startOptions", {})
@@ -2546,7 +2568,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         now_utc = datetime.now(timezone.utc)
                         if raw_comp_at:
                             comp_dt = _parse_iso_utc(str(raw_comp_at))
-                        elif term_state == "active" or w_state not in ("succeeded", "failed", "stopped", "timed_out"):
+                        elif term_state == "active" and w_state not in ("succeeded", "failed", "stopped", "timed_out"):
                             comp_dt = now_utc
                         else:
                             comp_dt = _parse_iso_utc(str(w_info.get("updatedAt") or ""))
@@ -2640,10 +2662,31 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     warning_issues.append(
                         f"Worker {wt_name} ({d_id}) đang active nhưng không có bước thực thi mới trong {_fmt_dur(idle_s)} (last_tool={t_metrics['last_tool']})."
                     )
+                if w_state in ("stopped", "failed") and rep_tok == 0:
+                    warning_issues.append(
+                        f"Worker {wt_name} ({d_id}) đã dừng ({w_state}/{w_phase}) sau {t_metrics.get('turns', 0)} turns nhưng chưa gửi báo cáo hoàn tất (report=0 tok)."
+                    )
+                if t_metrics and t_metrics["turns"] > 120:
+                    warning_issues.append(
+                        f"Worker {wt_name} ({d_id}) đã chạy {t_metrics['turns']} turns (vượt ngưỡng 120 turns/task — dấu hiệu sa đà đào bới lỗi hoặc vòng lặp retry)."
+                    )
                 if t_metrics and t_metrics["tool_errors"] >= 10:
                     warning_issues.append(
                         f"Worker {wt_name} ({d_id}) có {t_metrics['tool_errors']}/{t_metrics['tool_calls']} lệnh tool trả về mã lỗi (command retry overhead)."
                     )
+                if t_metrics and t_metrics.get("bloated_logs"):
+                    for bl_path, bl_sz in t_metrics["bloated_logs"]:
+                        mb_sz = bl_sz / (1024 * 1024)
+                        if auto_fix:
+                            try:
+                                bl_path.write_bytes(b"[TRUNCATED BY ORCA-MONITOR AUTO-FIX: runaway stdout log >10MB]\n")
+                                actions_taken.append(f"Đã cắt gọn file log phình to bất thường {bl_path.name} ({mb_sz:.1f} MB) của {wt_name}.")
+                            except Exception:
+                                pass
+                        else:
+                            critical_issues.append(
+                                f"Worker {wt_name} ({d_id}) sinh ra file log phình to bất thường {bl_path.name} ({mb_sz:.1f} MB — runaway stdout flood). Chạy 'orca-monitor --fix' để cắt gọn."
+                            )
 
                 worker_metrics_list.append({
                     "dispatch_id": d_id,
