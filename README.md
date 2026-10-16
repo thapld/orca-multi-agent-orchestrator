@@ -12,7 +12,7 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
    * Tự do lựa chọn bất kỳ model/agent nào Orca hỗ trợ cho từng vị trí: **Lead Coordinator**, **Research & Adversarial Critic (`critic-worker`)**, **Full-Stack Devs**, **QA & SDET**, **Security & Bug Hunter**, **PR Reviewer**, **Git Issue Resolver**, **UI/UX Specialist**, **DevOps & SRE**, **Bench & Perf Specialist** và **Reverse Eng Specialist (REA)**.
 2. **Cơ Chế Phản Biện & Đồng Thuận Biện Chứng Chống Leader Độc Đoán (Anti-Autocracy & Dialectical Consensus):**
    * Vai trò **Principal Research & Adversarial Critic (`critic-worker`)** điều tra độc lập (`file:line` + git blame + runtime log, lập giả thuyết riêng trước khi đọc giả thuyết Leader) và tranh biện 2 chiều với Leader qua `orca orchestration ask`/`reply` (tối đa 3 vòng). Bắt buộc khi gặp 1 trong 4 trigger: bug tái phát sau fix, escalation quy lỗi liên role/liên tầng, thay đổi schema/API/auth/payment hoặc ≥2 tầng, worker báo cáo mâu thuẫn. Bế tắc ➔ Human Gate trình cả 2 phương án, Leader không được tự phán quyết.
-   * *Lưu ý trung thực:* đây là ràng buộc ở tầng chỉ dẫn (directive) + kiểm tra Zero-Trust, không phải cơ chế chặn cứng — Orca CLI không ngăn Leader bỏ qua Critic. Chi phí: thêm ~1.000 tokens/turn vào directive của Leader khi bật role này (tắt bằng `orca-team set critic --disable`).
+   * *Lưu ý trung thực:* đây là ràng buộc ở tầng chỉ dẫn (directive) + kiểm tra Zero-Trust, không phải cơ chế chặn cứng — Orca CLI không ngăn Leader bỏ qua Critic. Chi phí trên mỗi turn của Leader chỉ ~650 tokens (do toàn bộ Hiến pháp `[ROLE: PRINCIPAL ...]` của cả 8 worker đã được offload sang `orca-team spec <role> "<nhiệm vụ>"`, chỉ nạp vào task của Worker khi khởi tạo, giúp tổng directive của Leader giảm ~2.500 tokens/turn từ ~6.808 xuống ~4.327 tokens; có thể tắt hẳn Critic bằng `orca-team set critic --disable` xuống còn ~3.634 tokens).
 3. **Cấu Hình Concurrency (Song Song Hóa Tác Vụ):**
    * Cho phép chỉ định số lượng agent song song (1–5 workers) cho nhóm Developer, QA hoặc Security.
 4. **Khai Thác 100% Tiện Ích Độc Quyền Của Orca & REA:**
@@ -102,7 +102,7 @@ orca-project-init /path/to/project
 7. Chọn môi trường thực thi: **Local** hoặc **SSH (`orb`)**.
 
 ### Vận hành tự động sau khi khởi tạo:
-* Tự động tạo `.agents/GEMINI.md` (tích hợp đầy đủ **Hiến pháp 11 Vai trò cấp Principal & Luật Chống Độc Đoán**, tối ưu token) cùng các symlink `GEMINI.md`, `AGENTS.md` / `CLAUDE.md` ở thư mục gốc.
+* Tự động tạo `.agents/GEMINI.md` (tích hợp **Luật Điều phối & Chống Độc Đoán cho Leader**, đồng thời offload toàn bộ **Hiến pháp 10 Vai trò cấp Principal của Worker** qua `orca-team spec <role> "<nhiệm vụ>"` giúp tiết kiệm ~2.500 tokens/turn cho Leader) cùng các symlink `GEMINI.md`, `AGENTS.md` / `CLAUDE.md` ở thư mục gốc.
 * Tự động thêm toàn bộ file cấu hình & thư mục runtime của Orchestrator vào `.gitignore` để giữ sạch Git status của dự án.
 * Tự động kích hoạt **Orca Agent Status Hooks** để hiển thị vòng xoay loading (`⟳`), chấm xanh (`🟢`), icon hoàn thành (`✓`) và chuông thông báo (`🔔`) trên thanh bên của Orca ADE.
 * Mở dự án trong Antigravity, Claude Code (`claude`), Codex hoặc Orca ADE: mọi yêu cầu của bạn sẽ tự động vận hành theo đúng **Quy trình 4 Bước** (Tách Task theo vai trò ➔ Fan-out sang Child Worktrees ➔ Reactive Wait `check --wait` & Phản biện Đồng thuận ➔ Human Gate xin phép trước khi merge).
@@ -137,16 +137,20 @@ orca-team set critic --enable --agent antigravity --model gemini-4-argon-high
 orca-team set dev
 orca-team set critic
 
-# 7. Quản lý Discovery Links cho nhiều AI CLI (Claude / Antigravity / Codex):
+# 7. Sinh bản Hiến pháp Vai trò cấp Principal (Role Spec Offloading cho Worker):
+orca-team spec critic "Kiểm chứng chéo giả thuyết lỗi và phản biện thiết kế của Leader"
+orca-team spec dev "Triển khai API..."
+
+# 8. Quản lý Discovery Links cho nhiều AI CLI (Claude / Antigravity / Codex):
 orca-team link all      # Kích hoạt CLAUDE.md và AGENTS.md để mở bất kỳ AI CLI nào làm Leader
 orca-team link clean    # Dọn dẹp symlink thừa nếu chỉ dùng Antigravity
 orca-team link status   # Xem trạng thái liên kết
 
-# 8. Watchdog kiểm tra & tự động giải cứu worker bị kẹt:
+# 9. Watchdog kiểm tra & tự động giải cứu worker bị kẹt:
 orca-team watchdog           # Quét trạng thái, phát hiện worker cạn token hoặc kẹt prompt [y/n]
 orca-team watchdog --unblock # Tự động gửi 'y' mở khóa toàn bộ worker đang chờ câu hỏi
 
-# 9. Giám sát & Bóc tách nguyên nhân tiêu tốn Token (Token Monitor & Forensic Debugger):
+# 10. Giám sát & Bóc tách nguyên nhân tiêu tốn Token (Token Monitor & Forensic Debugger):
 orca-monitor                 # hoặc: orca-team monitor
 orca-team monitor --verbose  # Xem chi tiết từng thông điệp và buffer màn hình
 orca-team monitor --fix      # Tự động sửa các bẫy token (gitignore, symlink, status hooks)

@@ -97,8 +97,17 @@ else
   echo "  ⚠️  Chưa đăng ký Orca Command Guard: ~/.gemini/config/hooks.json không hợp lệ (đã giữ nguyên file). Sửa file rồi chạy lại ./install.sh."
 fi
 
+# Đảm bảo ~/.zshenv có ~/.local/bin trong PATH cho cả non-interactive zsh -c (Claude Code / Codex / Antigravity)
+if [[ -f "$HOME/.zshenv" ]]; then
+  if ! grep -q '\.local/bin' "$HOME/.zshenv" 2>/dev/null; then
+    printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.zshenv"
+  fi
+else
+  printf 'export PATH="$HOME/.local/bin:$PATH"\n' > "$HOME/.zshenv"
+fi
+
 echo ""
-echo "🎉 Cài đặt hoàn tất! Hãy đảm bảo '$INSTALL_DIR' có trong PATH của bạn:"
+echo "🎉 Cài đặt hoàn tất! Đã đảm bảo '$INSTALL_DIR' có trong PATH (~/.zshenv):"
 echo '   export PATH="$HOME/.local/bin:$PATH"'
 echo ""
 echo "========================================================================"

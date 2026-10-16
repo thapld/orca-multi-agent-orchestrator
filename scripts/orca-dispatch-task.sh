@@ -94,6 +94,10 @@ else
 fi
 
 # Tự động tiêm Hiến pháp Vai trò Cấp Principal (Chống vượt rào & Chống báo sạch giả) nếu SPEC chưa có
+if [[ "$SPEC" != "[ROLE:"* && -x "$ORCA_TEAM_BIN" ]]; then
+  INJECTED_SPEC=$("$ORCA_TEAM_BIN" spec "$ROLE_QUERY" "$SPEC" 2>/dev/null || true)
+  [[ -n "$INJECTED_SPEC" ]] && SPEC="$INJECTED_SPEC"
+fi
 if [[ "$SPEC" != "[ROLE:"* ]]; then
   case "${ROLE_QUERY:l}" in
     devops|infra|sre|ops)
