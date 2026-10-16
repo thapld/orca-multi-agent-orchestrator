@@ -298,15 +298,6 @@ def sync_gemini_directive(root: Path, config: dict):
     i_display = f"`{i_agent}`" + (f" ({i_model})" if i_model else "")
     rows.append(f"| **Issue Resolver** | {i_display} | On-demand | Issue checkout (`--issue`), reproduction test & fix |")
 
-    # UI Specialist
-    ui = roles.get("uiSpecialist", {})
-    ui_enabled = _is_role_enabled(ui, is_optional=True)
-    if ui_enabled:
-        u_agent = ui.get("agent", "claude")
-        u_model = ui.get("model")
-        u_display = f"`{u_agent}`" + (f" ({u_model})" if u_model else "")
-        rows.append(f"| **UI/UX Specialist** | {u_display} | On-demand | Design Mode (Click-to-code), responsive & a11y |")
-
     # DevOps Specialist
     devops = roles.get("devopsSpecialist", {})
     devops_enabled = _is_role_enabled(devops, is_optional=True)
@@ -315,6 +306,15 @@ def sync_gemini_directive(root: Path, config: dict):
         do_model = devops.get("model")
         do_display = f"`{do_agent}`" + (f" ({do_model})" if do_model else "")
         rows.append(f"| **DevOps Specialist** | {do_display} | On-demand | Docker/K8s rollout, DB migrations, SSH worktrees |")
+
+    # UI Specialist
+    ui = roles.get("uiSpecialist", {})
+    ui_enabled = _is_role_enabled(ui, is_optional=True)
+    if ui_enabled:
+        u_agent = ui.get("agent", "claude")
+        u_model = ui.get("model")
+        u_display = f"`{u_agent}`" + (f" ({u_model})" if u_model else "")
+        rows.append(f"| **UI/UX Specialist** | {u_display} | On-demand | Design Mode (Click-to-code), responsive & a11y |")
 
     # Bench & Perf Specialist
     bench = roles.get("benchSpecialist", {})
@@ -336,6 +336,21 @@ def sync_gemini_directive(root: Path, config: dict):
 
     table_text = "\n".join(rows)
 
+    # Đồng bộ dòng BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN ở đầu file theo đúng các role đang bật
+    routing_parts = ["Code ứng dụng ➔ **`dev-worker`**"]
+    if devops_enabled:
+        routing_parts.append("Docker, K8s, Helm, DB migration, `.env`, infra ➔ **`devops-worker`**")
+    routing_parts.append("Kiểm toán bảo mật & rò rỉ ➔ **`sec-worker`**")
+    routing_parts.append("Kiểm thử nghiệm thu ➔ **`qa-worker`**")
+    if bench_enabled:
+        routing_parts.append("Đo tải RPS/EPS & tối ưu hiệu năng ➔ **`bench-worker`**")
+    if re_enabled:
+        routing_parts.append("Dịch ngược Binary/ASAR/Protocol (`rea`) ➔ **`re-worker`**")
+    if ui_enabled:
+        routing_parts.append("Giao diện CSS/DOM ➔ **`ui-worker`**")
+    routing_line = "> - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** " + " | ".join(routing_parts) + "."
+    content = re.sub(r"^> - \*\*BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:\*\*.*$", routing_line, content, flags=re.M)
+
     # Regex replace the table under ## 👥 Configured Agent (Team)? Topology
     pattern = re.compile(
         r"(## 👥 Configured Agent(?: Team)? Topology\s*\n\s*)(?:\|[^\n]+\|\n)+",
@@ -344,7 +359,7 @@ def sync_gemini_directive(root: Path, config: dict):
     if pattern.search(content):
         content = pattern.sub(lambda m: m.group(1) + table_text + "\n", content)
 
-    # Tự động thêm các dòng Step 1 (task-create) và Step 2 (worker-start) nếu role vừa được bật động qua 'orca-team set <role> --enable'
+    # Tự động thêm/gỡ các dòng Step 1 (task-create) và Step 2 (worker-start) nếu role được bật/tắt động
     optional_directives = [
         (
             devops_enabled,
@@ -377,13 +392,14 @@ def sync_gemini_directive(root: Path, config: dict):
     ]
 
     for is_en, step1_marker, step1_block, w_name, step2_block in optional_directives:
+        has_w_cmd = bool(re.search(rf"^[ \t]*orca orchestration worker-start[^\n]*--name\s+{re.escape(w_name)}\b", content, re.M))
         if is_en:
             if step1_marker not in content:
                 # Chèn vào trước # Principal AppSec Auditor hoặc cuối khối bash của Bước 1
                 anchor_s1 = re.search(r"^[ \t]*#[ \t]*(?:\d+\.\s*)?Principal AppSec Auditor.*$", content, re.M)
                 if anchor_s1:
                     content = content[:anchor_s1.start()] + step1_block + content[anchor_s1.start():]
-            if f"--name {w_name}" not in content:
+            if not has_w_cmd:
                 # Chèn vào trước # Security Worker hoặc sau dev-worker trong Bước 2
                 anchor_s2 = re.search(r"^[ \t]*#[ \t]*Security Worker.*$", content, re.M)
                 if anchor_s2:
@@ -395,11 +411,11 @@ def sync_gemini_directive(root: Path, config: dict):
         else:
             if step1_marker in content:
                 s1_pat = re.compile(
-                    rf"(?:^[ \t]*#[^\n]*\n)?^[ \t]*orca orchestration task-create --spec \"\[{re.escape(step1_marker)}\][^\n]*\n",
+                    rf"\n?(?:^[ \t]*#[^\n]*\n)?^[ \t]*orca orchestration task-create --spec \"\[{re.escape(step1_marker)}\][^\n]*\n",
                     re.M
                 )
-                content = s1_pat.sub("", content)
-            if f"--name {w_name}" in content:
+                content = s1_pat.sub("\n", content)
+            if has_w_cmd:
                 s2_pat = re.compile(
                     rf"(?:^[ \t]*#[^\n]*\n)?^[ \t]*orca orchestration worker-start[^\n]*--name\s+{re.escape(w_name)}\b[^\n]*\n",
                     re.M

@@ -8,16 +8,16 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
 
 ## 🌟 Tính Năng Nổi Bật
 
-1. **Linh Hoạt Đa Agent (Agnostic Multi-Agent Support):**
-   * Tự do lựa chọn bất kỳ model/agent nào Orca hỗ trợ cho từng vị trí (Coordinator, Developer, QA, Security, PR Reviewer, Issue Resolver, UI/UX, DevOps).
+1. **Linh Hoạt Đa Agent (Agnostic Multi-Agent Support — 10 Vai Trò Cấp Principal):**
+   * Tự do lựa chọn bất kỳ model/agent nào Orca hỗ trợ cho từng vị trí: **Lead Coordinator**, **Full-Stack Devs**, **QA & SDET**, **Security & Bug Hunter**, **PR Reviewer**, **Git Issue Resolver**, **UI/UX Specialist**, **DevOps & SRE**, **Bench & Perf Specialist** và **Reverse Eng Specialist (REA)**.
 2. **Cấu Hình Concurrency (Song Song Hóa Tác Vụ):**
    * Cho phép chỉ định số lượng agent song song (1–5 workers) cho nhóm Developer, QA hoặc Security.
-3. **Khai Thác 100% Tiện Ích Độc Quyền Của Orca:**
+3. **Khai Thác 100% Tiện Ích Độc Quyền Của Orca & REA:**
    * **Git Worktrees:** Mỗi task/agent sở hữu một worktree độc lập (`--worktree new-child`), loại bỏ hoàn toàn xung đột git.
    * **Embedded Browser & Design Mode:** Click trực tiếp vào element trên màn hình để trích xuất HTML/CSS và mã nguồn ném thẳng vào terminal của agent.
    * **Computer Use:** Cho phép agent tương tác GUI với các phần mềm desktop ngoài trình duyệt qua Accessibility Tree.
    * **SSH Remote Worktrees:** Chạy các tác vụ nặng trên máy chủ từ xa (như host `orb` hay GPU box) trong khi giao diện editor vẫn nằm trên macOS.
-   * **Orca Skills Registry:** Nạp các bộ công cụ chuẩn hóa (`orchestration`, `orca-cli`, `orca-linear`, `orca-emulator`...).
+   * **Orca Skills Registry & Reverse Engineering (`morluto/rea`):** Nạp các bộ công cụ chuẩn hóa (`orchestration`, `orca-cli`, `orca-linear`, `orca-emulator`...) và bộ giải phẫu binary/package/protocol hộp đen `reverse-engineer-anything`.
 4. **Git Lifecycle Chuyên Biệt:**
    * **PR Reviewer:** Checkout PR độc lập (`--pr <id>`), soi diff từng dòng (`Annotate AI Diff`) và chạy kiểm tra CI.
    * **Git Issue Auto-Resolver:** Tự động kết nối với GitHub qua **Orca Native GitHub Integration & Bell Inbox**, checkout issue (`--issue <id>`), tự tái hiện bug và tạo PR.
@@ -99,7 +99,7 @@ orca-project-init /path/to/project
 7. Chọn môi trường thực thi: **Local** hoặc **SSH (`orb`)**.
 
 ### Vận hành tự động sau khi khởi tạo:
-* Tự động tạo `.agents/GEMINI.md` (~1,380 tokens tinh gọn) cùng các symlink `GEMINI.md`, `AGENTS.md` / `CLAUDE.md` ở thư mục gốc.
+* Tự động tạo `.agents/GEMINI.md` (tích hợp đầy đủ **Hiến pháp 10 Vai trò cấp Principal**, tối ưu token) cùng các symlink `GEMINI.md`, `AGENTS.md` / `CLAUDE.md` ở thư mục gốc.
 * Tự động thêm toàn bộ file cấu hình & thư mục runtime của Orchestrator vào `.gitignore` để giữ sạch Git status của dự án.
 * Tự động kích hoạt **Orca Agent Status Hooks** để hiển thị vòng xoay loading (`⟳`), chấm xanh (`🟢`), icon hoàn thành (`✓`) và chuông thông báo (`🔔`) trên thanh bên của Orca ADE.
 * Mở dự án trong Antigravity, Claude Code (`claude`), Codex hoặc Orca ADE: mọi yêu cầu của bạn sẽ tự động vận hành theo đúng **Quy trình 4 Bước** (Tách Task theo vai trò ➔ Fan-out sang Child Worktrees ➔ Reactive Wait `check --wait` ➔ Human Gate xin phép trước khi merge).
@@ -123,12 +123,15 @@ orca-team set qa --agent antigravity
 # 4. Đổi agent cho Security Auditor:
 orca-team set sec --agent codex --model gpt-4o
 
-# 5. Bật/tắt vai trò mở rộng:
+# 5. Bật/tắt các vai trò mở rộng chuyên biệt (UI, DevOps, Bench, Reverse Eng):
 orca-team set ui --enable --agent claude
-orca-team set devops --disable
+orca-team set devops --enable --agent antigravity
+orca-team set bench --enable --agent antigravity --model gemini-3.8-flash-high
+orca-team set re --enable --agent antigravity --model gemini-4-argon-high
 
-# 6. Chế độ tương tác từng bước:
+# 6. Chế độ tương tác từng bước (điều hướng bằng phím mũi tên):
 orca-team set dev
+orca-team set re
 
 # 7. Quản lý Discovery Links cho nhiều AI CLI (Claude / Antigravity / Codex):
 orca-team link all      # Kích hoạt CLAUDE.md và AGENTS.md để mở bất kỳ AI CLI nào làm Leader
@@ -142,10 +145,10 @@ orca-team watchdog --unblock # Tự động gửi 'y' mở khóa toàn bộ work
 # 9. Giám sát & Bóc tách nguyên nhân tiêu tốn Token (Token Monitor & Forensic Debugger):
 orca-monitor                 # hoặc: orca-team monitor
 orca-team monitor --verbose  # Xem chi tiết từng thông điệp và buffer màn hình
-orca-team monitor --fix      # Tự động sửa các bẫy token (gitignore, symlink, release worker)
+orca-team monitor --fix      # Tự động sửa các bẫy token (gitignore, symlink, status hooks)
 ```
 
-> **Ghi chú:** Khi chạy `orca-team set`, công cụ sẽ **tự động cập nhật `orca-team.json` đồng thời đồng bộ lại bảng vai trò trong `.agents/GEMINI.md`**, giúp Leader agent lập tức nhận biết cấu hình mới mà không cần khởi động lại.
+> **Ghi chú:** Khi chạy `orca-team set`, công cụ sẽ **tự động cập nhật `orca-team.json` đồng thời đồng bộ lại bảng Topology, danh sách phân vai và lệnh khởi tạo ở Bước 1 & Bước 2 trong `.agents/GEMINI.md`**, giúp Leader agent lập tức nhận biết cấu hình mới mà không cần khởi động lại.
 
 ---
 
@@ -156,26 +159,32 @@ Nếu bạn hoặc AI Leader thấy **tiêu tốn quá nhiều token** mà khôn
 1. **Chỉ dẫn hệ thống nạp mỗi turn (Per-Turn System Prompt):** Đo lường chính xác dung lượng byte và ước tính token của `.agents/GEMINI.md`, `CLAUDE.md`, `AGENTS.md`. Phát hiện trường hợp file bị copy độc lập thay vì symlink (gây x2 token mỗi turn).
 2. **Bẫy đường dẫn chết (Dead Reference Traps):** Tự động phát hiện các file template/doc được nhắc đến trong chỉ dẫn nhưng không tồn tại trong project — nguyên nhân khiến AI Agent rơi vào vòng lặp tìm file bất tận (`view_file` / `glob`) đốt 1.500 - 3.000 tokens ngay khi mở màn.
 3. **Vệ sinh Workspace & Git Status:** Kiểm tra `.gitignore` xem đã chặn log rác và receipt của Orca (`.orca/`, `.orca-cache/`, `*.orca.log`) chưa. Đếm số lượng file untracked làm phình output của `git status`.
-4. **Orca Runtime Telemetry:** Kiểm tra bộ nhớ màn hình terminal của các worker đang chạy (`orca terminal read`), phát hiện worker bị kẹt loop và cảnh báo các worker đã xong việc (`reclaimable`) nhưng chưa được release.
-5. **Auto-Fix Thông Minh (`--fix`):** Tự động thêm luật vào `.gitignore`, tự động chuyển file trùng lặp sang symlink và tự động gọi `worker-release` để giải phóng bộ nhớ.
+4. **Orca Runtime Telemetry:** Kiểm tra trạng thái thực thi của các worker trong Run hiện tại, phân tích hộp thư `Mailbox Event-Driven` và đối chiếu định lượng số lượng token đã cô lập sang child worktrees.
+5. **Auto-Fix Thông Minh (`--fix`):** Tự động thêm luật vào `.gitignore`, tự động chuyển file trùng lặp sang symlink và tự động kích hoạt Orca Agent Status Hooks (loading spinner & chuông thông báo).
 
 ---
 
 ## ⚡ Các Lệnh Dispatch Tác Vụ Nhanh (Anti-Token-Waste)
 
-Các script tiện ích đã được cấu hình sẵn timeout 5 phút (`--timeout-ms 300000`) và tự động tra cứu đúng Agent từ `orca-team.json`:
+Các script tiện ích đã được cấu hình sẵn timeout 5 phút (`--timeout-ms 300000`), tự động tiêm Hiến pháp Vai trò cấp Principal (`[ROLE: PRINCIPAL ...]`) và tra cứu đúng Agent + Model từ `orca-team.json`:
 
 ```bash
-# Giao việc cho Developer (tự động dùng agent đã config cho dev):
-orca-dispatch "Tạo module Auth" "Viết JWT login/refresh token có kiểm thử đầy đủ"
+# Giao việc cho Developer (tự động dùng agent/model đã config cho dev):
+orca-dispatch "Tạo module Auth" dev "Viết JWT login/refresh token có kiểm thử đầy đủ"
 
-# Hoặc chỉ định rõ agent khác nếu muốn:
-orca-dispatch "Tạo module Auth" claude "Viết JWT login..."
+# Giao việc cho DevOps / SRE:
+orca-dispatch "Rollout K8s" devops "Cập nhật Dockerfile multi-stage và rollout pod mới"
 
-# Mở worktree fix Issue GitHub song song (không ảnh hưởng nhánh chính):
+# Giao việc đo kiểm hiệu năng (Benchmark & Perf):
+orca-dispatch "Stress Test Ingest" bench "Đo tải 10.000 EPS trên endpoint /api/v1/ingest và xuất p95/p99"
+
+# Giao việc dịch ngược Binary / Package / Protocol (REA):
+orca-dispatch "Unpack Plugin" re "Giải phẫu binary/JAR plugin bằng morluto/rea và xuất Clean-Room Spec"
+
+# Mở worktree fix Issue GitHub độc lập song song (--no-parent):
 orca-hotfix 142
 
-# Mở worktree review line-by-line diff PR GitHub độc lập:
+# Mở worktree review line-by-line diff PR GitHub độc lập (--no-parent):
 orca-review 89
 ```
 

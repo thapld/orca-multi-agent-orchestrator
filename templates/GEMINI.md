@@ -62,14 +62,22 @@
 ### BƯỚC 2: FAN-OUT (GIAO VIỆC ĐÚNG WORKER & MODEL TRONG CHILD WORKTREE)
 - Khởi chạy worker theo đúng Agent & Model trong bảng Topology (chạy `dev-worker` trước hoặc dùng `--deps '["<DEV_TASK_ID>"]'` để DevOps/Sec/QA/Bench lấy đúng commit mới của Dev):
   ```bash
+  # Dev Worker:
   orca orchestration worker-start --task <DEV_TASK_ID> --worktree new-child --name dev-worker --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
+  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):
   orca orchestration worker-start --task <DEVOPS_TASK_ID> --worktree new-child --name devops-worker --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
+  # Security Worker (khi có Task Security Audit):
   orca orchestration worker-start --task <SEC_TASK_ID> --worktree new-child --name sec-worker --agent antigravity --model "gemini-4-argon-high" --effort high --json
+  # QA Worker (Test nghiệm thu):
   orca orchestration worker-start --task <QA_TASK_ID> --worktree new-child --name qa-worker --agent antigravity --model "gemini-3.8-flash-medium" --effort medium --json
+  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):
   orca orchestration worker-start --task <BENCH_TASK_ID> --worktree new-child --name bench-worker --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
+  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):
   orca orchestration worker-start --task <RE_TASK_ID> --worktree new-child --name re-worker --agent antigravity --model "gemini-4-argon-high" --effort high --json
+  # UI Worker (khi có Task Frontend/UI):
+  orca orchestration worker-start --task <UI_TASK_ID> --worktree new-child --name ui-worker --agent antigravity --model "gemini-3.8-flash-medium" --effort medium --json
   ```
-  *(On-demand: UI dùng `--name ui-worker` | Review PR dùng `orca-review-pr <PR_NUM>` | Sửa Issue dùng `orca-hotfix <ISSUE_ID>`)*
+  *(On-demand Git: Review PR dùng `orca-review-pr <PR_NUM>` | Sửa Issue dùng `orca-hotfix <ISSUE_ID>`)*
 
 ### BƯỚC 3: REACTIVE WAIT & KIỂM CHỨNG CHÉO ZERO-TRUST (CHỐNG BÁO SẠCH GIẢ)
 - 🔴 **BẮT BUỘC dùng lệnh chờ (KHÔNG poll vòng lặp) và DỪNG GỌI TOOL sau khi chạy:**

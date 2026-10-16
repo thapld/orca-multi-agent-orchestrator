@@ -928,7 +928,7 @@ fi
 
 echo ""
 echo "🎉 [HOÀN TẤT] Đã tạo xong hệ thống Full-Spectrum Orchestrator (Token-Optimized)!"
-echo "   1. Directive Rule:   $TARGET_RULE (~60 dòng tinh gọn, chống lãng phí token)"
+echo "   1. Directive Rule:   $TARGET_RULE (Hiến pháp 10 Vai trò cấp Principal, tối ưu token)"
 echo "   2. Team Config:      $TARGET_CONFIG"
 echo "   3. Leader Discovery: $LINK_MSG"
 echo ""
