@@ -20,7 +20,8 @@ echo "🐋 [Orca Orchestrator Uninstaller] Đang gỡ bỏ các CLI khỏi $INST
 removed_count=0
 for bin in "${BINARIES[@]}"; do
   target="$INSTALL_DIR/$bin"
-  if [[ -f "$target" || -L "$target" ]]; then
+  # Chỉ xóa symlink trỏ vào bộ công cụ này, hoặc file copy có chứa dấu hiệu Orca (không xóa file trùng tên của người dùng)
+  if [[ -L "$target" && "$(readlink "$target")" == *orca-multi-agent-orchestrator* ]] || { [[ -f "$target" && ! -L "$target" ]] && grep -qi "orca" "$target" 2>/dev/null; }; then
     rm -f "$target"
     echo "  🗑️  Đã xóa: $target"
     removed_count=$((removed_count + 1))
@@ -30,7 +31,7 @@ done
 # Kiểm tra thêm trong /usr/local/bin nếu từng cài bằng quyền root
 for bin in "${BINARIES[@]}"; do
   target="/usr/local/bin/$bin"
-  if [[ -L "$target" ]]; then
+  if [[ -L "$target" && "$(readlink "$target")" == *orca-multi-agent-orchestrator* ]]; then
     if rm -f "$target" 2>/dev/null; then
       echo "  🗑️  Đã xóa: $target"
       removed_count=$((removed_count + 1))

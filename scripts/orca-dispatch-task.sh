@@ -226,6 +226,27 @@ if [[ -z "$DISPATCH_ID" ]]; then
   exit 1
 fi
 
+# Orca trả về dispatchId kể cả khi worker-start KHÔNG thành công (state != 'ready', CLI exit code 1)
+START_STATE_INFO=$(python3 -c "
+import sys, json
+try:
+    res = json.loads(sys.stdin.read()).get('result', {})
+    state = res.get('state') or ''
+    if state and state != 'ready':
+        print(state)
+        if res.get('lastError'):
+            print('   • Lỗi (' + str(res.get('failedStage') or 'start') + '): ' + str(res.get('lastError')))
+        for c in res.get('nextCommands') or []:
+            print('   • Lệnh gợi ý: ' + str(c))
+except Exception:
+    pass
+" <<< "$START_RECEIPT" 2>/dev/null || true)
+if [[ -n "$START_STATE_INFO" ]]; then
+  echo "❌ Worker dispatch $DISPATCH_ID chưa sẵn sàng (state: ${START_STATE_INFO%%$'\n'*})"
+  [[ "$START_STATE_INFO" == *$'\n'* ]] && echo "${START_STATE_INFO#*$'\n'}"
+  exit 1
+fi
+
 echo "🎉 Worker đã được khởi chạy thành công!"
 echo "   • Worktree: $WORKTREE_NAME"
 echo "   • Dispatch: $DISPATCH_ID"

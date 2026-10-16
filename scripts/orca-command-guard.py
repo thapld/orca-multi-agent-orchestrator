@@ -54,6 +54,126 @@ EXCLUDED_CHILD_MARKERS = (
 )
 
 
+AGENT_PIDS_FILE = ".orca-agent-pids.json"
+INTERPRETERS = {"node", "python", "python3", "bun", "deno", "ruby", "perl"}
+
+
+def _ancestor_pids() -> list[int]:
+    """PID chain of this hook process up to init (agent CLI / language_server is one of them)."""
+    pids: list[int] = []
+    try:
+        table = _get_process_table()
+        cur = os.getppid()
+        seen = set()
+        transient = {"sh", "bash", "zsh", "dash", "env", "python", "python3", "timeout"}
+        while cur > 1 and cur not in seen and len(seen) < 16:
+            seen.add(cur)
+            ppid, _, args_str = table.get(cur, (0, 0, ""))
+            toks = args_str.split()
+            exe = os.path.basename(toks[0]).lower() if toks else ""
+            # Bỏ qua wrapper ngắn hạn (sh -c của hook, python harness): PID của chúng có thể bị tái sử dụng cho lệnh runaway
+            if exe not in transient or _looks_like_agent(args_str):
+                pids.append(cur)
+            cur = ppid
+    except Exception:
+        pass
+    return pids
+
+
+def _record_agent_pids(tasks_dir: Path) -> None:
+    try:
+        f = tasks_dir / AGENT_PIDS_FILE
+        old: list[int] = []
+        if f.exists():
+            try:
+                old = [int(x) for x in json.loads(f.read_text(encoding="utf-8")) if str(x).isdigit()]
+            except Exception:
+                old = []
+        merged = [p for p in dict.fromkeys(_ancestor_pids() + old) if _pid_alive(p)][:24]
+        f.write_text(json.dumps(merged), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return True
+
+
+def _load_agent_pids(tasks_dir: Path) -> set[int]:
+    try:
+        raw = json.loads((tasks_dir / AGENT_PIDS_FILE).read_text(encoding="utf-8"))
+        return {int(x) for x in raw if str(x).isdigit() and _pid_alive(int(x))}
+    except Exception:
+        return set()
+
+
+def _looks_like_agent(args_str: str) -> bool:
+    """Match agent markers on the executable name (or the script name for node/python), NOT anywhere in argv.
+    Trước đây 'bash -c ... orca-build' hay script nằm trong ~/.gemini/antigravity/... bị coi là Agent và không bị kill."""
+    toks = args_str.split()
+    if not toks:
+        return False
+    names = [os.path.basename(toks[0]).lower()]
+    if names[0] in INTERPRETERS and len(toks) > 1:
+        names.append(os.path.basename(toks[1]).lower())
+    if ".app/contents/" in args_str.lower():
+        names.append(args_str.lower().split(".app/contents/", 1)[0].rsplit("/", 1)[-1])
+    return any(m.strip("/") in n for n in names for m in PROTECTED_AGENT_MARKERS)
+
+
+_INTERP_INLINE_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:\S*/)?(?P<interp>python3?|node|ruby|perl|bash|zsh|sh)"
+    r"(?P<opts>(?:\s+-[a-zA-Z0-9]+)*)\s+(?P<flag>-c|-e|--eval|-p)\s+\""
+)
+_UNQUOTED_HEREDOC_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:\S*/)?(?:python3?|node|ruby|perl|bash|zsh|sh)\b[^\n<]*<<-?\s*(?P<delim>[A-Za-z_][A-Za-z0-9_]*)\s*\n"
+)
+
+
+def _double_quoted_arg_has_backtick(cmd: str, start: int) -> bool:
+    """cmd[start] is the opening double quote; scan to the closing quote honoring backslash escapes."""
+    i = start + 1
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == '"':
+            return False
+        if ch == "`":
+            return True
+        i += 1
+    return False
+
+
+def _inline_script_backtick_risk(cmd: str) -> bool:
+    """True only when the inline-script argument itself (-c/-e/--eval "...") contains an unescaped backtick,
+    or an UNQUOTED heredoc fed to an interpreter contains one (the shell substitutes both)."""
+    for m in _INTERP_INLINE_RE.finditer(cmd):
+        interp, flag = m.group("interp"), m.group("flag")
+        if interp in ("bash", "zsh", "sh") and flag != "-c":
+            continue  # -e = errexit cho shell, không phải inline script
+        if interp in ("python", "python3") and flag != "-c":
+            continue
+        if _double_quoted_arg_has_backtick(cmd, m.end() - 1):
+            return True
+    for m in _UNQUOTED_HEREDOC_RE.finditer(cmd):
+        delim = m.group("delim")
+        body = cmd[m.end():]
+        end = re.search(rf"^\s*{re.escape(delim)}\s*$", body, re.M)
+        body = body[: end.start()] if end else body
+        if re.search(r"(?<!\\)`", body):
+            return True
+    return False
+
+
 def _has_unescaped_backtick_in_double_quotes(cmd: str) -> bool:
     in_single = False
     in_double = False
@@ -96,6 +216,9 @@ def _run_stream_filter() -> None:
     - Buffers the latest TAIL_KEEP_BYTES (128 KB) in a fixed-size ring buffer in RAM.
     - If upstream exceeds MAX_TASK_LOG_BYTES (16 MB), closes stdin (sending SIGPIPE to stop the producer)
       and flushes the ring-buffer tail with a circuit-breaker notice.
+    - Exit code: the filter always exits 0. Use `set -o pipefail` to surface the producer's exit code;
+      note that on cutoff the producer receives SIGPIPE (status 141). Output is normalized: NUL bytes
+      are stripped, CR becomes LF and lines are wrapped at 4KB.
     """
     stdin_fd = sys.stdin.buffer
     stdout_fd = sys.stdout.buffer
@@ -224,6 +347,7 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
 
         my_pid = os.getpid()
         my_pgid = os.getpgrp()
+        agent_pids = _load_agent_pids(tasks_dir)
 
         # Check if we recorded a command snippet for this task log during PreToolUse
         cmd_hint = ""
@@ -243,7 +367,7 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
                 continue
             h_ppid, h_pgid, h_args = info
             h_args_low = h_args.lower()
-            is_protected_agent = any(m in h_args_low for m in PROTECTED_AGENT_MARKERS)
+            is_protected_agent = (h_pid in agent_pids) or _looks_like_agent(h_args)
 
             if not is_protected_agent:
                 # Direct child process holding the log FD
@@ -272,17 +396,24 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
                     ch_low = ch_args.lower()
                     if any(ex in ch_low for ex in EXCLUDED_CHILD_MARKERS):
                         continue
-                    if any(ag in ch_low for ag in PROTECTED_AGENT_MARKERS):
+                    if ch_pid in agent_pids or _looks_like_agent(ch_args):
                         continue
                     # Exclude MCP servers that share process group with language_server and don't run a shell command
                     if ch_pgid == h_pgid and not re.search(r"\b(?:zsh|bash|sh|python3?|node|docker)\b", ch_low):
                         continue
                     candidate_children.append((ch_pid, ch_pgid, ch_args))
 
-                if cmd_hint and len(candidate_children) > 1:
-                    matched = [c for c in candidate_children if cmd_hint in c[2]]
-                    if matched:
-                        candidate_children = matched
+                # Chỉ kill khi xác định ĐƠN NHẤT được tiến trình chạy lệnh của log này.
+                # Mơ hồ (0 hoặc >1 ứng viên) ➔ KHÔNG kill gì (chỉ cắt log) để không giết nhầm dev server / MCP server / lệnh song song.
+                if cmd_hint:
+                    hint_tokens = [t for t in re.split(r"\s+", cmd_hint) if len(t) > 2][:4]
+                    matched = [
+                        c for c in candidate_children
+                        if cmd_hint in c[2] or (hint_tokens and all(t in c[2] for t in hint_tokens))
+                    ]
+                    candidate_children = matched if len(matched) == 1 else []
+                elif len(candidate_children) != 1:
+                    candidate_children = []
 
                 for ch_pid, ch_pgid, _ in candidate_children:
                     # Kill all descendants bottom-up first
@@ -410,16 +541,25 @@ def _resolve_tasks_dir(payload: dict) -> Path | None:
     return None
 
 
+def _has_oversized_log(tasks_dir: Path) -> bool:
+    try:
+        return any(lf.stat().st_size > MAX_TASK_LOG_BYTES for lf in tasks_dir.glob("task-*.log"))
+    except Exception:
+        return False
+
+
 def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
     tasks_dir = _resolve_tasks_dir(payload)
     if not tasks_dir:
         return
-    _enforce_task_log_cap(tasks_dir)
-    if event != "PreToolUse":
+    # Hook path chỉ stat() — lsof/ps/kill chạy trong watcher tách rời để không vượt timeout 5s của hook
+    oversized = tasks_dir.is_dir() and _has_oversized_log(tasks_dir)
+    if event != "PreToolUse" and not oversized:
         return
 
     try:
         tasks_dir.mkdir(parents=True, exist_ok=True)
+        _record_agent_pids(tasks_dir)
         step_idx = payload.get("stepIdx")
         if step_idx is not None and cmd:
             cmd_map_file = tasks_dir / ".orca-task-cmds.json"
@@ -432,8 +572,9 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
             if len(cmap) > 40:
                 cmap = dict(list(cmap.items())[-20:])
             first_line_cmd = cmd.strip().splitlines()[0][:80] if cmd.strip() else ""
-            cmap[f"task-{step_idx}.log"] = first_line_cmd
-            cmap[f"task-{int(step_idx) + 1}.log"] = first_line_cmd
+            if str(step_idx).isdigit():
+                cmap[f"task-{step_idx}.log"] = first_line_cmd
+                cmap[f"task-{int(step_idx) + 1}.log"] = first_line_cmd
             cmd_map_file.write_text(json.dumps(cmap), encoding="utf-8")
 
         lock_file = tasks_dir / ".orca-watcher.pid"
@@ -478,8 +619,10 @@ def _read_json_stdin_nonblocking() -> dict:
                 break
             timeout = 0.2
             text += decoder.decode(chunk)
+            if len(text) > 8 * 1024 * 1024:
+                break  # payload bất thường (>8MB) — fail-open
             val = text.lstrip()
-            if not val:
+            if not val or not val.rstrip().endswith("}"):
                 continue
             try:
                 obj, _ = json.JSONDecoder().raw_decode(val)
@@ -526,9 +669,7 @@ def main() -> None:
             return
 
         # Guard 1: Unescaped backticks inside double-quoted inline scripts (`python3 -c "...`key`..."`)
-        if _has_unescaped_backtick_in_double_quotes(cmd) and re.search(
-            r"\b(?:python3?|node|ruby|perl|bash|zsh|sh)(?:\s+-[a-zA-Z0-9]+)*\s+-[ce]\b", cmd
-        ):
+        if _inline_script_backtick_risk(cmd[:200000]):
             reason = (
                 "[ORCA COMMAND GUARD] Blocked unescaped backtick (`...`) inside double-quoted inline script (\"...\"). "
                 "In zsh/bash, unescaped backticks inside double quotes are executed as shell command substitution BEFORE Python/Node runs "
@@ -542,7 +683,7 @@ def main() -> None:
         # Guard 2: Unbounded raw binary dump into stdout or subprocess.check_output
         if (
             re.search(r"check_output\([^)]*['\"]cat['\"]\s*,\s*['\"]/(?:app|usr|bin|sbin|opt)/", cmd)
-            or re.search(r"docker\s+exec\s+[^\n|>;]+?\bcat\s+/(?:app|usr|bin|sbin)/[^\s|>;]+\s*$", cmd)
+            or re.search(r"docker\s+exec\s+[^\n|>;]+?\bcat\s+/(?:app|bin|sbin|usr/bin|usr/sbin|usr/local/bin)/[^\s|>;]+\s*$", cmd)
         ):
             reason = (
                 "[ORCA COMMAND GUARD] Blocked unbounded raw binary dump (`cat` on compiled container binary into stdout/memory). "
@@ -560,6 +701,7 @@ def main() -> None:
             and re.search(r"\bpython3?(?:\s+-[a-zA-Z0-9]+)*\s+-c\b", cmd)
             and "range(" not in cmd
             and "len(" not in cmd.split("while True:", 1)[1]
+            and not re.search(r"\bbreak\b", cmd.split("while True:", 1)[1])
         ):
             reason = (
                 "[ORCA COMMAND GUARD] Blocked unbounded 'while True:' loop with '.find()' in inline Python script. "

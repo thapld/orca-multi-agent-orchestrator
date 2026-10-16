@@ -73,7 +73,9 @@ try:
     if d.get('ok') is False:
         sys.exit(1)
     res = d.get('result', d)
-    name = res.get('name') or (res.get('worktree', {}).get('name') if isinstance(res.get('worktree'), dict) else '')
+    wt = res.get('worktree') if isinstance(res.get('worktree'), dict) else res
+    # Orca 'worktree create --json' trả về result.worktree {displayName, path, id, ...} (không có trường 'name')
+    name = wt.get('displayName') or wt.get('name') or wt.get('path') or wt.get('id') or ''
     print(name or '')
 except Exception:
     sys.exit(1)

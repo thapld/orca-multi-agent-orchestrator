@@ -43,7 +43,7 @@ elif command -v orca >/dev/null 2>&1; then
 fi
 
 # Đăng ký Orca Command & Stdout Flood Guard Hook (chặn bẫy backtick trong nháy kép, chặn cat binary và giới hạn log >16MB)
-python3 - "$INSTALL_DIR/orca-command-guard" << 'PY' >/dev/null 2>&1 || true
+if python3 - "$INSTALL_DIR/orca-command-guard" << 'PY' >/dev/null 2>&1
 import json, os, sys
 from pathlib import Path
 
@@ -55,7 +55,12 @@ if hooks_path.exists():
     try:
         data = json.loads(hooks_path.read_text(encoding="utf-8"))
     except Exception:
-        data = {}
+        # KHÔNG ghi đè file hỏng (sẽ xóa mất hook khác của người dùng) — báo lỗi và bỏ qua đăng ký
+        sys.stderr.write(f"hooks.json không phải JSON hợp lệ: {hooks_path} — bỏ qua đăng ký guard, hãy sửa file rồi chạy lại install.sh\n")
+        sys.exit(3)
+    if not isinstance(data, dict):
+        sys.stderr.write(f"hooks.json không phải JSON object: {hooks_path} — bỏ qua đăng ký guard\n")
+        sys.exit(3)
 data["orca-command-guard"] = {
     "PreToolUse": [
         {
@@ -82,9 +87,15 @@ data["orca-command-guard"] = {
         }
     ]
 }
-hooks_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+tmp_path = hooks_path.with_suffix(".json.orca-tmp")
+tmp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+os.replace(tmp_path, hooks_path)
 PY
-echo "  🛡️  Đã kích hoạt Orca Command & Stdout Flood Guard Hook (PreToolUse + 16MB Log Circuit-Breaker)."
+then
+  echo "  🛡️  Đã kích hoạt Orca Command & Stdout Flood Guard Hook (PreToolUse + 16MB Log Circuit-Breaker)."
+else
+  echo "  ⚠️  Chưa đăng ký Orca Command Guard: ~/.gemini/config/hooks.json không hợp lệ (đã giữ nguyên file). Sửa file rồi chạy lại ./install.sh."
+fi
 
 echo ""
 echo "🎉 Cài đặt hoàn tất! Hãy đảm bảo '$INSTALL_DIR' có trong PATH của bạn:"

@@ -87,8 +87,39 @@ ROLE_LABELS = {
 
 KNOWN_AGENTS = [
     "kimi", "claude", "codex", "cursor", "antigravity", 
-    "opencode", "aider", "goose", "copilot", "gemini", "muse"
+    "opencode", "aider", "goose", "copilot", "gemini", "muse", "codebuddy", "omp"
 ]
+VALID_EFFORTS = {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+ORCA_DIRECTIVE_MARKER = "Orca Multi-Agent Orchestration Directive"
+
+
+def _is_orca_discovery_link(p: Path) -> bool:
+    """True chỉ khi p là symlink do Orca tạo (trỏ tới .agents/GEMINI.md) — không đụng symlink riêng của user."""
+    try:
+        if not p.is_symlink():
+            return False
+        tgt = os.readlink(p)
+        return tgt == ".agents/GEMINI.md" or Path(tgt).as_posix().endswith("/.agents/GEMINI.md")
+    except OSError:
+        return False
+
+
+def _ensure_critic_defaults(config: dict) -> dict:
+    """Bổ sung criticSpecialist (trong bộ nhớ) cho config cũ — dùng chung cho status/get/sync."""
+    if not isinstance(config, dict):
+        return config
+    roles = config.setdefault("roles", {})
+    if "criticSpecialist" not in roles:
+        coord = config.get("coordinator") or {}
+        sec_cfg = roles.get("security") or {}
+        roles["criticSpecialist"] = {
+            "enabled": True,
+            "agent": sec_cfg.get("agent") or coord.get("agent") or "antigravity",
+            "model": sec_cfg.get("model") or coord.get("model") or "gemini-4-argon-high",
+            "effort": sec_cfg.get("effort") or "high",
+            "utilities": ["git-worktrees", "diff-viewer", "orca-skills-registry"],
+        }
+    return config
 
 REA_REPO_URL = "https://github.com/morluto/rea.git"
 REA_CLIENT_MAP = {
@@ -1237,7 +1268,7 @@ def cmd_models(args: list):
         # Dạng TSV gọn nhẹ cho shell script (orca-project-init):
         # Dòng 1: META\t<source_label>\t<rec_idx>
         # Các dòng sau: MODEL\t<id>\t<label>\t<bakedEffort>\t<efforts_csv>
-        print(f"META\t{source_label}\t{rec_idx}")
+        print(f"META\t{source_label}\t{rec_idx if models else 0}")
         for m in models:
             eff_csv = ",".join(m.get("efforts") or [])
             print(f"MODEL\t{m['id']}\t{m['label']}\t{m.get('bakedEffort', '')}\t{eff_csv}")
@@ -1475,22 +1506,14 @@ def cmd_status(root: Path, config: dict):
     print(f"{'VAI TRÒ (ROLE)':<24} | {'AGENT':<12} | {'MODEL':<26} | {'EFFORT':<8} | {'SONG SONG'}")
     print("-" * 89)
 
-    coord = config.get("coordinator", {})
-    c_agent = coord.get("agent", "claude")
+    coord = config.get("coordinator") or {}
+    c_agent = coord.get("agent") or "claude"
     c_model = coord.get("model") or "(default)"
     c_effort = coord.get("effort") or "-"
     print(f"{'1. Lead Coordinator':<24} | {c_agent:<12} | {c_model:<26} | {c_effort:<8} | 1")
 
+    _ensure_critic_defaults(config)
     roles = config.get("roles", {})
-    if "criticSpecialist" not in roles:
-        sec_cfg = roles.get("security", {})
-        roles["criticSpecialist"] = {
-            "enabled": True,
-            "agent": sec_cfg.get("agent") or coord.get("agent") or "antigravity",
-            "model": sec_cfg.get("model") or coord.get("model") or "gemini-4-argon-high",
-            "effort": sec_cfg.get("effort") or "high",
-            "utilities": ["git-worktrees", "diff-viewer", "orca-skills-registry"],
-        }
     role_order = [
         ("developer", "2. Full-Stack Devs"),
         ("qa", "3. QA & Testers"),
@@ -1511,7 +1534,7 @@ def cmd_status(root: Path, config: dict):
         if not enabled:
             print(f"{label:<24} | {'[ĐÃ TẮT]':<12} | {'-':<26} | {'-':<8} | -")
             continue
-        agent = data.get("agent", "kimi")
+        agent = data.get("agent") or "kimi"
         model = data.get("model") or "(default)"
         effort = data.get("effort") or "-"
         conc = str(data.get("concurrency", "On-demand"))
@@ -1544,6 +1567,8 @@ def cmd_set(root: Path, config: dict, args: list):
     new_effort = None
     new_concurrency = None
     toggle_enable = None
+    sync_only = False
+    force_flag = any(a in ("--force", "-f") for a in args[1:])
 
     idx = 1
     while idx < len(args):
@@ -1558,7 +1583,13 @@ def cmd_set(root: Path, config: dict, args: list):
             new_effort = args[idx + 1]
             idx += 2
         elif opt == "--concurrency" and idx + 1 < len(args):
-            new_concurrency = int(args[idx + 1])
+            try:
+                new_concurrency = int(args[idx + 1])
+            except ValueError:
+                new_concurrency = -1
+            if new_concurrency < 1:
+                print(f"❌ --concurrency phải là số nguyên >= 1 (nhận được: '{args[idx + 1]}').", file=sys.stderr)
+                sys.exit(1)
             idx += 2
         elif opt == "--enable":
             toggle_enable = True
@@ -1573,20 +1604,36 @@ def cmd_set(root: Path, config: dict, args: list):
             new_effort = ""
             idx += 1
         elif opt in ("--sync", "-y", "--yes"):
-            sync_gemini_directive(root, config)
-            print("📁 Đã đồng bộ lại '.agents/GEMINI.md' từ 'orca-team.json'.")
-            return
+            # Không return sớm: áp dụng các cờ đã parse rồi mới đồng bộ (trước đây cờ đứng trước --sync bị bỏ qua)
+            sync_only = True
+            idx += 1
+        elif opt in ("--force", "-f"):
+            idx += 1
         else:
             print(f"⚠️ Cảnh báo: Tùy chọn không nhận diện: {opt}", file=sys.stderr)
             idx += 1
+
+    if new_agent is not None and new_agent not in KNOWN_AGENTS and not force_flag:
+        print(f"❌ Agent không hợp lệ: '{new_agent}'. Hợp lệ: {', '.join(KNOWN_AGENTS)} (dùng --force để bỏ qua kiểm tra).", file=sys.stderr)
+        sys.exit(1)
+    if new_effort and new_effort.lower() not in VALID_EFFORTS and not force_flag:
+        print(f"❌ Effort không hợp lệ: '{new_effort}'. Hợp lệ: {', '.join(sorted(VALID_EFFORTS))}.", file=sys.stderr)
+        sys.exit(1)
+    if new_effort:
+        new_effort = new_effort.lower()
+
+    if sync_only and new_agent is None and new_model is None and new_effort is None and new_concurrency is None and toggle_enable is None:
+        sync_gemini_directive(root, config)
+        print("📁 Đã đồng bộ lại '.agents/GEMINI.md' từ 'orca-team.json'.")
+        return
 
     # Interactive prompt if no flags provided
     if new_agent is None and new_model is None and new_effort is None and new_concurrency is None and toggle_enable is None:
         role_label = ROLE_LABELS.get(role_key, role_key)
         print(f"\n⚙️  Cấu hình tương tác cho vai trò: {role_label}")
-        current = config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key, {})
+        current = (config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key)) or {}
         raw_curr_agent = current.get("agent")
-        curr_agent = raw_curr_agent if (raw_curr_agent and raw_curr_agent != "none") else (config.get("coordinator", {}).get("agent") or "antigravity")
+        curr_agent = raw_curr_agent if (raw_curr_agent and raw_curr_agent != "none") else ((config.get("coordinator") or {}).get("agent") or "antigravity")
         curr_model = current.get("model") or "mặc định"
         curr_effort = current.get("effort") or "-"
         if current.get("enabled") is False:
@@ -1595,14 +1642,15 @@ def cmd_set(root: Path, config: dict, args: list):
         else:
             print(f"   Hiện tại: Agent={curr_agent} | Model={curr_model} | Effort={curr_effort}")
 
-        agent_options = [ag + (" (hiện tại)" if ag == curr_agent else "") for ag in KNOWN_AGENTS]
-        def_agent_idx = KNOWN_AGENTS.index(curr_agent) if curr_agent in KNOWN_AGENTS else 0
+        agent_list = list(KNOWN_AGENTS) if curr_agent in KNOWN_AGENTS else [curr_agent] + list(KNOWN_AGENTS)
+        agent_options = [ag + (" (hiện tại)" if ag == curr_agent else "") for ag in agent_list]
+        def_agent_idx = agent_list.index(curr_agent)
         ag_i, _ = interactive_select(
             f"👉 Chọn Agent cho vai trò [{role_label}]:",
             agent_options,
             default_idx=def_agent_idx
         )
-        target_agent = KNOWN_AGENTS[ag_i]
+        target_agent = agent_list[ag_i]
         if target_agent != raw_curr_agent:
             new_agent = target_agent
 
@@ -1639,7 +1687,11 @@ def cmd_set(root: Path, config: dict, args: list):
                 if chosen.get("bakedEffort"):
                     new_effort = chosen["bakedEffort"]
             elif m_i == len(models):  # Nhập tùy chỉnh
-                c_in = input("   Nhập model ID tùy chỉnh: ").strip()
+                try:
+                    c_in = input("   Nhập model ID tùy chỉnh: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n🚫 Không có input (stdin đã đóng) — hủy, không lưu thay đổi.", file=sys.stderr)
+                    sys.exit(1)
                 if c_in:
                     new_model = c_in
             elif m_i == len(models) + 1:  # Giữ nguyên
@@ -1647,7 +1699,11 @@ def cmd_set(root: Path, config: dict, args: list):
             else:  # Bỏ chọn model
                 new_model = ""
         else:
-            model_input = input(f"   Nhập model ID mới (Enter = giữ nguyên, 'none' = bỏ chọn model): ").strip()
+            try:
+                model_input = input(f"   Nhập model ID mới (Enter = giữ nguyên, 'none' = bỏ chọn model): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n🚫 Không có input (stdin đã đóng) — hủy, không lưu thay đổi.", file=sys.stderr)
+                sys.exit(1)
             if model_input.lower() == "none":
                 new_model = ""
             elif model_input:
@@ -1687,6 +1743,12 @@ def cmd_set(root: Path, config: dict, args: list):
         target = config.setdefault("roles", {}).setdefault(role_key, {})
 
     changes = []
+    if new_agent and new_agent == target.get("agent"):
+        new_agent = None
+    if new_model is not None and (None if new_model == "" else new_model) == target.get("model"):
+        new_model = None
+    if new_effort is not None and (None if new_effort == "" else new_effort) == target.get("effort"):
+        new_effort = None
     if new_agent:
         old_agent = target.get("agent")
         target["agent"] = new_agent
@@ -1710,7 +1772,7 @@ def cmd_set(root: Path, config: dict, args: list):
         target["effort"] = val
         changes.append(f"Effort: {old_eff} ➔ {val or '-'}")
 
-    if new_concurrency:
+    if new_concurrency is not None:
         old_c = target.get("concurrency")
         target["concurrency"] = new_concurrency
         changes.append(f"Concurrency: {old_c} ➔ {new_concurrency}")
@@ -1721,7 +1783,7 @@ def cmd_set(root: Path, config: dict, args: list):
         changes.append(f"Enabled: {old_en} ➔ {toggle_enable}")
         if toggle_enable and not new_agent and target.get("agent") in (None, "", "none"):
             fallback_role = config.get("roles", {}).get("security" if role_key in ("reSpecialist", "criticSpecialist") else "developer", {})
-            fb_agent = fallback_role.get("agent") or config.get("coordinator", {}).get("agent") or "antigravity"
+            fb_agent = fallback_role.get("agent") or (config.get("coordinator") or {}).get("agent") or "antigravity"
             if fb_agent == "none":
                 fb_agent = "antigravity"
             target["agent"] = fb_agent
@@ -1758,17 +1820,19 @@ def cmd_set(root: Path, config: dict, args: list):
         agents_md = root / "AGENTS.md"
         c_low = new_agent.lower()
         if c_low == "claude":
-            if not claude_md.exists() and gemini_md.exists():
+            if not os.path.lexists(claude_md) and gemini_md.exists():
                 try: os.symlink(".agents/GEMINI.md", claude_md)
-                except: pass
-            if agents_md.is_symlink(): agents_md.unlink(missing_ok=True)
-            changes.append("Leader Discovery Link: Kích hoạt CLAUDE.md")
+                except OSError: pass
+            if _is_orca_discovery_link(agents_md): agents_md.unlink(missing_ok=True)
+            changes.append("Leader Discovery Link: Kích hoạt CLAUDE.md" if _is_orca_discovery_link(claude_md)
+                           else "⚠️ CLAUDE.md là file/symlink riêng của bạn — giữ nguyên, Leader Claude sẽ đọc file đó thay vì .agents/GEMINI.md")
         elif c_low in ["codex", "cursor", "opencode"]:
-            if not agents_md.exists() and gemini_md.exists():
+            if not os.path.lexists(agents_md) and gemini_md.exists():
                 try: os.symlink(".agents/GEMINI.md", agents_md)
-                except: pass
-            if claude_md.is_symlink(): claude_md.unlink(missing_ok=True)
-            changes.append(f"Leader Discovery Link: Kích hoạt AGENTS.md ({new_agent})")
+                except OSError: pass
+            if _is_orca_discovery_link(claude_md): claude_md.unlink(missing_ok=True)
+            changes.append(f"Leader Discovery Link: Kích hoạt AGENTS.md ({new_agent})" if _is_orca_discovery_link(agents_md)
+                           else "⚠️ AGENTS.md là file/symlink riêng của bạn — giữ nguyên")
         elif c_low in ["antigravity", "gemini"]:
             if not root_gemini_md.exists() and gemini_md.exists():
                 try: os.symlink(".agents/GEMINI.md", root_gemini_md)
@@ -1794,21 +1858,34 @@ def cmd_link(root: Path, args: list):
 
     mode = args[0] if args else "status"
     if mode in ["all", "--all"]:
-        if not root_gemini_md.exists() and gemini_md.exists():
-            try: os.symlink(".agents/GEMINI.md", root_gemini_md)
-            except: pass
-        if not claude_md.exists() and gemini_md.exists():
-            try: os.symlink(".agents/GEMINI.md", claude_md)
-            except: pass
-        if not agents_md.exists() and gemini_md.exists():
-            try: os.symlink(".agents/GEMINI.md", agents_md)
-            except: pass
-        print("🔗 Đã kích hoạt các symlink GEMINI.md, CLAUDE.md và AGENTS.md (sẵn sàng mở bất kỳ AI CLI nào).\n")
+        if not gemini_md.exists():
+            print("❌ Không có '.agents/GEMINI.md' để liên kết.", file=sys.stderr)
+            sys.exit(1)
+        problems = []
+        for lp in (root_gemini_md, claude_md, agents_md):
+            if _is_orca_discovery_link(lp) and lp.exists():
+                continue
+            if os.path.lexists(lp):
+                if lp.is_symlink() and not lp.exists() and _is_orca_discovery_link(lp):
+                    lp.unlink(missing_ok=True)
+                else:
+                    problems.append(f"{lp.name} đã tồn tại (file/symlink riêng của bạn) — giữ nguyên, không ghi đè")
+                    continue
+            try:
+                os.symlink(".agents/GEMINI.md", lp)
+            except OSError as e:
+                problems.append(f"{lp.name}: {e}")
+        print("🔗 Đã kích hoạt các symlink GEMINI.md, CLAUDE.md và AGENTS.md (sẵn sàng mở bất kỳ AI CLI nào).")
+        for pr in problems:
+            print(f"   ⚠️  {pr}")
+        print("")
     elif mode in ["clean", "--clean"]:
-        if root_gemini_md.is_symlink(): root_gemini_md.unlink(missing_ok=True)
-        if claude_md.is_symlink(): claude_md.unlink(missing_ok=True)
-        if agents_md.is_symlink(): agents_md.unlink(missing_ok=True)
-        print("🧹 Đã dọn dẹp các symlink ở root (chỉ giữ .agents/GEMINI.md).\n")
+        removed = []
+        for lp in (root_gemini_md, claude_md, agents_md):
+            if _is_orca_discovery_link(lp):
+                lp.unlink(missing_ok=True)
+                removed.append(lp.name)
+        print(f"🧹 Đã dọn dẹp symlink Orca ở root: {', '.join(removed) or '(không có)'} (chỉ giữ .agents/GEMINI.md; symlink riêng của bạn được giữ nguyên).\n")
     else:
         print("\n🔍 Trạng thái Discovery Links:")
         print(f"   • .agents/GEMINI.md: {'✅ Tồn tại' if gemini_md.exists() else '❌ Không có'}")
@@ -1824,9 +1901,15 @@ def cmd_uninstall_project(root: Path, args: list):
     for a in (args or []):
         if not a.startswith("-"):
             cand = Path(a).expanduser().resolve()
-            if cand.exists() and cand.is_dir():
-                root = cand
-                break
+            if not cand.is_dir():
+                print(f"❌ Đường dẫn không tồn tại hoặc không phải thư mục: '{a}'. Hủy (không gỡ project hiện tại).", file=sys.stderr)
+                sys.exit(1)
+            root = cand
+            break
+
+    if not (root / "orca-team.json").is_file():
+        print(f"❌ '{root}' không phải project Orca Orchestrator (không có orca-team.json). Hủy để tránh xóa nhầm file của bạn.", file=sys.stderr)
+        sys.exit(1)
 
     # Bảo vệ: Không bao giờ tự gỡ bỏ chính kho mã nguồn của framework
     if (root / "templates").is_dir() and (root / "package.json").is_file():
@@ -1858,7 +1941,7 @@ def cmd_uninstall_project(root: Path, args: list):
     # 1. Xóa tất cả discovery symlinks ở root
     for f in ["GEMINI.md", "CLAUDE.md", "AGENTS.md"]:
         target = root / f
-        if target.is_symlink():
+        if _is_orca_discovery_link(target):
             target.unlink(missing_ok=True)
             deleted.append(f"{f} (symlink)")
 
@@ -1872,9 +1955,16 @@ def cmd_uninstall_project(root: Path, args: list):
     agents_dir = root / ".agents"
     if agents_dir.exists() and agents_dir.is_dir():
         gemini_md = agents_dir / "GEMINI.md"
-        if gemini_md.exists() or gemini_md.is_symlink():
-            gemini_md.unlink(missing_ok=True)
-            deleted.append(".agents/GEMINI.md")
+        if gemini_md.is_file():
+            try:
+                is_ours = ORCA_DIRECTIVE_MARKER in gemini_md.read_text(encoding="utf-8", errors="ignore")[:2000]
+            except Exception:
+                is_ours = False
+            if is_ours:
+                gemini_md.unlink(missing_ok=True)
+                deleted.append(".agents/GEMINI.md")
+            else:
+                print("   ⚠️  Giữ nguyên '.agents/GEMINI.md' (không phải file do Orca Orchestrator sinh ra).")
         try:
             if not any(agents_dir.iterdir()):
                 agents_dir.rmdir()
@@ -1882,16 +1972,10 @@ def cmd_uninstall_project(root: Path, args: list):
         except Exception:
             pass
 
-    # 4. Xóa các file/thư mục runtime Orca nếu có
+    # 4. KHÔNG xóa .orca/ hay .orca-cache/: đây là dữ liệu runtime của Orca ADE app (không do orchestrator tạo ra)
     for r_item in [".orca", ".orca-cache"]:
-        rp = root / r_item
-        if rp.exists():
-            try:
-                if rp.is_dir(): shutil.rmtree(rp)
-                else: rp.unlink(missing_ok=True)
-                deleted.append(f"{r_item}/")
-            except Exception:
-                pass
+        if (root / r_item).exists():
+            print(f"   ℹ️  Giữ nguyên '{r_item}/' (dữ liệu runtime của Orca ADE). Xóa thủ công nếu chắc chắn không cần.")
 
     # 5. Dọn dẹp block trong .gitignore nếu có
     gi = root / ".gitignore"
@@ -1930,8 +2014,10 @@ def cmd_get(root: Path, config: dict, args: list):
 
     role_raw = args[0].lower()
     role_key = ROLE_ALIASES.get(role_raw, role_raw)
+    _ensure_critic_defaults(config)
     target = config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key, {})
     if not target:
+        print(f"❌ Không có cấu hình cho role '{args[0]}'.", file=sys.stderr)
         sys.exit(1)
 
     field = "agent"
@@ -1946,15 +2032,60 @@ def cmd_get(root: Path, config: dict, args: list):
         print("none")
     else:
         val = target.get(field)
-        if val is not None:
-            print(val)
-        else:
+        if val is None:
             sys.exit(1)
+        print(json.dumps(val, ensure_ascii=False) if isinstance(val, (list, dict)) else val)
+
+# ---------------------------------------------------------------------------
+# Watchdog auto-unblock safety (allowlist + destructive-token denylist, fail-closed)
+# ---------------------------------------------------------------------------
+# A 'y' is only auto-sent when the LAST non-empty screen line is a plain y/n prompt.
+_WATCHDOG_SAFE_PROMPT_RES = [
+    re.compile(r"[\[(]\s*y\s*/\s*n\s*[\])]\s*[:?]?\s*$", re.I),   # ... [y/n]  (y/n)  [Y/n]  [y/N]
+    re.compile(r"\(\s*y(es)?\s*/\s*n(o)?\s*\)\s*[:?]?\s*$", re.I),  # ... (yes/no) answered with 'y'
+]
+# Any of these anywhere in the visible tail blocks auto-approval.
+_WATCHDOG_DESTRUCTIVE_RES = [
+    re.compile(r"\brm\b[^\n;&|]*\s(-[a-z]*r[a-z]*|--recursive)\b", re.I),          # rm -r/-R/-rf/-fr/-f -r ...
+    re.compile(r"(^|\s)-delete\b", re.I),                                           # find ... -delete
+    re.compile(r"(^|[\s;&|(`])dd\s", re.I),
+    re.compile(r"\bmkfs(\.\w+)?\b", re.I),
+    re.compile(r"\bshred\b", re.I),
+    re.compile(r"\btruncate\b", re.I),
+    re.compile(r"\bgit\b[^\n]*\bpush\b[^\n]*(\s-[a-z]*f[a-z]*\b|--force|\s\+\S)", re.I),
+    re.compile(r"\bgit\b[^\n]*\breset\b[^\n]*--hard", re.I),
+    re.compile(r"\bgit\b[^\n]*\bclean\b[^\n]*(\s-[a-z]*f|--force)", re.I),
+    re.compile(r"\b(curl|wget)\b[^\n]*\|\s*(sudo\s+)?(ba|z|da|k|fi)?sh\b", re.I),
+    re.compile(r"\bch(mod|own|grp)\b[^\n]*\s(-[a-z]*r[a-z]*|--recursive)\b", re.I),
+    re.compile(r">\s*/dev/(sd|hd|nvme|disk|xvd|vd)", re.I),
+    re.compile(r"\bdrop\s+(table|database|schema)\b", re.I),
+    re.compile(r"\bdelete\s+from\b", re.I),
+    re.compile(r"\bkubectl\b[^\n]*\bdelete\b", re.I),
+    re.compile(r"\bdocker\b[^\n]*\b(rm|rmi|system\s+prune|volume\s+(rm|prune)|image\s+prune|container\s+prune)\b", re.I),
+    re.compile(r"\bhelm\b[^\n]*\b(uninstall|delete)\b", re.I),
+    re.compile(r"\bterraform\b[^\n]*\bdestroy\b", re.I),
+    re.compile(r"\bsudo\b", re.I),
+]
+
+def _watchdog_prompt_is_safe(screen_text: str) -> tuple:
+    """Fail-closed: (True, '') only if the last line is an allowlisted y/n prompt
+    and the visible tail contains no destructive token."""
+    lines = [l.rstrip() for l in str(screen_text or "").splitlines() if l.strip()]
+    if not lines:
+        return False, "empty screen"
+    if not any(rx.search(lines[-1]) for rx in _WATCHDOG_SAFE_PROMPT_RES):
+        return False, "not a recognised y/n prompt"
+    tail = "\n".join(lines[-12:])
+    for rx in _WATCHDOG_DESTRUCTIVE_RES:
+        m = rx.search(tail)
+        if m:
+            return False, f"destructive token: {m.group(0).strip()[:40]}"
+    return True, ""
 
 def cmd_watchdog(root: Path, args: list = None):
     import subprocess
     args = args or []
-    auto_unblock = any(a in args for a in ["--unblock", "--fix", "-y"])
+    auto_unblock = any(a in args for a in ["--unblock", "--fix"])
 
     print("\n🩺 [ORCA AGENT WATCHDOG] Đang quét trạng thái toàn bộ worker...")
     if auto_unblock:
@@ -2033,6 +2164,7 @@ def cmd_watchdog(root: Path, args: list = None):
                             if auto_unblock and term != "-":
                                 # An toàn (Fail-Closed): Phân tích màn hình terminal, chỉ duyệt khi an toàn
                                 is_safe = False
+                                unsafe_reason = "terminal read failed"
                                 try:
                                     t_read = subprocess.run([orca_bin, "terminal", "read", "--terminal", term, "--limit", "15", "--screen", "--json"], capture_output=True, text=True, timeout=5)
                                     if t_read.returncode == 0:
@@ -2041,22 +2173,10 @@ def cmd_watchdog(root: Path, args: list = None):
                                         term_obj = t_res.get("terminal", {}) if isinstance(t_res, dict) else {}
                                         tail_lines = term_obj.get("tail") if isinstance(term_obj, dict) else None
                                         if isinstance(tail_lines, list):
-                                            non_empty = [str(line) for line in tail_lines if str(line).strip()]
-                                            out_low = "\n".join(non_empty[-12:]).lower()
+                                            screen_txt = "\n".join(str(line) for line in tail_lines)
                                         else:
-                                            out_low = str(t_res.get("content") or t_res.get("screen") or t_read.stdout).lower()
-
-                                        deny_list = [
-                                            "rm -r", "rm -fr", "rm -rf", "git reset --hard", "git clean", 
-                                            "push -f", "push --force", "drop database", "drop table", 
-                                            "truncate", "delete from", "kubectl delete", "terraform destroy", 
-                                            "chmod -r", "| sh", "| bash", "sudo"
-                                        ]
-                                        has_danger = any(danger in out_low for danger in deny_list)
-                                        has_confirm = any(c in out_low for c in ["[y/n]", "(y/n)", "[y/n", "[y/N]", "[Y/n]", "continue?"])
-                                        
-                                        if not has_danger and has_confirm:
-                                            is_safe = True
+                                            screen_txt = str(t_res.get("content") or t_res.get("screen") or "")
+                                        is_safe, unsafe_reason = _watchdog_prompt_is_safe(screen_txt)
                                 except Exception:
                                     is_safe = False
 
@@ -2068,7 +2188,7 @@ def cmd_watchdog(root: Path, args: list = None):
                                         note = "⚠️ KẸT CÂU HỎI (Mở khóa lỗi)"
                                         hung_count += 1
                                 else:
-                                    note = "⚠️ CẦN DUYỆT THỦ CÔNG (Lệnh nhạy cảm hoặc không phải [y/n])"
+                                    note = f"⚠️ CẦN DUYỆT THỦ CÔNG ({unsafe_reason})"
                                     hung_count += 1
                             else:
                                 note = "⚠️ ĐANG KẸT CÂU HỎI XÁC NHẬN [Y/N]"
@@ -2238,9 +2358,18 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
 def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict:
     try:
         raw_lines = tf_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        all_steps = [json.loads(ln) for ln in raw_lines if ln.strip()]
     except Exception:
         return {}
+    all_steps = []
+    for ln in raw_lines:
+        if not ln.strip():
+            continue
+        try:
+            obj = json.loads(ln)
+        except ValueError:
+            continue  # dòng đang ghi dở (worker đang chạy) hoặc hỏng — bỏ qua thay vì bỏ cả transcript
+        if isinstance(obj, dict):
+            all_steps.append(obj)
     if not all_steps:
         return {}
 
@@ -2427,15 +2556,40 @@ def _index_cli_transcripts() -> dict:
             else:
                 combined = first_line + "\n" + rest_text
                 if "orchestration" in combined and ("worker-start" in combined or "run-create" in combined or "task-create" in combined):
+                    # Xác định transcript thực sự TẠO run: một step có tool_call 'orchestration run-create'
+                    # và step ngay sau (kết quả tool) chứa run id. Transcript chỉ nhắc/dán lại run id (audit, observer) = điểm 1.
+                    creators = set()
+                    first_ts = ""
+                    try:
+                        prev_is_create = False
+                        with open(full_tf if full_tf.exists() else tf, "r", encoding="utf-8", errors="ignore") as sf:
+                            for sln in sf:
+                                try:
+                                    st = json.loads(sln)
+                                except ValueError:
+                                    continue
+                                if not isinstance(st, dict):
+                                    continue
+                                if not first_ts:
+                                    first_ts = str(st.get("created_at") or "")
+                                if prev_is_create:
+                                    creators.update(re.findall(r"run_[a-f0-9]{12}", str(st.get("content") or "")))
+                                prev_is_create = "orchestration run-create" in json.dumps(st.get("tool_calls") or [], ensure_ascii=False)
+                    except Exception:
+                        pass
+                    is_cli = 1 if "antigravity-cli" in str(tf) else 0
                     for rid_match in set(re.findall(r"run_[a-f0-9]{12}", combined)):
+                        score = 2 if rid_match in creators else 1
+                        cand = (tf, score, is_cli, first_ts or "9999")
                         prev = by_leader_run.get(rid_match)
-                        if not prev or ("antigravity-cli" in str(tf) and "antigravity-cli" not in str(prev)):
-                            by_leader_run[rid_match] = tf
+                        # Ưu tiên: creator > CLI > phiên bắt đầu SỚM nhất (observer/audit luôn bắt đầu sau coordinator)
+                        if not prev or (score, is_cli) > (prev[1], prev[2]) or ((score, is_cli) == (prev[1], prev[2]) and cand[3] < prev[3]):
+                            by_leader_run[rid_match] = cand
     return {
         "by_dispatch": by_dispatch,
         "by_task": by_task,
         "by_term": by_term,
-        "by_leader_run": by_leader_run,
+        "by_leader_run": {rid: v[0] for rid, v in by_leader_run.items()},
     }
 
 
@@ -2446,13 +2600,22 @@ def _collect_git_diff_stats(wt_path: str, wt_name: str) -> dict:
         return res
     import subprocess
     try:
-        head_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2).stdout.strip()
-        main_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "main"], capture_output=True, text=True, timeout=2).stdout.strip()
-        dev_sha = subprocess.run(["git", "-C", wt_path, "rev-parse", "dev-worker"], capture_output=True, text=True, timeout=2).stdout.strip()
+        def _git(*a, t=2):
+            r = subprocess.run(["git", "-C", wt_path, *a], capture_output=True, text=True, timeout=t)
+            return r.stdout.strip() if r.returncode == 0 else ""
+
+        head_sha = _git("rev-parse", "HEAD")
+        main_sha = _git("rev-parse", "--verify", "-q", "main") or _git("rev-parse", "--verify", "-q", "master")
+        dev_sha = _git("rev-parse", "--verify", "-q", "dev-worker")
         base_ref = None
         if head_sha and main_sha and head_sha != main_sha:
-            if wt_name == "dev-worker" or head_sha != dev_sha:
-                base_ref = dev_sha if (wt_name != "dev-worker" and dev_sha and dev_sha != head_sha) else main_sha
+            # Mặc định: so với điểm rẽ nhánh khỏi main (giống `git diff main...HEAD`), không phải two-dot
+            base_ref = _git("merge-base", "HEAD", main_sha) or main_sha
+            # QA/Sec/DevOps đã merge dev-worker: chỉ tính phần riêng của worker khi dev-worker là tổ tiên của HEAD
+            if wt_name != "dev-worker" and dev_sha and dev_sha != head_sha:
+                anc = subprocess.run(["git", "-C", wt_path, "merge-base", "--is-ancestor", dev_sha, "HEAD"], capture_output=True, timeout=2)
+                if anc.returncode == 0:
+                    base_ref = dev_sha
         if base_ref:
             c_cnt = subprocess.run(["git", "-C", wt_path, "rev-list", "--count", f"{base_ref}..HEAD"], capture_output=True, text=True, timeout=2).stdout.strip()
             if c_cnt.isdigit():
@@ -2472,6 +2635,15 @@ def _collect_git_diff_stats(wt_path: str, wt_name: str) -> dict:
     except Exception:
         pass
     return res
+
+
+def _safe_orca_run(cmd, **kw):
+    """subprocess.run cho Orca CLI: timeout/lỗi spawn trả về returncode != 0 thay vì làm sập cả phần telemetry."""
+    import subprocess
+    try:
+        return subprocess.run(cmd, **kw)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=str(e))
 
 
 def cmd_monitor(root: Path, config: dict, args: list = None):
@@ -2548,12 +2720,22 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 )
                 if auto_fix:
                     try:
-                        path.unlink()
-                        os.symlink(".agents/GEMINI.md", path)
-                        actions_taken.append(f"Chuyển '{rel_name}' thành symlink trỏ về '.agents/GEMINI.md'.")
-                        status = "FIXED (Symlink)"
-                    except Exception as e:
-                        actions_taken.append(f"Lỗi khi chuyển '{rel_name}' thành symlink: {e}")
+                        same = path.read_bytes() == gemini_p.read_bytes()
+                    except Exception:
+                        same = False
+                    if same:
+                        try:
+                            path.unlink()
+                            os.symlink(".agents/GEMINI.md", path)
+                            actions_taken.append(f"Chuyển '{rel_name}' (nội dung trùng 100%) thành symlink trỏ về '.agents/GEMINI.md'.")
+                            status = "FIXED (Symlink)"
+                        except Exception as e:
+                            actions_taken.append(f"Lỗi khi chuyển '{rel_name}' thành symlink: {e}")
+                    else:
+                        actions_taken.append(
+                            f"KHÔNG tự sửa '{rel_name}': nội dung khác '.agents/GEMINI.md' (có thể là chỉ dẫn riêng của bạn). "
+                            f"Hãy tự gộp nội dung rồi xóa file để dùng symlink."
+                        )
 
         print(f"{rel_name:<26} | {type_str:<12} | {size_str:<12} | {tokens_str:<16} | {status}")
 
@@ -2668,7 +2850,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
     workers = []
 
     try:
-        r_res = subprocess.run([orca_bin, "orchestration", "run-list", "--json"], capture_output=True, text=True, timeout=5)
+        r_res = _safe_orca_run([orca_bin, "orchestration", "run-list", "--json"], capture_output=True, text=True, timeout=5)
         all_runs = []
         if r_res.returncode == 0:
             r_data = json.loads(r_res.stdout)
@@ -2694,8 +2876,12 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             rid = r.get("id")
             if not rid:
                 continue
-            w_chk = subprocess.run([orca_bin, "orchestration", "worker-list", "--run", rid, "--json"], capture_output=True, text=True, timeout=4)
-            t_chk = subprocess.run([orca_bin, "orchestration", "task-list", "--run", rid, "--json"], capture_output=True, text=True, timeout=4)
+            try:
+                w_chk = _safe_orca_run([orca_bin, "orchestration", "worker-list", "--run", rid, "--json"], capture_output=True, text=True, timeout=8)
+                t_chk = _safe_orca_run([orca_bin, "orchestration", "task-list", "--run", rid, "--json"], capture_output=True, text=True, timeout=8)
+            except subprocess.TimeoutExpired:
+                print(f"⚠️  Orca CLI phản hồi chậm (>8s) khi đọc run {rid} — bỏ qua run này.")
+                continue
             w_list_tmp = []
             t_list_tmp = []
             if w_chk.returncode == 0:
@@ -2705,10 +2891,12 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 to = json.loads(t_chk.stdout).get("result", {})
                 t_list_tmp = to.get("tasks", []) if isinstance(to, dict) else []
 
-            belongs_to_proj = bool(explicit_run_id) or (proj_slug in str(r.get("objective", "")).lower())
+            belongs_to_proj = bool(explicit_run_id) or bool(
+                re.search(rf"(?<![\w-]){re.escape(proj_slug)}(?![\w-])", str(r.get("objective", "")).lower())
+            )
             for w_item in w_list_tmp:
-                ws_str = str((w_item.get("resource") or {}).get("worktreeId") or "")
-                if proj_slug in ws_str.lower() or str(root).lower() in ws_str.lower():
+                ws_str = str((w_item.get("resource") or {}).get("worktreeId") or "").lower()
+                if str(root).lower() in ws_str or f"/{proj_slug}/" in ws_str or ws_str.endswith(f"/{proj_slug}"):
                     belongs_to_proj = True
                     break
 
@@ -2721,18 +2909,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 break
 
         if not selected_run and candidate_runs:
-            selected_run = candidate_runs[0]
-            rid = selected_run.get("id")
-            w_chk = subprocess.run([orca_bin, "orchestration", "worker-list", "--run", rid, "--json"], capture_output=True, text=True, timeout=4)
-            t_chk = subprocess.run([orca_bin, "orchestration", "task-list", "--run", rid, "--json"], capture_output=True, text=True, timeout=4)
-            if w_chk.returncode == 0:
-                wo = json.loads(w_chk.stdout).get("result", {})
-                workers = wo.get("workers", []) if isinstance(wo, dict) else []
-            if t_chk.returncode == 0:
-                to = json.loads(t_chk.stdout).get("result", {})
-                for t in (to.get("tasks", []) if isinstance(to, dict) else []):
-                    if t.get("id"):
-                        run_tasks[t.get("id")] = t
+            # Không lấy run mới nhất của project KHÁC (trước đây gây hiển thị sai số liệu và --fix đụng vào run của project khác)
+            print(f"ℹ️  Không tìm thấy Run nào thuộc project '{root.name}' trong {len(scan_runs)} run gần nhất (truyền --run <run_id> để chỉ định).")
 
         if selected_run:
             active_run_id = selected_run.get("id")
@@ -2749,7 +2927,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 print("\n📊 4.1 BẢNG ĐO LƯỜNG TỐC ĐỘ AGENT CLI & TIÊU THỤ TOKEN TRÊN TỪNG WORKER:")
                 hdr = (
                     f"   {'DISPATCH / ROLE':<27} | {'MODEL THỰC TẾ':<26} | {'WALL / IDLE':<13} | "
-                    f"{'TURNS / TOOLS':<16} | {'LLM / TOOL TIME':<15} | {'SPEED (OUT | PREFILL)':<23} | "
+                    f"{'TURNS / TOOLS':<16} | {'LLM / TOOL TIME':<15} | {'OUT e2e | CTX tok/s':<23} | "
                     f"{'TOKENS (OUT / PEAK / CACHE)':<27} | {'STATE'}"
                 )
                 print(hdr)
@@ -2766,7 +2944,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 if not did_str or did_str == "-":
                     return None
                 try:
-                    r = subprocess.run([orca_bin, "orchestration", "worker-show", "--dispatch", did_str, "--json"], capture_output=True, text=True, timeout=4)
+                    r = _safe_orca_run([orca_bin, "orchestration", "worker-show", "--dispatch", did_str, "--json"], capture_output=True, text=True, timeout=4)
                     if r.returncode == 0:
                         return json.loads(r.stdout).get("result", {})
                 except Exception:
@@ -2952,7 +3130,11 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                                     guard_mod = SourceFileLoader("orca_guard", guard_bin_fix).load_module()
                                     guard_mod._enforce_task_log_cap(bl_path.parent)
                                 else:
-                                    bl_path.write_bytes(b"[TRUNCATED BY ORCA-MONITOR AUTO-FIX: runaway stdout log >10MB]\n")
+                                    with open(bl_path, "rb") as bf:
+                                        head_b = bf.read(256 * 1024)
+                                        bf.seek(max(0, bl_sz - 128 * 1024))
+                                        tail_b = bf.read()
+                                    bl_path.write_bytes(head_b + f"\n[... ORCA-MONITOR: đã lược bỏ {bl_sz - len(head_b) - len(tail_b):,} bytes giữa log ...]\n".encode() + tail_b)
                                 actions_taken.append(f"Đã cắt gọn file log phình to bất thường {bl_path.name} ({mb_sz:.1f} MB) của {wt_name} (giữ lại 256KB đầu + 128KB cuối).")
                             except Exception:
                                 pass
@@ -2995,7 +3177,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             )
             if active_run_id and all_workers_settled_released:
                 try:
-                    g_res = subprocess.run([orca_bin, "orchestration", "gate-list", "--run", active_run_id, "--json"], capture_output=True, text=True, timeout=4)
+                    g_res = _safe_orca_run([orca_bin, "orchestration", "gate-list", "--run", active_run_id, "--json"], capture_output=True, text=True, timeout=4)
                     pending_gates = []
                     if g_res.returncode == 0:
                         g_obj = json.loads(g_res.stdout).get("result", {})
@@ -3005,51 +3187,33 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         if isinstance(t, dict) and t.get("status") in ("blocked", "ready") and t.get("result")
                     ]
                     if pending_gates or stuck_tasks:
-                        if auto_fix:
-                            resolved_g = 0
+                        if pending_gates:
+                            # Gate là quyết định của con người (Human Gate) — monitor KHÔNG BAO GIỜ tự trả lời "yes"
+                            warning_issues.append(
+                                f"Run {active_run_id} còn {len(pending_gates)} Decision Gate 'pending' chờ bạn quyết định: "
+                                + ", ".join(str(g.get("id")) for g in pending_gates[:5])
+                                + " (trả lời bằng 'orca orchestration gate-resolve --id <GATE_ID> --resolution <...>')."
+                            )
+                        if auto_fix and stuck_tasks:
                             fixed_t = 0
-                            for g in pending_gates:
-                                gid = g.get("id")
-                                if gid:
-                                    gr = subprocess.run([orca_bin, "orchestration", "gate-resolve", "--id", gid, "--resolution", "yes", "--json"], capture_output=True, text=True, timeout=4)
-                                    if gr.returncode == 0:
-                                        resolved_g += 1
                             for t in stuck_tasks:
                                 tid = t.get("id")
                                 if tid:
-                                    tr = subprocess.run([orca_bin, "orchestration", "task-update", "--id", tid, "--status", "completed", "--json"], capture_output=True, text=True, timeout=4)
+                                    tr = _safe_orca_run([orca_bin, "orchestration", "task-update", "--id", tid, "--status", "completed", "--json"], capture_output=True, text=True, timeout=4)
                                     if tr.returncode == 0:
                                         fixed_t += 1
-                            if (len(pending_gates) > resolved_g) or (len(stuck_tasks) > fixed_t):
-                                try:
-                                    import sqlite3
-                                    orca_db = Path.home() / "Library" / "Application Support" / "orca" / "profiles" / "default" / "orchestration.sqlite"
-                                    if orca_db.exists():
-                                        conn = sqlite3.connect(str(orca_db), timeout=3)
-                                        with conn:
-                                            for g in pending_gates:
-                                                gid = g.get("id")
-                                                if gid:
-                                                    conn.execute("UPDATE decision_gates SET status = 'resolved', resolution = 'yes', resolved_at = COALESCE(resolved_at, datetime('now')) WHERE id = ? AND status = 'pending'", (gid,))
-                                                    resolved_g += 1
-                                            for t in stuck_tasks:
-                                                tid = t.get("id")
-                                                if tid:
-                                                    conn.execute("UPDATE tasks SET status = 'completed', completed_at = COALESCE(completed_at, datetime('now')), updated_at = datetime('now') WHERE id = ? AND status IN ('blocked', 'ready')", (tid,))
-                                                    fixed_t += 1
-                                        conn.close()
-                                except Exception:
-                                    pass
-                            actions_taken.append(f"Đóng {len(pending_gates)} Gate pending & cập nhật {len(stuck_tasks)} Task về 'completed' cho Run {active_run_id}.")
-                        else:
+                            actions_taken.append(
+                                f"Cập nhật {fixed_t}/{len(stuck_tasks)} Task (đã có result, worker đã thu hồi) về 'completed' cho Run {active_run_id}."
+                            )
+                        elif stuck_tasks:
                             warning_issues.append(
-                                f"Run {active_run_id} đã thu hồi hết worker nhưng còn {len(pending_gates)} Gate 'pending' / {len(stuck_tasks)} Task '{stuck_tasks[0].get('status') if stuck_tasks else 'blocked'}' (chạy 'orca-monitor --fix' để đồng bộ)."
+                                f"Run {active_run_id} đã thu hồi hết worker nhưng còn {len(stuck_tasks)} Task '{stuck_tasks[0].get('status')}' đã có result (chạy 'orca-monitor --fix' để đánh dấu completed)."
                             )
                 except Exception:
                     pass
 
             # 4.1b Kiểm tra Orca Agent Status Hooks
-            hooks_res = subprocess.run([orca_bin, "agent", "hooks", "status", "--json"], capture_output=True, text=True, timeout=5)
+            hooks_res = _safe_orca_run([orca_bin, "agent", "hooks", "status", "--json"], capture_output=True, text=True, timeout=5)
             if hooks_res.returncode == 0:
                 hooks_data = json.loads(hooks_res.stdout).get("result", {})
                 hook_statuses = {s.get("agent"): s for s in (hooks_data.get("statuses") or []) if isinstance(s, dict)}
@@ -3068,7 +3232,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     ag for ag in sorted(configured_agents)
                     if ag in hook_statuses and not hook_statuses[ag].get("managedHooksPresent")
                 ]
-                if missing_hooks:
+                if missing_hooks and not auto_fix:
+                    warning_issues.append(f"Agent {', '.join(missing_hooks)} thiếu Orca Status Hooks (chạy 'orca-monitor --fix' để cài).")
+                elif missing_hooks:
                     orca_electron = "/Applications/Orca.app/Contents/MacOS/Orca"
                     hook_ctrl = "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/main/agent-hooks/managed-agent-hook-controls.js"
                     if os.path.exists(orca_electron) and os.path.exists(hook_ctrl):
@@ -3101,7 +3267,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         curr_pre = agy_hooks.get("orca-command-guard", {}).get("PreToolUse", [{}])[0].get("hooks", [{}])[0].get("command", "")
                     except Exception:
                         curr_pre = ""
-                    if not isinstance(agy_hooks, dict) or curr_pre != expected_pre:
+                    if (not isinstance(agy_hooks, dict) or curr_pre != expected_pre) and not auto_fix:
+                        warning_issues.append("Orca Command Guard hook chưa được đăng ký/đã cũ trong ~/.gemini/config/hooks.json (chạy 'orca-monitor --fix').")
+                    elif not isinstance(agy_hooks, dict) or curr_pre != expected_pre:
                         if not isinstance(agy_hooks, dict):
                             agy_hooks = {}
                         agy_hooks["orca-command-guard"] = {
@@ -3112,21 +3280,21 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         with open(agy_hooks_path, "w", encoding="utf-8") as hf:
                             json.dump(agy_hooks, hf, indent=2)
                         actions_taken.append("Kích hoạt Orca Command & Stdout Flood Guard (16MB Circuit-Breaker) trong ~/.gemini/config/hooks.json")
-                    passed_items.append("Orca Command & Stdout Flood Guard (Backtick/Find Blocker + 16MB Log Circuit-Breaker + Stream Filter) active.")
+                    if isinstance(agy_hooks, dict) and (curr_pre == expected_pre or auto_fix):
+                        passed_items.append("Orca Command & Stdout Flood Guard (Backtick/Find Blocker + 16MB Log Circuit-Breaker + Stream Filter) active.")
                 except Exception as e:
                     warning_issues.append(f"Không thể kiểm tra Orca Command Guard hook: {e}")
 
             # 4.2 Phân tích Mailbox
-            inbox_res = subprocess.run([orca_bin, "orchestration", "inbox", "--limit", "50", "--json"], capture_output=True, text=True, timeout=5)
+            inbox_res = _safe_orca_run([orca_bin, "orchestration", "inbox", "--limit", "50", "--json"], capture_output=True, text=True, timeout=5)
             hb_count = done_count = esc_count = handoff_count = done_tokens = 0
             run_msgs = []
             if inbox_res.returncode == 0:
                 inbox_data = json.loads(inbox_res.stdout)
                 inbox_obj = inbox_data.get("result", inbox_data) if isinstance(inbox_data, dict) else {}
                 all_msgs = inbox_obj.get("messages", []) if isinstance(inbox_obj, dict) else []
-                run_msgs = [m for m in all_msgs if not active_run_id or m.get("run_id") == active_run_id]
-                if not run_msgs:
-                    run_msgs = all_msgs[:20]
+                # Chỉ đếm thư của Run thuộc project này (không mượn thư của project khác khi không khớp)
+                run_msgs = [m for m in all_msgs if active_run_id and m.get("run_id") == active_run_id]
 
                 hb_count = sum(1 for m in run_msgs if m.get("type") == "heartbeat")
                 done_count = sum(1 for m in run_msgs if m.get("type") == "worker_done")
@@ -3194,7 +3362,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
                 print(f"   │ 1. Số lượt suy luận & gọi Tool (Turns/Tools) │ {l_turns_str:<31} │ {w_turns_str:<31} │")
                 print(f"   │ 2. Thời gian thực thi (LLM Inference / Tool) │ {l_time_str:<31} │ {w_time_str:<31} │")
-                print(f"   │ 3. Tốc độ xử lý (Out tok/s | Total tok/s)    │ {l_spd_str:<31} │ {w_spd_str:<31} │")
+                print(f"   │ 3. Tốc độ (OUT e2e tok/s | CTX tok/s)      │ {l_spd_str:<31} │ {w_spd_str:<31} │")
                 print(f"   │ 4. Fresh Input Tokens (Nạp mới lũy kế)       │ {l_in_str:<31} │ {w_in_str:<31} │")
                 print(f"   │ 5. Cache Read Tokens (Tái sử dụng Cache %)   │ {l_cache_str:<31} │ {w_cache_str:<31} │")
                 print(f"   │ 6. Output Tokens (Reasoning + Code sinh ra)  │ {l_out_str:<31} │ {w_out_str:<31} │")
@@ -3237,7 +3405,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         c_pct = (b["cache_tok"] / max(1, b["in_tok"] + b["cache_tok"])) * 100.0
                         llm_share = (b["llm_s"] / max(1.0, b["llm_s"] + b["tool_s"])) * 100.0
                         print(
-                            f"   • {m_key:<32}: gen={out_s:>5.1f} out_tok/s | throughput={_fmt_tok(int(tot_s)):>6} tok/s | "
+                            f"   • {m_key:<32}: out_e2e={out_s:>5.1f} tok/s | ctx={_fmt_tok(int(tot_s)):>6} tok/s | "
                             f"latency={avg_t:>4.1f}s/turn | cache={c_pct:>4.1f}% | time_split: LLM {llm_share:.0f}% / Tool {100-llm_share:.0f}%"
                         )
 
@@ -3312,7 +3480,9 @@ def main():
         cmd_monitor(root, config, args)
         return
 
-    if not args or args[0] in ["status", "list", "show"] or Path(args[0]).expanduser().is_dir():
+    if not args or args[0] in ["status", "list", "show"] or (
+        args[0].lower() not in ROLE_ALIASES and Path(args[0]).expanduser().is_dir()
+    ):
         for a in args:
             if not a.startswith("-") and Path(a).expanduser().is_dir():
                 root = Path(a).expanduser().resolve()
@@ -3336,7 +3506,10 @@ def main():
         cmd_link(root, args[1:])
     elif args[0] == "sync":
         for a in args[1:]:
-            if not a.startswith("-") and Path(a).expanduser().is_dir():
+            if not a.startswith("-"):
+                if not Path(a).expanduser().is_dir():
+                    print(f"❌ Đường dẫn không tồn tại: '{a}'.", file=sys.stderr)
+                    sys.exit(1)
                 root = Path(a).expanduser().resolve()
                 config = load_config(root)
                 break
