@@ -231,6 +231,15 @@ def _fmt_worker_args_py(agent: str, model, effort: str) -> str:
         args += f" --effort {effort}"
     return args
 
+def _is_role_enabled(data: dict, is_optional: bool = True) -> bool:
+    if not isinstance(data, dict):
+        return False
+    ag = data.get("agent")
+    has_valid_agent = bool(ag and ag != "none")
+    if "enabled" in data:
+        return bool(data["enabled"]) and has_valid_agent
+    return has_valid_agent if is_optional else True
+
 def sync_gemini_directive(root: Path, config: dict):
     gemini_file = root / ".agents" / "GEMINI.md"
     if not gemini_file.exists():
@@ -291,7 +300,7 @@ def sync_gemini_directive(root: Path, config: dict):
 
     # UI Specialist
     ui = roles.get("uiSpecialist", {})
-    ui_enabled = bool(ui.get("enabled", True) and ui.get("agent") and ui.get("agent") != "none")
+    ui_enabled = _is_role_enabled(ui, is_optional=True)
     if ui_enabled:
         u_agent = ui.get("agent", "claude")
         u_model = ui.get("model")
@@ -300,7 +309,7 @@ def sync_gemini_directive(root: Path, config: dict):
 
     # DevOps Specialist
     devops = roles.get("devopsSpecialist", {})
-    devops_enabled = bool(devops.get("enabled", True) and devops.get("agent") and devops.get("agent") != "none")
+    devops_enabled = _is_role_enabled(devops, is_optional=True)
     if devops_enabled:
         do_agent = devops.get("agent", "codex")
         do_model = devops.get("model")
@@ -309,7 +318,7 @@ def sync_gemini_directive(root: Path, config: dict):
 
     # Bench & Perf Specialist
     bench = roles.get("benchSpecialist", {})
-    bench_enabled = bool(bench.get("enabled", False) and bench.get("agent") and bench.get("agent") != "none")
+    bench_enabled = _is_role_enabled(bench, is_optional=True)
     if bench_enabled:
         b_agent = bench.get("agent", "antigravity")
         b_model = bench.get("model")
@@ -318,7 +327,7 @@ def sync_gemini_directive(root: Path, config: dict):
 
     # Reverse Engineering Specialist (REA)
     re_spec = roles.get("reSpecialist", {})
-    re_enabled = bool(re_spec.get("enabled", False) and re_spec.get("agent") and re_spec.get("agent") != "none")
+    re_enabled = _is_role_enabled(re_spec, is_optional=True)
     if re_enabled:
         r_agent = re_spec.get("agent", "antigravity")
         r_model = re_spec.get("model")
@@ -1159,7 +1168,8 @@ def cmd_status(root: Path, config: dict):
 
     for key, label in role_order:
         data = roles.get(key, {})
-        enabled = data.get("enabled", True if key not in ["uiSpecialist", "devopsSpecialist", "benchSpecialist", "reSpecialist"] else False)
+        is_opt = key in ("uiSpecialist", "devopsSpecialist", "benchSpecialist", "reSpecialist")
+        enabled = _is_role_enabled(data, is_optional=is_opt)
         if not enabled:
             print(f"{label:<24} | {'[ĐÃ TẮT]':<12} | {'-':<26} | {'-':<8} | -")
             continue
@@ -1233,10 +1243,15 @@ def cmd_set(root: Path, config: dict, args: list):
         role_label = ROLE_LABELS.get(role_key, role_key)
         print(f"\n⚙️  Cấu hình tương tác cho vai trò: {role_label}")
         current = config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key, {})
-        curr_agent = current.get("agent", "antigravity")
+        raw_curr_agent = current.get("agent")
+        curr_agent = raw_curr_agent if (raw_curr_agent and raw_curr_agent != "none") else (config.get("coordinator", {}).get("agent") or "antigravity")
         curr_model = current.get("model") or "mặc định"
         curr_effort = current.get("effort") or "-"
-        print(f"   Hiện tại: Agent={curr_agent} | Model={curr_model} | Effort={curr_effort}")
+        if current.get("enabled") is False:
+            toggle_enable = True
+            print(f"   Hiện tại: [ĐÃ TẮT] ➔ Sẽ tự động kích hoạt sau khi chọn cấu hình")
+        else:
+            print(f"   Hiện tại: Agent={curr_agent} | Model={curr_model} | Effort={curr_effort}")
 
         agent_options = [ag + (" (hiện tại)" if ag == curr_agent else "") for ag in KNOWN_AGENTS]
         def_agent_idx = KNOWN_AGENTS.index(curr_agent) if curr_agent in KNOWN_AGENTS else 0
@@ -1246,7 +1261,7 @@ def cmd_set(root: Path, config: dict, args: list):
             default_idx=def_agent_idx
         )
         target_agent = KNOWN_AGENTS[ag_i]
-        if target_agent != curr_agent:
+        if target_agent != raw_curr_agent:
             new_agent = target_agent
 
         # Truy vấn động danh sách model từ CLI của provider target_agent
@@ -1756,8 +1771,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             size_str = f"{size_b/1024:.1f} KB" if size_b > 1024 else f"{size_b} B"
             tokens_str = f"~{tokens} tokens"
             base_tokens += tokens
-            if tokens > 3200:
-                status = "⚠️ Quá lớn (>3.2k tok)"
+            if tokens > 3800:
+                status = "⚠️ Quá lớn (>3.8k tok)"
                 warning_issues.append(f"File '{rel_name}' có kích thước lớn (~{tokens} tokens). Sẽ bị nạp lại vào context của AI Leader trên MỖI turn.")
             else:
                 status = "🟢 Gọn gàng"
@@ -1784,9 +1799,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
     print("-" * 85)
     print(f"👉 Tổng token cơ sở (Base Context Tokens) nạp mỗi turn: ~{base_tokens:,} tokens")
-    if base_tokens < 3600:
-        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn, bao gồm đầy đủ Hiến pháp 9 Vai trò cấp Principal).")
-    elif base_tokens < 4800:
+    if base_tokens < 4400:
+        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn, bao gồm đầy đủ Hiến pháp 10 Vai trò cấp Principal).")
+    elif base_tokens < 5500:
         warning_issues.append(f"Context chỉ dẫn ban đầu ở mức trung bình (~{base_tokens:,} tokens/turn).")
     else:
         critical_issues.append(f"Context chỉ dẫn ban đầu quá lớn (~{base_tokens:,} tokens/turn). Cần tinh gọn lại các file chỉ dẫn.")

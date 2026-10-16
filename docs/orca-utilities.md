@@ -124,3 +124,14 @@ orca skills list --json
 orca skills get orchestration --full
 orca skills get orca-cli --full
 ```
+
+---
+
+## 6. Reverse Engineering Anything (`morluto/rea` — `re-worker`)
+
+Dành riêng cho vai trò **Principal Reverse Engineering & Binary/Protocol Analyst (`reSpecialist` / `re-worker`)** để giải phẫu hộp đen (Native Mach-O/ELF/PE, Managed `.NET`/Java `.jar`, Electron `app.asar`/Webpack/Vite bundles, APK/IPA, Firmware, PCAP/HAR network captures):
+
+* **Nguồn cài đặt:** [`https://github.com/morluto/rea.git`](https://github.com/morluto/rea.git) (`reverse-engineer-anything` skill & `rea` MCP server).
+* **Tự động kích hoạt:** Khi bật `reSpecialist` trong `orca-project-init` hoặc chạy `orca-team set re --enable`, hệ thống tự động tải và đồng bộ skill vào `~/.gemini/config/skills/reverse-engineer-anything`, `~/.agents/skills/reverse-engineer-anything` và `~/.claude/skills/reverse-engineer-anything`.
+* **Các nhóm công cụ tiêu biểu:** `open_binary`, `inspect_artifact`, `batch_decompile`, `analyze_javascript_application`, `recover_javascript_sources`, `inspect_android_package`, `inspect_web_network_capture`, `verify_reconstruction`.
+

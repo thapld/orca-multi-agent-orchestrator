@@ -646,14 +646,20 @@ if [[ "$ENABLE_RE" == true ]]; then
       fi
     done
   fi
+  rea_client="antigravity"
+  case "${RE_AGENT:l}" in
+    antigravity) rea_client="antigravity" ;;
+    gemini)      rea_client="gemini_cli" ;;
+    claude)      rea_client="claude_code" ;;
+    codex)       rea_client="codex" ;;
+    cursor)      rea_client="cursor" ;;
+    opencode)    rea_client="opencode" ;;
+    copilot)     rea_client="copilot_cli" ;;
+  esac
   if command -v rea >/dev/null 2>&1; then
-    rea_client="gemini"
-    case "${RE_AGENT:l}" in
-      claude) rea_client="claude" ;;
-      codex)  rea_client="codex" ;;
-      cursor) rea_client="cursor" ;;
-    esac
     rea setup --client "$rea_client" --yes >/dev/null 2>&1 || true
+  elif command -v npx >/dev/null 2>&1; then
+    npx -y rea-agents@latest setup --client "$rea_client" --yes >/dev/null 2>&1 || true
   fi
 fi
 

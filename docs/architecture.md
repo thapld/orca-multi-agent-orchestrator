@@ -30,11 +30,13 @@ Tài liệu này giải thích chi tiết cấu trúc kiến trúc, các tầng 
                     │                               │
 ┌───────────────────▼──────────────────┐ ┌──────────▼────────────────────┐
 │      TẦNG THỰC THI (WORKER SWARM)    │ │      TẦNG TIỆN ÍCH (UTILITIES)│
-│  • Full-Stack Devs (Kimi / Claude)   │ │  • Embedded Browser           │
-│  • QA Testers (Kimi / Cursor)        │ │  • Design Mode (DOM/CSS Pick) │
-│  • Security Auditors (Codex)         │ │  • SSH Worktrees (orb host)   │
-│  • PR Reviewer (Claude / Codex)      │ │  • Desktop Computer Use       │
-│  • Git Issue Resolver (Kimi / Codex) │ │  • Mobile Simulators (iOS/adb)│
+│  • Full-Stack Devs (dev-worker)      │ │  • Embedded Browser           │
+│  • DevOps / SRE (devops-worker)      │ │  • Design Mode (DOM/CSS Pick) │
+│  • Security Auditors (sec-worker)    │ │  • SSH Worktrees (orb host)   │
+│  • QA / SDET (qa-worker)             │ │  • Desktop Computer Use       │
+│  • Bench & Perf (bench-worker)       │ │  • Reverse Eng (morluto/rea)  │
+│  • Reverse Eng / REA (re-worker)     │ │  • Mobile Simulators (iOS/adb)│
+│  • UI/UX, PR Review, Issue Hotfix    │ │  • Per-Worktree Env & Diff    │
 └──────────────────────────────────────┘ └───────────────────────────────┘
 ```
 

@@ -82,6 +82,28 @@
       ],
       "model": "gemini-3.8-flash-high",
       "effort": "high"
+    },
+    "benchSpecialist": {
+      "enabled": true,
+      "agent": "antigravity",
+      "utilities": [
+        "git-worktrees",
+        "ssh-remote-execution",
+        "orca-skills-registry"
+      ],
+      "model": "gemini-3.8-flash-high",
+      "effort": "high"
+    },
+    "reSpecialist": {
+      "enabled": true,
+      "agent": "antigravity",
+      "utilities": [
+        "git-worktrees",
+        "orca-skills-registry",
+        "reverse-engineer-anything"
+      ],
+      "model": "gemini-4-argon-high",
+      "effort": "high"
     }
   }
 }
