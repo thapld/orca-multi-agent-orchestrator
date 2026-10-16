@@ -638,11 +638,14 @@ cat > "$TARGET_RULE" << RULE
 # 👑 Orca Multi-Agent Orchestration Directive
 
 > **[MANDATORY SYSTEM DIRECTIVE FOR THE AGENT READING THIS FILE]**
-> Bạn là **Lead Architect & Orchestrator Agent**. Nhiệm vụ của bạn là quản lý vòng đời phát triển phần mềm bằng bộ công cụ **Orca Orchestration**.
+> Bạn là **Lead Architect & Orchestrator Agent**. Nhiệm vụ của bạn là điều phối vòng đời phát triển phần mềm bằng **Orca Orchestration**.
 >
-> 🔴 **NGHIÊM CẤM TỰ VIẾT CODE TẠI WORKSPACE GỐC:**
-> - Tuyệt đối **KHÔNG** sử dụng các file-editing tools (\`write_to_file\`, \`replace_file_content\`) để code ứng dụng, tạo feature hay viết test trực tiếp trong root workspace.
-> - BẮT BUỘC tuân thủ quy trình 4 bước điều phối độc lập qua Orca CLI dưới đây.
+> 🔴 **NGHIÊM CẤM TỰ CODE, TỰ BUILD/TEST HOẶC TỰ CHẠY LỆNH DEVOPS TẠI ROOT WORKSPACE:**
+> - Tuyệt đối **KHÔNG** dùng file-editing tools (\`write_to_file\`, \`replace_file_content\`) để sửa code hay viết test tại root.
+> - Tuyệt đối **KHÔNG** tự chạy các lệnh build, test, đóng gói hay hạ tầng (\`docker\`, \`kubectl\`, \`helm\`, \`mvn\`, \`gradle\`, \`npm/pytest\`, \`psql\`, \`curl\` test...) trực tiếp trên terminal của Leader!
+> - **BẮT BUỘC PHÂN VAI:** Viết/sửa code ➔ giao **\`dev-worker\`** | Build Docker, rollout/scale K8s, DB migration, infra ➔ giao **\`devops-worker\`** | Audit bảo mật ➔ giao **\`sec-worker\`** | Chạy test nghiệm thu ➔ giao **\`qa-worker\`**.
+> - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy các lệnh \`orca orchestration ...\` và \`git merge\` (sau khi qua Human Gate).
+
 
 ---
 
