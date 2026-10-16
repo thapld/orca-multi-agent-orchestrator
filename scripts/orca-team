@@ -365,11 +365,11 @@ def sync_gemini_directive(root: Path, config: dict):
         'Chuẩn: Clean Architecture, type-safe 100%, xử lý edge cases (null, timeout, concurrency), không TODO/mock giả/hardcode secret. '
         'CẤM VƯỢT RÀO: Chỉ sửa code app & unit test; CẤM sửa K8s/Docker của DevOps; CẤM xóa/skip (@Ignore, .skip) test cũ đang fail. '
         'GIAO TIẾP & THẨM QUYỀN QUYẾT ĐỊNH (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): '
-        '(1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận chỉ đạo/spec từ Coordinator; '
+        '(1) Đồng bộ nhánh mới nhất (git merge --no-edit main) và kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận chỉ đạo/spec từ Coordinator; '
         'nếu cần quyết định kiến trúc/cấu hình, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question \'...\' --json '
-        '(worker KHÔNG tự ý đổi thiết kế liên role), (2) Build & Unit Test EXIT_CODE=0 và git commit sạch vào nhánh worktree, '
+        '(worker KHÔNG tự ý đổi thiết kế liên role), (2) Build & Unit Test EXIT_CODE=0 và git commit sạch vào nhánh dev-worker, '
         '(3) Trước khi gửi worker_done, BẮT BUỘC gửi bàn giao về Coordinator duyệt: '
-        'orca orchestration send --from <worker_handle> --type handoff --subject \'Dev Handoff: <branch> (<commit_hash>)\' '
+        'orca orchestration send --from <worker_handle> --type handoff --subject \'Dev Handoff: dev-worker (<commit_hash>)\' '
         '--body \'Tóm tắt file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench\' '
         '--task-id <task_id> --dispatch-id <dispatch_id> --json '
         '(KHÔNG dùng --to \'@all\' vì \'@all\' loại trừ Coordinator!)." --json'
@@ -380,7 +380,7 @@ def sync_gemini_directive(root: Path, config: dict):
         'CẤM VƯỢT RÀO: Chỉ sửa Infra/Docker/K8s/DB/CI; CẤM sửa business logic của Dev. '
         'RÀ SOÁT RUNTIME LOGS & BÁO CÁO COORDINATOR (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): '
         '(1) Chạy orca orchestration check --terminal <worker_handle> --json nhận nhánh/commit đã được Coordinator duyệt và '
-        'git merge --no-edit <nhánh-dev> trước khi build, (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! '
+        'git merge --no-edit dev-worker trước khi build, (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! '
         'Bắt buộc chờ qua chu kỳ chạy thật của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start '
         '(kubectl logs/docker logs KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) '
         'cùng trạng thái DB, (3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, '
@@ -396,7 +396,7 @@ def sync_gemini_directive(root: Path, config: dict):
         '  orca orchestration task-create --spec "[ROLE: PRINCIPAL SECURITY AUDITOR] Nhiệm vụ: Kiểm toán Red-Team cho [module]. '
         'Chuẩn: Soi git diff theo OWASP Top 10 (SQLi, Injection, Auth/JWT, IDOR, SSRF, XSS), Race Conditions/Deadlock, Resource/Memory Leaks '
         'và Secret Leaks. CẤM VƯỢT RÀO: Read-Only Audit & PoC; CẤM tự sửa code tính năng của Dev. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: '
-        'Diff đúng commit mới của Dev; nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng '
+        'Chạy git merge --no-edit dev-worker để diff đúng commit mới của Dev; nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng '
         'orca orchestration send --from <worker_handle> --type escalation --subject \'Security Vulnerability Found\' '
         '--body \'<file:line & PoC trình Coordinator ra quyết định>\' --task-id <task_id> --dispatch-id <dispatch_id> --json; '
         'liệt kê rõ file:line theo 4 mục [OWASP, Concurrency, Leaks, Secrets] và chốt SECURITY_VERDICT: PASS hoặc BLOCK." --json'
@@ -408,7 +408,7 @@ def sync_gemini_directive(root: Path, config: dict):
         'CẤM TUYỆT ĐỐI sửa business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi '
         'status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót '
         'không quét pod DB/Kafka! GIAO TIẾP & BÁO CÁO COORDINATOR (BẮT BUỘC): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) '
-        'nhận nhánh/môi trường từ Coordinator và git merge --no-edit <nhánh-dev> trước khi test, (2) Chạy lệnh test thật VÀ kiểm toán trực tiếp '
+        'nhận nhánh/môi trường từ Coordinator và git merge --no-edit dev-worker trước khi test, (2) Chạy lệnh test thật VÀ kiểm toán trực tiếp '
         'TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, '
         '(3) Nếu vướng môi trường phải hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question \'...\' --json; '
         'nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs hay DB ➔ BẮT BUỘC trình ngay lên Coordinator bằng '
@@ -419,7 +419,7 @@ def sync_gemini_directive(root: Path, config: dict):
         '  orca orchestration task-create --spec "[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: [Đo tải, benchmark & profiling]. '
         'Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. '
         'CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! '
-        'GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và git merge --no-edit <nhánh-dev> để đo trên code mới nhất, '
+        'GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và git merge --no-edit dev-worker để đo trên code mới nhất, '
         '(2) Xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM; '
         'nếu phát hiện nghẽn cổ chai, gửi ngay orca orchestration send --from <worker_handle> --type escalation --subject \'Perf Bottleneck Found\' '
         '--body \'<file:line/query gây nghẽn trình Coordinator phán quyết>\' --task-id <task_id> --dispatch-id <dispatch_id> --json '
@@ -443,6 +443,9 @@ def sync_gemini_directive(root: Path, config: dict):
         '--body \'<Branch/Commit/Routes>\' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit." --json'
     )
 
+    def _wt_expr(w_name):
+        return f'$(git worktree list | grep -q "\\[{w_name}\\]" && echo "--worktree branch:{w_name}" || echo "--worktree new-child --name {w_name}")'
+
     # Tự động thêm/gỡ các dòng Step 1 (task-create) và Step 2 (worker-start) nếu role được bật/tắt động
     optional_directives = [
         (
@@ -450,28 +453,28 @@ def sync_gemini_directive(root: Path, config: dict):
             "ROLE: PRINCIPAL DEVOPS/SRE",
             f'  # Principal DevOps/SRE (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):\n{devops_spec_line}\n',
             "devops-worker",
-            f'  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):\n  orca orchestration worker-start --task <DEVOPS_TASK_ID> --worktree new-child --name devops-worker {_fmt_worker_args_py(devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort") or "high")} --json\n'
+            f'  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):\n  orca orchestration worker-start --task <DEVOPS_TASK_ID> {_wt_expr("devops-worker")} {_fmt_worker_args_py(devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort") or "high")} --json\n'
         ),
         (
             ui_enabled,
             "ROLE: PRINCIPAL UI/UX",
             f'  # Principal UI/UX (Khi có Frontend, CSS/DOM, Design Mode):\n{ui_spec_line}\n',
             "ui-worker",
-            f'  # UI Worker (khi có Task Frontend/UI):\n  orca orchestration worker-start --task <UI_TASK_ID> --worktree new-child --name ui-worker {_fmt_worker_args_py(ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort") or "medium")} --json\n'
+            f'  # UI Worker (khi có Task Frontend/UI):\n  orca orchestration worker-start --task <UI_TASK_ID> {_wt_expr("ui-worker")} {_fmt_worker_args_py(ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort") or "medium")} --json\n'
         ),
         (
             bench_enabled,
             "ROLE: PRINCIPAL BENCHMARK & PERF",
             f'  # Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):\n{bench_spec_line}\n',
             "bench-worker",
-            f'  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):\n  orca orchestration worker-start --task <BENCH_TASK_ID> --worktree new-child --name bench-worker {_fmt_worker_args_py(bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort") or "high")} --json\n'
+            f'  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):\n  orca orchestration worker-start --task <BENCH_TASK_ID> {_wt_expr("bench-worker")} {_fmt_worker_args_py(bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort") or "high")} --json\n'
         ),
         (
             re_enabled,
             "ROLE: PRINCIPAL REVERSE ENGINEER (REA)",
             f'  # Principal Reverse Engineer - REA (BẮT BUỘC khi dịch ngược binary/JAR/ASAR/APK/firmware/network capture hoặc tái tạo giao thức đóng):\n{re_spec_line}\n',
             "re-worker",
-            f'  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):\n  orca orchestration worker-start --task <RE_TASK_ID> --worktree new-child --name re-worker {_fmt_worker_args_py(re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort") or "high")} --json\n'
+            f'  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):\n  orca orchestration worker-start --task <RE_TASK_ID> {_wt_expr("re-worker")} {_fmt_worker_args_py(re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort") or "high")} --json\n'
         ),
     ]
 
@@ -506,7 +509,7 @@ def sync_gemini_directive(root: Path, config: dict):
                 )
                 content = s2_pat.sub("", content)
 
-    # Nâng cấp tự động chuẩn mực Giao tiếp Liên Vai trò & Runtime Log Audit cho mọi vai trò và Bước 3 trên các file GEMINI.md hiện hữu
+    # Nâng cấp tự động chuẩn mực Giao tiếp Liên Vai trò & Runtime Log Audit cho mọi vai trò và Bước 2, 3 trên các file GEMINI.md hiện hữu
     for marker_str, replacement_line in [
         ("ROLE: PRINCIPAL DEV", dev_spec_line),
         ("ROLE: PRINCIPAL DEVOPS/SRE", devops_spec_line),
@@ -524,6 +527,16 @@ def sync_gemini_directive(root: Path, config: dict):
     content = re.sub(
         r'^[ \t]*#[ \t]*(?:\d+\.\s*)?Principal SDET / QA[^\n]*\n[ \t]*orca orchestration task-create --spec "\[ROLE: PRINCIPAL QA/SDET\][^\n]*$',
         lambda m: f'  # 4. Principal SDET / QA (Kiểm thử độc lập, Nghiệm thu & Kiểm toán Runtime Logs):\n{qa_spec_line}',
+        content,
+        flags=re.M
+    )
+    step2_header = (
+        '### BƯỚC 2: FAN-OUT (1 ROLE = 1 WORKTREE ĐỊNH DANH DUY NHẤT & GOM NHÓM TERMINAL TABS)\n'
+        '- 🔴 **QUY TẮC GOM NHÓM TERMINAL TABS (CẤM ĐẺ THÊM WORKTREE TRÙNG LẶP `-2`, `-3`):** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`) chỉ dùng **1 Worktree định danh duy nhất**. Nếu worktree của role đó đã tồn tại trên đĩa (`git worktree list`), **BẮT BUỘC truyền `--worktree branch:<role>-worker` (không truyền `--name`)** để Orca **mở và gom nhóm các Terminal Tab mới ngay bên trong worktree đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <role>-worker` ở lần chạy đầu tiên khi worktree chưa tồn tại:\n'
+    )
+    content = re.sub(
+        r"### BƯỚC 2:[^\n]*\n- [^\n]*\n",
+        lambda m: step2_header,
         content,
         flags=re.M
     )
@@ -574,8 +587,14 @@ def sync_gemini_directive(root: Path, config: dict):
             continue
         mod_part = f' --model "{w_mod}"' if w_mod else ""
         eff_part = f" --effort {w_eff}" if w_eff else ""
+        # Nâng cấp dòng worker-start cũ (--worktree new-child --name <w_name>) sang biểu thức tái sử dụng worktree branch:<w_name>
+        old_wt_pat = re.compile(
+            rf"(orca orchestration worker-start\s+--task\s+<[^>]+>\s+)--worktree\s+new-child\s+--name\s+{re.escape(w_name)}(?=\s+--agent)",
+            re.MULTILINE
+        )
+        content = old_wt_pat.sub(lambda m, wn=w_name: m.group(1) + _wt_expr(wn), content)
         w_pat = re.compile(
-            rf"(--name\s+{re.escape(w_name)}\s+)--agent\s+\S+(?:\s+--model\s+\"[^\"]*\")?(?:\s+--effort\s+\S+)?",
+            rf"(--name\s+{re.escape(w_name)}\"?\)?\s+)--agent\s+\S+(?:\s+--model\s+\"[^\"]*\")?(?:\s+--effort\s+\S+)?",
             re.MULTILINE
         )
         content = w_pat.sub(rf"\1--agent {w_ag}{mod_part}{eff_part}", content)

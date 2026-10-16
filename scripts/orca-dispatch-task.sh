@@ -64,29 +64,41 @@ fi
 
 echo "🐋 [Orca Dispatch] Đang khởi tạo task: '$TASK_TITLE' cho agent: $AGENT ${MODEL_ARGS[*]}..."
 
+# Xác định định danh worktree cố định theo từng vai trò (1 Role = 1 Worktree định danh duy nhất, gom nhóm các Terminal Tabs bên trong)
+ROLE_WORKTREE="dev-worker"
+case "${ROLE_QUERY:l}" in
+  devops|infra|sre|ops) ROLE_WORKTREE="devops-worker" ;;
+  sec|security|bug|auditor) ROLE_WORKTREE="sec-worker" ;;
+  qa|test|tester|sdet) ROLE_WORKTREE="qa-worker" ;;
+  ui|ux|frontend|design) ROLE_WORKTREE="ui-worker" ;;
+  bench|benchmark|perf|performance) ROLE_WORKTREE="bench-worker" ;;
+  re|reverse|rea|respecialist) ROLE_WORKTREE="re-worker" ;;
+  *) ROLE_WORKTREE="dev-worker" ;;
+esac
+
 # Tự động tiêm Hiến pháp Vai trò Cấp Principal (Chống vượt rào & Chống báo sạch giả) nếu SPEC chưa có
 if [[ "$SPEC" != "[ROLE:"* ]]; then
   case "${ROLE_QUERY:l}" in
     devops|infra|sre|ops)
-      SPEC="[ROLE: PRINCIPAL DEVOPS & SRE] Nhiệm vụ: ${SPEC}. Chuẩn mực: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. CẤM VƯỢT RÀO: Chỉ sửa tầng Infra/Docker/K8s/DB/CI; CẤM tự ý sửa business logic của Dev. RÀ SOÁT RUNTIME LOGS & BÁO CÁO LÊN COORDINATOR (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble trước khi gửi worker_done): (1) Chạy orca orchestration check --terminal <worker_handle> --json nhận chỉ đạo nhánh/commit đã được Coordinator duyệt và git merge --no-edit <nhánh-dev> trước khi build, (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! Bắt buộc chờ qua chu kỳ chạy thật của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start (kubectl logs/docker logs KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) cùng trạng thái vận hành trong DB, (3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, SSLHandshakeException, Auth 401/403 hay health=ERROR nào lúc runtime ➔ BẮT BUỘC trình báo ngay lên Coordinator để Coordinator ra quyết định xử lý: orca orchestration send --from <worker_handle> --type escalation --subject 'Runtime Log Error' --body '<Chi tiết pod & log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json (KHÔNG dùng --to '@all' đơn lẻ vì sẽ bỏ sót Coordinator!) rồi chờ chỉ đạo hoặc báo worker_done --outcome failed; khi sạch lỗi 100%, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'Infra Ready' --body '<Pod/Port/Log sạch 100%>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator."
+      SPEC="[ROLE: PRINCIPAL DEVOPS & SRE] Nhiệm vụ: ${SPEC}. Chuẩn mực: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. CẤM VƯỢT RÀO: Chỉ sửa tầng Infra/Docker/K8s/DB/CI; CẤM tự ý sửa business logic của Dev. RÀ SOÁT RUNTIME LOGS & BÁO CÁO COORDINATOR (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble trước khi gửi worker_done): (1) Chạy orca orchestration check --terminal <worker_handle> --json nhận chỉ đạo nhánh/commit đã được Coordinator duyệt và git merge --no-edit dev-worker trước khi build, (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! Bắt buộc chờ qua chu kỳ chạy thật của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start (kubectl logs/docker logs KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) cùng trạng thái DB, (3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, SSLHandshakeException, Auth 401/403 hay health=ERROR nào lúc runtime ➔ BẮT BUỘC trình báo ngay lên Coordinator: orca orchestration send --from <worker_handle> --type escalation --subject 'Runtime Log Error' --body '<Chi tiết pod & log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json (KHÔNG dùng --to '@all'!) rồi chờ chỉ đạo hoặc báo worker_done --outcome failed; khi sạch lỗi 100%, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'Infra Ready' --body '<Pod/Port/Log sạch 100%>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator."
       ;;
     sec|security|bug|auditor)
-      SPEC="[ROLE: PRINCIPAL SECURITY AUDITOR] Nhiệm vụ: ${SPEC}. Chuẩn mực: Kiểm toán độc lập (Red-Team) từng dòng git diff theo OWASP Top 10 (SQLi, Injection, Broken Auth/JWT, IDOR, SSRF, XSS), Race Conditions/Deadlock, Resource/Memory Leaks và Secret Leaks. CẤM VƯỢT RÀO: Read-Only Audit & PoC; CẤM tự ý sửa code tính năng của Dev. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: Diff đúng commit mới của Dev; nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng orca orchestration send --from <worker_handle> --type escalation --subject 'Security Vulnerability Found' --body '<file:line & PoC trình Coordinator ra quyết định>' --task-id <task_id> --dispatch-id <dispatch_id> --json; liệt kê rõ file:line theo 4 mục [OWASP, Concurrency, Leaks, Secrets] và chốt rõ SECURITY_VERDICT: PASS hoặc BLOCK."
+      SPEC="[ROLE: PRINCIPAL SECURITY AUDITOR] Nhiệm vụ: ${SPEC}. Chuẩn mực: Kiểm toán độc lập (Red-Team) từng dòng git diff theo OWASP Top 10 (SQLi, Injection, Broken Auth/JWT, IDOR, SSRF, XSS), Race Conditions/Deadlock, Resource/Memory Leaks và Secret Leaks. CẤM VƯỢT RÀO: Read-Only Audit & PoC; CẤM tự ý sửa code tính năng của Dev. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: Chạy git merge --no-edit dev-worker để diff đúng commit mới của Dev; nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng orca orchestration send --from <worker_handle> --type escalation --subject 'Security Vulnerability Found' --body '<file:line & PoC trình Coordinator ra quyết định>' --task-id <task_id> --dispatch-id <dispatch_id> --json; liệt kê rõ file:line theo 4 mục [OWASP, Concurrency, Leaks, Secrets] và chốt rõ SECURITY_VERDICT: PASS hoặc BLOCK."
       ;;
     qa|test|tester|sdet)
-      SPEC="[ROLE: PRINCIPAL QA & SDET] Nhiệm vụ: ${SPEC}. Chuẩn mực: Tư duy bẻ gãy hệ thống (Adversarial Testing) & Kiểm toán Runtime Logs — phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) và 100% Acceptance Criteria. CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test và nghiệm thu; CẤM TUYỆT ĐỐI tự sửa code business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót không quét pod DB/Kafka! GIAO TIẾP & BÁO CÁO LÊN COORDINATOR (BẮT BUỘC trước khi gửi worker_done): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận thông tin nhánh/môi trường từ Coordinator và git merge --no-edit <nhánh-dev> trước khi test, (2) Chạy lệnh test thật VÀ kiểm toán trực tiếp TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, (3) Nếu vướng mắc môi trường phải hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json; nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs hay DB ➔ BẮT BUỘC trình ngay lên Coordinator bằng orca orchestration send --from <worker_handle> --type escalation --subject 'QA Runtime/Test Failure' --body '<Trích xuất log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt QA_VERDICT: FAIL!"
+      SPEC="[ROLE: PRINCIPAL QA & SDET] Nhiệm vụ: ${SPEC}. Chuẩn mực: Tư duy bẻ gãy hệ thống (Adversarial Testing) & Kiểm toán Runtime Logs — phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) và 100% Acceptance Criteria. CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test và nghiệm thu; CẤM TUYỆT ĐỐI tự sửa code business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót không quét pod DB/Kafka! GIAO TIẾP & BÁO CÁO COORDINATOR (BẮT BUỘC trước khi gửi worker_done): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận thông tin nhánh/môi trường từ Coordinator và git merge --no-edit dev-worker trước khi test, (2) Chạy lệnh test thật VÀ kiểm toán trực tiếp TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, (3) Nếu vướng môi trường phải hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json; nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs hay DB ➔ BẮT BUỘC trình ngay lên Coordinator bằng orca orchestration send --from <worker_handle> --type escalation --subject 'QA Runtime/Test Failure' --body '<Trích xuất log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt QA_VERDICT: FAIL!"
       ;;
     ui|ux|frontend|design)
       SPEC="[ROLE: PRINCIPAL UI/UX ARCHITECT] Nhiệm vụ: ${SPEC}. Chuẩn mực: Tinh chỉnh chuẩn xác CSS/DOM qua Orca Design Mode, đảm bảo Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. CẤM VƯỢT RÀO: Chỉ sửa tầng UI/Frontend; CẤM sửa backend core/DB schema. BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: Build/typecheck EXIT_CODE=0, không lỗi Console, kiểm tra snapshot/screenshot thực tế, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready' --body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit kèm Commit Hash."
       ;;
     bench|benchmark|perf|performance)
-      SPEC="[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: ${SPEC}. Chuẩn mực: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và git merge --no-edit <nhánh-dev> để đo trên code mới nhất, (2) Xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM; nếu phát hiện nghẽn cổ chai, gửi ngay orca orchestration send --from <worker_handle> --type escalation --subject 'Perf Bottleneck Found' --body '<file:line/query gây nghẽn trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND."
+      SPEC="[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: ${SPEC}. Chuẩn mực: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và git merge --no-edit dev-worker để đo trên code mới nhất, (2) Xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM; nếu phát hiện nghẽn cổ chai, gửi ngay orca orchestration send --from <worker_handle> --type escalation --subject 'Perf Bottleneck Found' --body '<file:line/query gây nghẽn trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND."
       ;;
     re|reverse|rea|respecialist)
       SPEC="[ROLE: PRINCIPAL REVERSE ENGINEER (REA)] Nhiệm vụ: ${SPEC}. Chuẩn mực: Bắt buộc kích hoạt skill reverse-engineer-anything (morluto/rea) & công cụ rea/rea-agents (open_binary, inspect_artifact, analyze_javascript_application, inspect_web_network_capture...). CẤM VƯỢT RÀO: (1) Read-Only đối với source code dự án (chỉ xuất Đặc tả Kỹ thuật Clean-Room, CẤM copy code decompile rối rắm vào repo), (2) CẤM dùng REA cho source code repo thông thường, (3) CẤM đoán mò hành vi hộp đen khi không có Evidence từ REA! GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: Xuất Hồ sơ Evidence thực tế (Target SHA-256/Path, REA tool đã chạy, Symbol/Offset/Decompiled Function/Struct/Protocol contract, Unknowns/Limitations), gửi bản tin orca orchestration send --from <worker_handle> --type handoff --subject 'REA Clean-Room Spec' --body '<Tóm tắt Spec trình Coordinator duyệt và giao Dev>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt RE_VERDICT: EVIDENCE_COMPLETE hoặc BLOCKED_BY_UNKNOWN."
       ;;
     *)
-      SPEC="[ROLE: PRINCIPAL FULL-STACK DEV] Nhiệm vụ: ${SPEC}. Chuẩn mực: Clean Architecture, type-safe 100%, xử lý triệt để edge cases (null, timeout, thread-safety/concurrency, backward-compat), không để TODO/mock giả/hardcode secret. CẤM VƯỢT RÀO: Chỉ sửa code ứng dụng & unit test của mình; CẤM sửa K8s/Docker/CI của DevOps; CẤM xóa/skip/comment-out (@Ignore, .skip) test cũ đang fail để lách lỗi. GIAO TIẾP & THẨM QUYỀN QUYẾT ĐỊNH (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble trước khi gửi worker_done): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) để nhận chỉ đạo/spec từ Coordinator; nếu cần quyết định kiến trúc/cấu hình, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json (worker KHÔNG tự ý quyết định thay đổi thiết kế liên role), (2) Chạy compile/build & unit test thực tế đạt EXIT_CODE=0 và git commit sạch sẽ vào nhánh worktree, (3) Trước khi gửi worker_done, BẮT BUỘC gửi bản tin bàn giao về cho Coordinator duyệt và điều phối: orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: <branch> (<commit_hash>)' --body 'Tóm tắt file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench' --task-id <task_id> --dispatch-id <dispatch_id> --json."
+      SPEC="[ROLE: PRINCIPAL FULL-STACK DEV] Nhiệm vụ: ${SPEC}. Chuẩn mực: Clean Architecture, type-safe 100%, xử lý triệt để edge cases (null, timeout, thread-safety/concurrency, backward-compat), không để TODO/mock giả/hardcode secret. CẤM VƯỢT RÀO: Chỉ sửa code ứng dụng & unit test của mình; CẤM sửa K8s/Docker/CI của DevOps; CẤM xóa/skip/comment-out (@Ignore, .skip) test cũ đang fail để lách lỗi. GIAO TIẾP & THẨM QUYỀN QUYẾT ĐỊNH (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble trước khi gửi worker_done): (1) Đồng bộ nhánh mới nhất (git merge --no-edit main) và kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) để nhận chỉ đạo/spec từ Coordinator; nếu cần quyết định kiến trúc/cấu hình, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json (worker KHÔNG tự ý đổi thiết kế liên role), (2) Chạy compile/build & unit test thực tế đạt EXIT_CODE=0 và git commit sạch sẽ vào nhánh dev-worker, (3) Trước khi gửi worker_done, BẮT BUỘC gửi bản tin bàn giao về cho Coordinator duyệt và điều phối: orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: dev-worker (<commit_hash>)' --body 'Tóm tắt file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench' --task-id <task_id> --dispatch-id <dispatch_id> --json."
       ;;
   esac
 fi
@@ -124,30 +136,35 @@ fi
 
 echo "✅ Đã tạo task ID: $TASK_ID"
 
-# 2. Khởi chạy worker
-# Kiểm tra nếu git repo chưa có commit thì fallback dùng worktree current
+# 2. Khởi chạy worker (Tái sử dụng Worktree định danh của Role & Gom nhóm Terminal Tabs)
 HAS_GIT_COMMIT=true
 if ! git rev-parse HEAD &>/dev/null; then
   HAS_GIT_COMMIT=false
 fi
 
 if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
-  SAFE_SLUG=$(echo "$TASK_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
-  [[ -z "$SAFE_SLUG" ]] && SAFE_SLUG="task"
-  SHORT_ID=$(echo "$TASK_ID" | tail -c 7)
-  WORKTREE_NAME="wt-${SAFE_SLUG}-${SHORT_ID}"
-
-  echo "🚀 Đang khởi chạy worker trong worktree: $WORKTREE_NAME..."
-
-  START_RECEIPT=$($ORCA_BIN orchestration worker-start \
-    --task "$TASK_ID" \
-    --worktree new-child \
-    --name "$WORKTREE_NAME" \
-    --agent "$AGENT" \
-    "${MODEL_ARGS[@]}" \
-    --setup run \
-    --timeout-ms "$TIMEOUT_MS" \
-    --json 2>&1) || true
+  WORKTREE_NAME="$ROLE_WORKTREE"
+  if git worktree list | grep -q "\[$ROLE_WORKTREE\]"; then
+    echo "🚀 Tái sử dụng worktree định danh '$ROLE_WORKTREE' (Mở & gom nhóm Terminal Tab mới bên trong '$ROLE_WORKTREE')..."
+    START_RECEIPT=$($ORCA_BIN orchestration worker-start \
+      --task "$TASK_ID" \
+      --worktree "branch:$ROLE_WORKTREE" \
+      --agent "$AGENT" \
+      "${MODEL_ARGS[@]}" \
+      --timeout-ms "$TIMEOUT_MS" \
+      --json 2>&1) || true
+  else
+    echo "🚀 Khởi tạo worktree định danh lần đầu cho role: '$ROLE_WORKTREE'..."
+    START_RECEIPT=$($ORCA_BIN orchestration worker-start \
+      --task "$TASK_ID" \
+      --worktree new-child \
+      --name "$ROLE_WORKTREE" \
+      --agent "$AGENT" \
+      "${MODEL_ARGS[@]}" \
+      --setup run \
+      --timeout-ms "$TIMEOUT_MS" \
+      --json 2>&1) || true
+  fi
 else
   WORKTREE_NAME="current"
   echo "⚠️  Git repository chưa có commit đầu tiên. Đang khởi chạy worker trên workspace hiện tại..."
