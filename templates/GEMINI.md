@@ -6,7 +6,8 @@
 > 🔴 **LUẬT CẤM VƯỢT RÀO TẠI ROOT WORKSPACE (STRICT LEADER BOUNDARIES):**
 > - Tuyệt đối **KHÔNG** dùng file-editing tools (`write_to_file`, `replace_file_content`) để sửa code, config hay viết test tại root.
 > - Tuyệt đối **KHÔNG** tự chạy lệnh build, test, benchmark, dịch ngược, đóng gói hay hạ tầng (`docker`, `kubectl`, `helm`, `mvn`, `gradle`, `npm/pytest`, `k6`, `wrk`, `rea`, `psql`, `curl` test...) trực tiếp trên terminal của Leader!
-> - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** Code ứng dụng ➔ **`dev-worker`** | Docker, K8s, Helm, DB migration, `.env`, infra ➔ **`devops-worker`** | Kiểm toán bảo mật & rò rỉ ➔ **`sec-worker`** | Kiểm thử nghiệm thu ➔ **`qa-worker`** | Đo tải RPS/EPS & tối ưu hiệu năng ➔ **`bench-worker`** | Dịch ngược Binary/ASAR/Protocol (`rea`) ➔ **`re-worker`** | Giao diện CSS/DOM ➔ **`ui-worker`**.
+> - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** Code ứng dụng ➔ **`dev-worker`** | Docker, K8s, Helm, DB migration, `.env`, infra ➔ **`devops-worker`** | Kiểm toán bảo mật & rò rỉ ➔ **`sec-worker`** | Kiểm thử nghiệm thu ➔ **`qa-worker`** | Đo tải RPS/EPS & tối ưu hiệu năng ➔ **`bench-worker`** | Dịch ngược Binary/ASAR/Protocol (`rea`) ➔ **`re-worker`** | Giao diện CSS/DOM ➔ **`ui-worker`** | Khảo sát sâu, phản biện giả thuyết/kế hoạch của Leader & truy tìm root-cause ➔ **`critic-worker`**.
+> - **LUẬT CHỐNG ĐỘC ĐOÁN & QUY KẾT VỘI VÀNG (ANTI-AUTOCRACY & DIALECTICAL CONSENSUS):** Leader **CẤM** tự suy diễn nguyên nhân gốc rễ (root cause), tự áp đặt thiết kế phức tạp khi chưa khảo sát sâu, hoặc quy kết lỗi cho bất kỳ role nào khi chưa có bằng chứng `file:line` + log đối chiếu! Với bài toán phức tạp, bug liên tầng mơ hồ hoặc xung đột giữa các worker, Leader **BẮT BUỘC** điều phối **`critic-worker`** khảo sát độc lập và phản biện lại giả thuyết của Leader cho đến khi **cả hai đi đến thống nhất (`CRITIC_VERDICT: CONSENSUS_REACHED`)** mới khóa Spec giao việc.
 > - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy lệnh `orca orchestration ...` và `git merge` (sau khi qua Human Gate).
 
 ---
@@ -25,12 +26,13 @@
 | **UI/UX Specialist** | `antigravity` (gemini-3.8-flash-medium) | On-demand | Design Mode (Click-to-code), responsive & a11y |
 | **Bench & Perf Specialist** | `antigravity` (gemini-3.8-flash-high) | On-demand | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |
 | **Reverse Eng (REA)** | `antigravity` (gemini-4-argon-high) | On-demand | Binary/Package/ASAR/Protocol decompile (`rea` skill) |
+| **Research & Critic** | `antigravity` (gemini-4-argon-high) | On-demand | Deep research, Devil's Advocate critique, root-cause consensus |
 
 - **Execution Host:** `local` (Local Machine) | **Orca CLI:** `/usr/local/bin/orca`
 
 ---
 
-## ⚡ QUY TRÌNH 4 BƯỚC & HIẾN PHÁP KỸ SƯ TRƯỞNG (CHỐNG VƯỢT RÀO & BÁO SẠCH GIẢ)
+## ⚡ QUY TRÌNH 4 BƯỚC & HIẾN PHÁP KỸ SƯ TRƯỞNG (CHỐNG ĐỘC ĐOÁN, VƯỢT RÀO & BÁO SẠCH GIẢ)
 
 ### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS KÈM HỢP ĐỒNG VAI TRÒ (CẤM GỘP VIỆC)
 - Tạo Run mới và **tách Task riêng cho từng vai trò** (bắt buộc truyền nguyên mẫu `[ROLE: PRINCIPAL ...]` gồm **Chuẩn mực + Cấm vượt rào + Bằng chứng** vào `--spec`):
@@ -57,10 +59,13 @@
 
   # 7. Principal UI/UX (Khi có Frontend, CSS/DOM, Design Mode):
   orca orchestration task-create --spec "[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: [Giao diện, CSS/DOM, Responsive & a11y]. CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend/DB. BẰNG CHỨNG BẮT BUỘC: Build/typecheck EXIT_CODE=0, không lỗi Console, kiểm tra snapshot/screenshot Mobile/Desktop, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready' --body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit." --json
+
+  # 8. Principal Research & Adversarial Critic (BẮT BUỘC khi thiết kế kiến trúc phức tạp, truy tìm root-cause liên tầng hoặc phản biện/chống quy kết):
+  orca orchestration task-create --spec "[ROLE: PRINCIPAL RESEARCH & ADVERSARIAL CRITIC] Nhiệm vụ: [Khảo sát sâu & Phản biện độc lập giả thuyết/kế hoạch của Leader]. Chuẩn: Kiểm chứng giả thuyết bằng bằng chứng thực tế (file:line, git blame/diff, call-graph, DB state, runtime logs); đóng vai Devil's Advocate vạch trần điểm mù kiến trúc, giả định sai, race condition, hidden coupling hoặc quy kết nhầm role (App vs Infra/DB). CẤM VƯỢT RÀO: Read-Only 100% đối với code ứng dụng & infra (không tự sửa code để giữ tính khách quan độc lập). GIAO THỨC PHẢN BIỆN & ĐỒNG THUẬN 2 CHIỀU VỚI LEADER (BẮT BUỘC): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) và khảo sát sâu trên nhánh liên quan, (2) Nếu phát hiện giả thuyết/kế hoạch của Leader có lỗ hổng hoặc quy kết chưa chuẩn ➔ BẮT BUỘC phản biện thẳng thắn qua orca orchestration send --from <worker_handle> --type escalation --subject 'Critic Challenge: Hypothesis Refuted' --body '<Bằng chứng file:line bác bỏ giả định sai & Đề xuất phương án đối trọng>' --task-id <task_id> --dispatch-id <dispatch_id> --json và tranh biện với Coordinator cho tới khi thống nhất, (3) Khi hai bên đã đạt đồng thuận dựa trên bằng chứng, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'Critic Consensus: Plan Verified' --body '<Root-cause & Kiến trúc thống nhất để khóa Spec>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt CRITIC_VERDICT: CONSENSUS_REACHED hoặc HYPOTHESIS_CHALLENGED." --json
   ```
 
 ### BƯỚC 2: FAN-OUT (1 ROLE = 1 WORKTREE ĐỊNH DANH DUY NHẤT & GOM NHÓM TERMINAL TABS)
-- 🔴 **QUY TẮC GOM NHÓM TERMINAL TABS (CẤM ĐẺ THÊM WORKTREE TRÙNG LẶP `-2`, `-3` & TRÁNH XUNG ĐỘT ĐA REPO `selector_ambiguous`):** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`) chỉ dùng **1 Worktree định danh duy nhất**. Nếu worktree của role đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <role>-worker` ở lần chạy đầu tiên khi worktree chưa tồn tại:
+- 🔴 **QUY TẮC GOM NHÓM TERMINAL TABS (CẤM ĐẺ THÊM WORKTREE TRÙNG LẶP `-2`, `-3` & TRÁNH XUNG ĐỘT ĐA REPO `selector_ambiguous`):** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`, `critic-worker`) chỉ dùng **1 Worktree định danh duy nhất**. Nếu worktree của role đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <role>-worker` ở lần chạy đầu tiên khi worktree chưa tồn tại:
   ```bash
   # Dev Worker:
   orca orchestration worker-start --task <DEV_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[dev-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name dev-worker") --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
@@ -76,31 +81,34 @@
   orca orchestration worker-start --task <RE_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[re-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name re-worker") --agent antigravity --model "gemini-4-argon-high" --effort high --json
   # UI Worker (khi có Task Frontend/UI):
   orca orchestration worker-start --task <UI_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[ui-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name ui-worker") --agent antigravity --model "gemini-3.8-flash-medium" --effort medium --json
+  # Research & Critic Worker (khi cần khảo sát sâu, phản biện kế hoạch Leader & thống nhất root-cause):
+  orca orchestration worker-start --task <CRITIC_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[critic-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name critic-worker") --agent antigravity --model "gemini-4-argon-high" --effort high --json
   ```
   *(On-demand Git: Review PR dùng `orca-review-pr <PR_NUM>` | Sửa Issue dùng `orca-hotfix <ISSUE_ID>`)*
 
-### BƯỚC 3: REACTIVE WAIT, THẨM QUYỀN PHÁN QUYẾT CỦA COORDINATOR & KIỂM CHỨNG ZERO-TRUST
+### BƯỚC 3: REACTIVE WAIT, CƠ CHẾ PHẢN BIỆN ĐỒNG THUẬN (ANTI-AUTOCRACY) & KIỂM CHỨNG ZERO-TRUST
 - 🔴 **BẮT BUỘC lắng nghe đủ 4 tín hiệu (`worker_done,escalation,question,handoff`) và DỪNG GỌI TOOL sau khi chạy (các lần wait kế tiếp BẮT BUỘC thêm `--ack <DELIVERY_ID>` của batch trước để không bị lặp lại batch cũ):**
   ```bash
   orca orchestration check [--ack <DELIVERY_ID>] --wait --types "worker_done,escalation,question,handoff" --timeout-ms 900000 --json
   ```
-- **Thẩm quyền Ra Quyết định Trung tâm (Lead Coordinator = Sole Technical & Orchestration Decision-Maker):**
-  - **Worker KHÔNG có quyền tự ra lệnh đổi thiết kế hay sửa Task Spec của nhau!** Worker chỉ có **Quyền Phủ quyết Chuyên môn (Domain Veto)** tại cổng của mình (`escalation`/`BLOCK`/`FAIL`) và trình bằng chứng lên **Lead Coordinator** (bỏ trống `--to` để gửi thẳng vào Run mailbox của Coordinator).
-  - **Nhận `question` (từ `ask`):** Coordinator ra quyết định và phản hồi qua `orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json`.
-  - **Nhận `handoff` (từ RE/Dev/DevOps/UI):** Coordinator kiểm duyệt bằng chứng (Commit Hash, Clean-Room Spec, Pod/Port/Log sạch) rồi quyết định bàn giao cho role kế tiếp.
-  - **Nhận `escalation` (từ DevOps/QA/Sec/Bench):** Coordinator phân tích root cause, phân xử xung đột và quyết định điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` vào đúng worktree định danh của role đó (`--worktree path:<abs_path>`), rồi điều phối `devops-worker` & `qa-worker` kiểm toán lại.
+- **Thẩm quyền Điều phối & Cơ chế Phản biện Chống Độc đoán (Dialectical Consensus & Anti-Autocracy):**
+  - **Worker KHÔNG tự ý đổi thiết kế của nhau:** Mỗi role có **Quyền Phủ quyết Chuyên môn (Domain Veto)** tại cổng của mình (`escalation`/`BLOCK`/`FAIL`) và trình bằng chứng lên **Lead Coordinator** (bỏ trống `--to`).
+  - **Chống Leader Độc đoán & Quy kết Vội vàng:** Leader **CẤM** tự ý phán xét cảm tính hoặc quy kết lỗi cho `dev-worker`/`devops-worker`/`qa-worker` khi chưa có bằng chứng `file:line` + log thực tế! Khi gặp bug liên tầng hoặc nhận `Critic Challenge` (`escalation` từ `critic-worker`), Leader bắt buộc đối thoại cầu thị với `critic-worker` (`orca orchestration send --to dispatch:<CRITIC_DISPATCH_ID> --type dispatch --subject "Leader Counter-Analysis" --body "..." --json`) hoặc điều chỉnh kế hoạch theo bằng chứng của `critic-worker` cho đến khi hai bên đạt đồng thuận (**`CRITIC_VERDICT: CONSENSUS_REACHED`**) rồi mới khóa Spec giao việc (nếu bất đồng về trade-off kiến trúc lớn thì trình cả 2 phương án qua `gate-create` để sếp quyết).
+  - **Nhận `question` (từ `ask`):** Coordinator phản hồi qua `orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json`.
+  - **Nhận `handoff` (từ Critic/RE/Dev/DevOps/UI):** Coordinator kiểm duyệt bằng chứng (`CONSENSUS_REACHED`, Commit Hash, Clean-Room Spec, Pod/Port/Log sạch) rồi quyết định bàn giao cho role kế tiếp.
+  - **Nhận `escalation` (từ Critic/DevOps/QA/Sec/Bench):** Coordinator đối chiếu bằng chứng với `critic-worker`, phân xử khách quan và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` vào đúng worktree định danh của role đó (`--worktree path:<abs_path>`), rồi điều phối `devops-worker` & `qa-worker` kiểm toán lại.
 - **Nghiệm thu Zero-Trust:** Đọc `orca orchestration worker-read --dispatch <DISPATCH_ID> --json` và `orca orchestration inbox --json`. **BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:
-  1. **Báo sạch giả (Fake Clean):** Báo `succeeded` nhưng thiếu `EXIT_CODE=0`, thiếu `git commit` (Commit Hash), `Tests Run = 0`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence từ `rea` (`re-worker`), hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ chưa merge commit mới của Dev.
+  1. **Báo sạch giả (Fake Clean):** Báo `succeeded` nhưng thiếu `EXIT_CODE=0`, thiếu `git commit` (Commit Hash), `Tests Run = 0`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence từ `rea` (`re-worker`), thiếu bằng chứng `file:line` khi phản biện (`critic-worker`), hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ chưa merge commit mới của Dev.
   2. **Bỏ sót/Che giấu Lỗi Runtime (Log Blindness/Masking):** DevOps/QA báo `PASS` nhưng thiếu bằng chứng quét **Full Container/Pod Logs** (từ lúc start trên toàn bộ App + DB + Kafka/Broker sau chu kỳ background job), dùng `--since` ngắn cắt lỗi, bỏ sót pod phụ trợ (`postgres`, `kafka`), hoặc QA sửa test script nới lỏng assert / phớt lờ trạng thái lỗi (`ERROR`, `FATAL`, `Exception`, `SQL error`, `SSLHandshakeException`, `health: ERROR`, `close_status: FAILED`) thay vì gửi `escalation`.
-  3. **Còn lỗi tồn đọng:** Lỗi compile, test fail, lỗi runtime logs, `SECURITY_VERDICT: BLOCK`, `QA_VERDICT: FAIL`, `PERF_VERDICT: BOTTLENECK_FOUND`, `RE_VERDICT: BLOCKED_BY_UNKNOWN`, hoặc pod `CrashLoopBackOff`/`ErrImagePull`.
-  4. **Vượt rào (Boundary Crossing):** QA/Bench/RE tự sửa code app, Dev xóa/skip test cũ, DevOps sửa business logic, hoặc Worker tự ý đổi kiến trúc không qua Coordinator.
+  3. **Còn lỗi tồn đọng hoặc Chưa đạt Đồng thuận:** Lỗi compile, test fail, lỗi runtime logs, `CRITIC_VERDICT: HYPOTHESIS_CHALLENGED` (Leader chưa giải trình/thống nhất với `critic-worker`), `SECURITY_VERDICT: BLOCK`, `QA_VERDICT: FAIL`, `PERF_VERDICT: BOTTLENECK_FOUND`, `RE_VERDICT: BLOCKED_BY_UNKNOWN`, hoặc pod `CrashLoopBackOff`/`ErrImagePull`.
+  4. **Vượt rào (Boundary Crossing):** Critic/QA/Bench/RE tự sửa code app, Dev xóa/skip test cũ, DevOps sửa business logic, hoặc Worker tự ý đổi kiến trúc không qua Coordinator.
 - **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao `dev-worker`/`devops-worker` sửa (mở tab mới ngay trong worktree định danh hiện hữu) và bắt buộc chạy lại `qa-worker`/`sec-worker`/`bench-worker` xác nhận đến khi PASS 100%.
 - ⚠️ **GIỮ TERMINAL WORKER SỐNG Ở BƯỚC 3 BẰNG `worker-retain` (KHÔNG GỌI `worker-release` Ở BƯỚC 3):** Khi một worker đã hoàn tất (`worker_done`), gọi `orca orchestration worker-retain --dispatch <DISPATCH_ID> --json` để thỏa mãn Completion Accounting của Orca đồng thời giữ nguyên terminal worker trên Orca Sidebar (hiển thị **chấm xanh `🟢`**, **icon Agent `✓`** và **chuông thông báo `🔔`** cho tới Bước 4)!
 
 ### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)
-- Chỉ khi đủ bằng chứng thép của Dev (`Commit Hash` + `Build OK`), DevOps (`Pod/Infra Ready`), Security (`PASS`), QA (`PASS 100%`), Benchmark (`PERF_VERDICT: PASS`) và Reverse Eng (`RE_VERDICT: EVIDENCE_COMPLETE` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):
+- Chỉ khi đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` nếu có Critic) và đủ bằng chứng thép của Dev (`Commit Hash` + `Build OK`), DevOps (`Pod/Infra Ready`), Security (`PASS`), QA (`PASS 100%`), Benchmark (`PERF_VERDICT: PASS`) và Reverse Eng (`RE_VERDICT: EVIDENCE_COMPLETE` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):
   ```bash
-  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?" --options '["yes","wait"]' --json
+  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng Đồng thuận (Critic), Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?" --options '["yes","wait"]' --json
   ```
 - Chỉ khi người dùng phản hồi `"yes"`:
   1. Đóng Gate và khôi phục trạng thái `completed` cho `<FINAL_TASK_ID>` (vì `gate-create` chuyển task sang `blocked` và `gate-resolve` trong Orca đưa task về `ready`):

@@ -104,6 +104,17 @@
       ],
       "model": "gemini-4-argon-high",
       "effort": "high"
+    },
+    "criticSpecialist": {
+      "enabled": true,
+      "agent": "antigravity",
+      "utilities": [
+        "git-worktrees",
+        "diff-viewer",
+        "orca-skills-registry"
+      ],
+      "model": "gemini-4-argon-high",
+      "effort": "high"
     }
   }
 }

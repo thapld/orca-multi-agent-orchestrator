@@ -8,28 +8,30 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
 
 ## 🌟 Tính Năng Nổi Bật
 
-1. **Linh Hoạt Đa Agent (Agnostic Multi-Agent Support — 10 Vai Trò Cấp Principal):**
-   * Tự do lựa chọn bất kỳ model/agent nào Orca hỗ trợ cho từng vị trí: **Lead Coordinator**, **Full-Stack Devs**, **QA & SDET**, **Security & Bug Hunter**, **PR Reviewer**, **Git Issue Resolver**, **UI/UX Specialist**, **DevOps & SRE**, **Bench & Perf Specialist** và **Reverse Eng Specialist (REA)**.
-2. **Cấu Hình Concurrency (Song Song Hóa Tác Vụ):**
+1. **Linh Hoạt Đa Agent (Agnostic Multi-Agent Support — 11 Vai Trò Cấp Principal):**
+   * Tự do lựa chọn bất kỳ model/agent nào Orca hỗ trợ cho từng vị trí: **Lead Coordinator**, **Research & Adversarial Critic (`critic-worker`)**, **Full-Stack Devs**, **QA & SDET**, **Security & Bug Hunter**, **PR Reviewer**, **Git Issue Resolver**, **UI/UX Specialist**, **DevOps & SRE**, **Bench & Perf Specialist** và **Reverse Eng Specialist (REA)**.
+2. **Cơ Chế Phản Biện & Đồng Thuận Biện Chứng Chống Leader Độc Đoán (Anti-Autocracy & Dialectical Consensus):**
+   * Tích hợp vai trò **Principal Research & Adversarial Critic (`critic-worker`)** đóng vai trò điều tra thực chứng (`file:line` + git blame + runtime log) và phản biện độc lập (Devil's Advocate), ngăn chặn tuyệt đối việc **Lead Coordinator** áp đặt thiết kế chủ quan hoặc quy kết lỗi oan sai giữa Dev/DevOps/QA trước khi có bằng chứng xác thực (`CRITIC_VERDICT: CONSENSUS_REACHED`).
+3. **Cấu Hình Concurrency (Song Song Hóa Tác Vụ):**
    * Cho phép chỉ định số lượng agent song song (1–5 workers) cho nhóm Developer, QA hoặc Security.
-3. **Khai Thác 100% Tiện Ích Độc Quyền Của Orca & REA:**
-   * **Git Worktrees & Terminal Tab Grouping:** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`...) sở hữu **1 worktree định danh duy nhất** và tự động gom nhóm các Terminal Tab mới bên trong worktree đó (`--worktree path:<abs_path>`), loại bỏ hoàn toàn xung đột git và rác worktree trùng lặp (`-2`, `-3`).
+4. **Khai Thác 100% Tiện Ích Độc Quyền Của Orca & REA:**
+   * **Git Worktrees & Terminal Tab Grouping:** Mỗi vai trò (`dev-worker`, `critic-worker`, `devops-worker`, `qa-worker`, `sec-worker`...) sở hữu **1 worktree định danh duy nhất** và tự động gom nhóm các Terminal Tab mới bên trong worktree đó (`--worktree path:<abs_path>`), loại bỏ hoàn toàn xung đột git và rác worktree trùng lặp (`-2`, `-3`).
    * **Embedded Browser & Design Mode:** Click trực tiếp vào element trên màn hình để trích xuất HTML/CSS và mã nguồn ném thẳng vào terminal của agent.
    * **Computer Use:** Cho phép agent tương tác GUI với các phần mềm desktop ngoài trình duyệt qua Accessibility Tree.
    * **SSH Remote Worktrees:** Chạy các tác vụ nặng trên máy chủ từ xa (như host `orb` hay GPU box) trong khi giao diện editor vẫn nằm trên macOS.
    * **Orca Skills Registry & Reverse Engineering (`morluto/rea`):** Nạp các bộ công cụ chuẩn hóa (`orchestration`, `orca-cli`, `orca-linear`, `orca-emulator`...) và bộ giải phẫu binary/package/protocol hộp đen `reverse-engineer-anything`.
-4. **Git Lifecycle Chuyên Biệt:**
+5. **Git Lifecycle Chuyên Biệt:**
    * **PR Reviewer:** Checkout PR độc lập (`--pr <id>`), soi diff từng dòng (`Annotate AI Diff`) và chạy kiểm tra CI.
    * **Git Issue Auto-Resolver:** Tự động kết nối với GitHub qua **Orca Native GitHub Integration & Bell Inbox**, checkout issue (`--issue <id>`), tự tái hiện bug và tạo PR.
-5. **Chính Sách Đa Luồng Song Song (Concurrent Dual-Track Policy):**
+6. **Chính Sách Đa Luồng Song Song (Concurrent Dual-Track Policy):**
    * Khi Leader đang điều phối hoặc review tính năng mà có Issue P0/Hotfix gán đột xuất: tự động fork ra worktree riêng (`--no-parent`) để fix ngầm song song mà không làm gián đoạn luồng chính.
-6. **Chính Sách Bàn Giao Khi Đổi Người (Reassignment & Handoff Policy):**
+7. **Chính Sách Bàn Giao Khi Đổi Người (Reassignment & Handoff Policy):**
    * Khi issue đang fix bị chuyển sang người khác: tự động dừng worker an toàn (`worker-stop`), đóng gói tiến độ nháp thành branch bàn giao `wip/issue-<id>-handover`, để lại comment trên GitHub và thu dọn worktree.
-7. **Phân Cấp Thẩm Quyền Quyết Định 3 Tầng & Giao Tiếp Đa Chiều (3-Tier Decision Hierarchy & Handoff Protocol):**
-   * **Worker** giữ Quyền Phủ quyết Chuyên môn (`escalation`), trình duyệt kết quả bàn giao (`handoff`) và hỏi quyết định kiến trúc (`ask`). **Lead Coordinator** là Người Ra Quyết Định Kỹ Thuật & Điều Phối Duy Nhất trong các bước thực thi (`check --ack`, `reply`, `send --to dispatch:<id> --type dispatch` hoặc tạo Task vá lỗi). **Human User** giữ quyền quyết định cuối cùng trước khi merge (`gate-create`).
-8. **Universal Auto-Discovery (Khởi chạy tự động không cần dán prompt):**
+8. **Phân Cấp Thẩm Quyền Quyết Định 3 Tầng & Giao Tiếp Đa Chiều (3-Tier Decision Hierarchy & Handoff Protocol):**
+   * **Worker** giữ Quyền Phủ quyết Chuyên môn (`escalation`), Phản biện Giả thuyết (`Critic Challenge`), trình duyệt kết quả bàn giao (`handoff`) và hỏi quyết định kiến trúc (`ask`). **Lead Coordinator** phối hợp phản biện với `critic-worker` để đạt đồng thuận (`CONSENSUS_REACHED`) và điều phối các bước thực thi (`check --ack`, `reply`, `send --to dispatch:<id> --type dispatch` hoặc tạo Task vá lỗi). **Human User** giữ quyền quyết định cuối cùng trước khi merge (`gate-create`).
+9. **Universal Auto-Discovery (Khởi chạy tự động không cần dán prompt):**
    * Tự động tạo symlink `CLAUDE.md` và `AGENTS.md` trỏ về `.agents/GEMINI.md`. Dù bạn mở Antigravity, Claude Code (`claude`), hay Codex CLI làm Leader, agent đều tự động đọc toàn bộ directive và quy trình điều phối ngay khi khởi động mà không cần dán prompt thủ công.
-9. **Điều Chỉnh Model & Agent Năng Động Ngay Khi Ở Leader (`orca-team` CLI):**
+10. **Điều Chỉnh Model & Agent Năng Động Ngay Khi Ở Leader (`orca-team` CLI):**
    * Cung cấp công cụ dòng lệnh `orca-team` để xem và thay đổi agent, model provider, reasoning effort hoặc số lượng concurrency của bất kỳ vai trò nào ngay trong lúc làm việc mà không cần sửa file thủ công.
 
 ---
@@ -95,14 +97,14 @@ orca-project-init /path/to/project
 3. Chọn agent, model, số lượng song song & gói tiện ích cho **QA Testers**.
 4. Chọn agent, model & gói tiện ích cho **Bug Hunter & Security**.
 5. Chọn agent & model cho **PR Reviewer** và **Git Issue Resolver**.
-6. Bật/tắt các vai trò mở rộng: **UI/UX Designer** (Design Mode), **DevOps Specialist** (Docker/K8s/DB/SSH), **Performance & Benchmark Specialist** (Đo tải RPS/EPS, p95/p99 latency, profiling) và **Reverse Engineering Specialist (REA)** (Giải phẫu Binary/ASAR/APK/Firmware/Protocol với skill [`morluto/rea`](https://github.com/morluto/rea.git)).
+6. Bật/tắt các vai trò mở rộng: **UI/UX Designer** (Design Mode), **DevOps Specialist** (Docker/K8s/DB/SSH), **Performance & Benchmark Specialist** (Đo tải RPS/EPS, p95/p99 latency, profiling), **Reverse Engineering Specialist (REA)** (Giải phẫu Binary/ASAR/APK/Firmware/Protocol với skill [`morluto/rea`](https://github.com/morluto/rea.git)) và **Research & Adversarial Critic (`critic-worker`)** (Điều tra nguyên nhân gốc & phản biện thiết kế với Leader).
 7. Chọn môi trường thực thi: **Local** hoặc **SSH (`orb`)**.
 
 ### Vận hành tự động sau khi khởi tạo:
-* Tự động tạo `.agents/GEMINI.md` (tích hợp đầy đủ **Hiến pháp 10 Vai trò cấp Principal**, tối ưu token) cùng các symlink `GEMINI.md`, `AGENTS.md` / `CLAUDE.md` ở thư mục gốc.
+* Tự động tạo `.agents/GEMINI.md` (tích hợp đầy đủ **Hiến pháp 11 Vai trò cấp Principal & Luật Chống Độc Đoán**, tối ưu token) cùng các symlink `GEMINI.md`, `AGENTS.md` / `CLAUDE.md` ở thư mục gốc.
 * Tự động thêm toàn bộ file cấu hình & thư mục runtime của Orchestrator vào `.gitignore` để giữ sạch Git status của dự án.
 * Tự động kích hoạt **Orca Agent Status Hooks** để hiển thị vòng xoay loading (`⟳`), chấm xanh (`🟢`), icon hoàn thành (`✓`) và chuông thông báo (`🔔`) trên thanh bên của Orca ADE.
-* Mở dự án trong Antigravity, Claude Code (`claude`), Codex hoặc Orca ADE: mọi yêu cầu của bạn sẽ tự động vận hành theo đúng **Quy trình 4 Bước** (Tách Task theo vai trò ➔ Fan-out sang Child Worktrees ➔ Reactive Wait `check --wait` ➔ Human Gate xin phép trước khi merge).
+* Mở dự án trong Antigravity, Claude Code (`claude`), Codex hoặc Orca ADE: mọi yêu cầu của bạn sẽ tự động vận hành theo đúng **Quy trình 4 Bước** (Tách Task theo vai trò ➔ Fan-out sang Child Worktrees ➔ Reactive Wait `check --wait` & Phản biện Đồng thuận ➔ Human Gate xin phép trước khi merge).
 
 ---
 
@@ -123,15 +125,16 @@ orca-team set qa --agent antigravity
 # 4. Đổi agent cho Security Auditor:
 orca-team set sec --agent codex --model gpt-4o
 
-# 5. Bật/tắt các vai trò mở rộng chuyên biệt (UI, DevOps, Bench, Reverse Eng):
+# 5. Bật/tắt các vai trò mở rộng chuyên biệt (UI, DevOps, Bench, Reverse Eng, Critic):
 orca-team set ui --enable --agent claude
 orca-team set devops --enable --agent antigravity
 orca-team set bench --enable --agent antigravity --model gemini-3.8-flash-high
 orca-team set re --enable --agent antigravity --model gemini-4-argon-high
+orca-team set critic --enable --agent antigravity --model gemini-4-argon-high
 
 # 6. Chế độ tương tác từng bước (điều hướng bằng phím mũi tên):
 orca-team set dev
-orca-team set re
+orca-team set critic
 
 # 7. Quản lý Discovery Links cho nhiều AI CLI (Claude / Antigravity / Codex):
 orca-team link all      # Kích hoạt CLAUDE.md và AGENTS.md để mở bất kỳ AI CLI nào làm Leader
@@ -169,6 +172,9 @@ Nếu bạn hoặc AI Leader thấy **tiêu tốn quá nhiều token** mà khôn
 Các script tiện ích đã được cấu hình sẵn timeout 5 phút (`--timeout-ms 300000`), tự động tiêm Hiến pháp Vai trò cấp Principal (`[ROLE: PRINCIPAL ...]`) và tra cứu đúng Agent + Model từ `orca-team.json`:
 
 ```bash
+# Giao việc điều tra nguyên nhân gốc & phản biện thiết kế (Research & Adversarial Critic):
+orca-dispatch "Critique Payment Plan" critic "Kiểm chứng chéo giả thuyết lỗi callback EPUSDT và phản biện phương án thiết kế của Leader"
+
 # Giao việc cho Developer (tự động dùng agent/model đã config cho dev):
 orca-dispatch "Tạo module Auth" dev "Viết JWT login/refresh token có kiểm thử đầy đủ"
 
