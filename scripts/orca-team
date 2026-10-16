@@ -2812,6 +2812,31 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 else:
                     passed_items.append(f"Orca Status Hooks active cho: {', '.join(sorted(configured_agents))}.")
 
+            # 4.1c Kiểm tra Orca Command & Stdout Flood Guard Hook (16MB Circuit-Breaker)
+            guard_bin = os.path.expanduser("~/.local/bin/orca-command-guard")
+            agy_hooks_path = os.path.expanduser("~/.gemini/config/hooks.json")
+            if os.path.exists(guard_bin):
+                try:
+                    agy_hooks = {}
+                    if os.path.exists(agy_hooks_path):
+                        with open(agy_hooks_path, "r", encoding="utf-8") as hf:
+                            agy_hooks = json.load(hf)
+                    if not isinstance(agy_hooks, dict) or "orca-command-guard" not in agy_hooks:
+                        if not isinstance(agy_hooks, dict):
+                            agy_hooks = {}
+                        agy_hooks["orca-command-guard"] = {
+                            "PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": f"{guard_bin} --event PreToolUse"}]}],
+                            "PostToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": f"{guard_bin} --event PostToolUse"}]}],
+                            "PostToolUseFailure": [{"matcher": "run_command", "hooks": [{"type": "command", "command": f"{guard_bin} --event PostToolUseFailure"}]}],
+                        }
+                        os.makedirs(os.path.dirname(agy_hooks_path), exist_ok=True)
+                        with open(agy_hooks_path, "w", encoding="utf-8") as hf:
+                            json.dump(agy_hooks, hf, indent=2)
+                        actions_taken.append("Kích hoạt Orca Command & Stdout Flood Guard (16MB Circuit-Breaker) trong ~/.gemini/config/hooks.json")
+                    passed_items.append("Orca Command & Stdout Flood Guard (Backtick Blocker + 16MB Log Circuit-Breaker) active.")
+                except Exception as e:
+                    warning_issues.append(f"Không thể kiểm tra Orca Command Guard hook: {e}")
+
             # 4.2 Phân tích Mailbox
             inbox_res = subprocess.run([orca_bin, "orchestration", "inbox", "--limit", "50", "--json"], capture_output=True, text=True, timeout=5)
             hb_count = done_count = esc_count = handoff_count = done_tokens = 0

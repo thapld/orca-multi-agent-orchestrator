@@ -29,6 +29,7 @@ link_or_copy "$SCRIPT_DIR/scripts/orca-dispatch-task.sh" "$INSTALL_DIR/orca-disp
 link_or_copy "$SCRIPT_DIR/scripts/orca-issue-hotfix.sh" "$INSTALL_DIR/orca-hotfix"
 link_or_copy "$SCRIPT_DIR/scripts/orca-pr-review.sh" "$INSTALL_DIR/orca-review"
 link_or_copy "$SCRIPT_DIR/scripts/orca-pr-review.sh" "$INSTALL_DIR/orca-review-pr"
+link_or_copy "$SCRIPT_DIR/scripts/orca-command-guard.py" "$INSTALL_DIR/orca-command-guard"
 
 # Kích hoạt Orca Agent Status Hooks (vòng xoay vàng, chấm xanh & chuông thông báo cho Antigravity/Claude/Kimi/Gemini)
 if [[ -x "/Applications/Orca.app/Contents/MacOS/Orca" && -f "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/main/agent-hooks/managed-agent-hook-controls.js" ]]; then
@@ -40,6 +41,50 @@ if [[ -x "/Applications/Orca.app/Contents/MacOS/Orca" && -f "/Applications/Orca.
 elif command -v orca >/dev/null 2>&1; then
   orca agent hooks on --json >/dev/null 2>&1 || true
 fi
+
+# Đăng ký Orca Command & Stdout Flood Guard Hook (chặn bẫy backtick trong nháy kép, chặn cat binary và giới hạn log >16MB)
+python3 - "$INSTALL_DIR/orca-command-guard" << 'PY' >/dev/null 2>&1 || true
+import json, os, sys
+from pathlib import Path
+
+guard_bin = sys.argv[1]
+hooks_path = Path.home() / ".gemini" / "config" / "hooks.json"
+hooks_path.parent.mkdir(parents=True, exist_ok=True)
+data = {}
+if hooks_path.exists():
+    try:
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+data["orca-command-guard"] = {
+    "PreToolUse": [
+        {
+            "matcher": "run_command",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"ORCA_GUARD_EVENT=PreToolUse python3 '{guard_bin}'",
+                    "timeout": 5
+                }
+            ]
+        }
+    ],
+    "PostToolUse": [
+        {
+            "matcher": "run_command",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"ORCA_GUARD_EVENT=PostToolUse python3 '{guard_bin}'",
+                    "timeout": 5
+                }
+            ]
+        }
+    ]
+}
+hooks_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+echo "  🛡️  Đã kích hoạt Orca Command & Stdout Flood Guard Hook (PreToolUse + 16MB Log Circuit-Breaker)."
 
 echo ""
 echo "🎉 Cài đặt hoàn tất! Hãy đảm bảo '$INSTALL_DIR' có trong PATH của bạn:"

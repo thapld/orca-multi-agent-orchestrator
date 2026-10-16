@@ -12,6 +12,7 @@ BINARIES=(
   "orca-hotfix"
   "orca-review"
   "orca-review-pr"
+  "orca-command-guard"
 )
 
 echo "🐋 [Orca Orchestrator Uninstaller] Đang gỡ bỏ các CLI khỏi $INSTALL_DIR..."
@@ -36,6 +37,21 @@ for bin in "${BINARIES[@]}"; do
     fi
   fi
 done
+
+# Gỡ bỏ orca-command-guard khỏi ~/.gemini/config/hooks.json
+python3 - << 'PY' >/dev/null 2>&1 || true
+import json
+from pathlib import Path
+hooks_path = Path.home() / ".gemini" / "config" / "hooks.json"
+if hooks_path.exists():
+    try:
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+        if "orca-command-guard" in data:
+            del data["orca-command-guard"]
+            hooks_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+PY
 
 echo ""
 if [[ $removed_count -gt 0 ]]; then
