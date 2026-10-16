@@ -48,6 +48,86 @@ def _has_unescaped_backtick_in_double_quotes(cmd: str) -> bool:
     return False
 
 
+def _wrap_long_lines(data: bytes, max_line: int = 4096) -> bytes:
+    """Normalize CR to LF and guarantee no single line exceeds max_line bytes."""
+    data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    out_lines = []
+    for raw_line in data.split(b"\n"):
+        if len(raw_line) <= max_line:
+            out_lines.append(raw_line)
+        else:
+            for i in range(0, len(raw_line), max_line):
+                out_lines.append(raw_line[i : i + max_line])
+    return b"\n".join(out_lines)
+
+
+def _run_stream_filter() -> None:
+    """
+    O(1) RAM streaming pipe filter (`<cmd> | orca-command-guard --stream`):
+    - Streams first HEAD_KEEP_BYTES (256 KB) immediately to stdout with 4KB line wrapping.
+    - Buffers the latest TAIL_KEEP_BYTES (128 KB) in a fixed-size ring buffer in RAM.
+    - If upstream exceeds MAX_TASK_LOG_BYTES (16 MB), closes stdin (sending SIGPIPE to stop the producer)
+      and flushes the ring-buffer tail with a circuit-breaker notice.
+    """
+    from collections import deque
+
+    stdin_fd = sys.stdin.buffer
+    stdout_fd = sys.stdout.buffer
+    total_read = 0
+    head_remaining = HEAD_KEEP_BYTES
+    tail_chunks: deque[bytes] = deque()
+    tail_buffered = 0
+    cutoff_triggered = False
+
+    try:
+        while True:
+            chunk = stdin_fd.read(65536)
+            if not chunk:
+                break
+            total_read += len(chunk)
+            wrapped = _wrap_long_lines(chunk, 4096)
+
+            if head_remaining > 0:
+                emit = wrapped[:head_remaining]
+                stdout_fd.write(emit)
+                stdout_fd.flush()
+                head_remaining -= len(emit)
+                rest = wrapped[len(emit) :]
+                if rest:
+                    tail_chunks.append(rest)
+                    tail_buffered += len(rest)
+            else:
+                tail_chunks.append(wrapped)
+                tail_buffered += len(wrapped)
+                while tail_buffered > TAIL_KEEP_BYTES and len(tail_chunks) > 1:
+                    removed = tail_chunks.popleft()
+                    tail_buffered -= len(removed)
+
+            if total_read >= MAX_TASK_LOG_BYTES:
+                cutoff_triggered = True
+                try:
+                    stdin_fd.close()
+                except Exception:
+                    pass
+                break
+    except (BrokenPipeError, KeyboardInterrupt):
+        return
+
+    if tail_buffered > 0:
+        omitted = max(0, total_read - HEAD_KEEP_BYTES - tail_buffered)
+        if omitted > 0 or cutoff_triggered:
+            notice = (
+                f"\n[ORCA STREAM GUARD: Stream output reached {total_read / (1024 * 1024):.2f} MB "
+                f"(omitted {omitted:,} bytes in middle; ring-buffer preserved last {min(tail_buffered, TAIL_KEEP_BYTES):,} bytes)]\n"
+            ).encode("utf-8")
+            stdout_fd.write(notice)
+        tail_data = b"".join(tail_chunks)[-TAIL_KEEP_BYTES:]
+        stdout_fd.write(tail_data)
+        if not tail_data.endswith(b"\n"):
+            stdout_fd.write(b"\n")
+        stdout_fd.flush()
+
+
 def _enforce_task_log_cap(tasks_dir: Path) -> None:
     if not tasks_dir.is_dir():
         return
@@ -99,12 +179,9 @@ def _enforce_task_log_cap(tasks_dir: Path) -> None:
                     head_bytes = f.read(HEAD_KEEP_BYTES)
                     f.seek(max(HEAD_KEEP_BYTES, sz - TAIL_KEEP_BYTES))
                     tail_bytes = f.read(TAIL_KEEP_BYTES)
-                # Ensure lines have newlines so `head`/`tail` never hang on a 90MB single line
-                head_bytes = head_bytes.replace(b"\r", b"\n")
-                if len(head_bytes) > 4096 and b"\n" not in head_bytes[:4096]:
-                    head_bytes = head_bytes[:4096] + b"\n"
-                if len(tail_bytes) > 4096 and b"\n" not in tail_bytes[-4096:]:
-                    tail_bytes = tail_bytes[-4096:] + b"\n"
+                # Ensure every line has newline breaks <= 4096 bytes so `head`/`tail` never hang
+                head_bytes = _wrap_long_lines(head_bytes, 4096)
+                tail_bytes = _wrap_long_lines(tail_bytes, 4096)
                 notice = (
                     f"\n\n[ORCA CIRCUIT-BREAKER: Command output exceeded {MAX_TASK_LOG_BYTES // (1024 * 1024)} MB "
                     f"(actual: {sz / (1024 * 1024):.1f} MB). Runaway child process was terminated and middle output "
@@ -157,6 +234,10 @@ def _spawn_watcher_for_payload(payload: dict) -> None:
 
 
 def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--stream":
+        _run_stream_filter()
+        return
+
     if len(sys.argv) >= 3 and sys.argv[1] == "--watch-dir":
         _run_background_watcher(sys.argv[2])
         return
@@ -183,11 +264,13 @@ def main() -> None:
         sys.stdout.write("{}\n")
         return
 
+    allow_out = '{"decision":"ask"}\n' if os.environ.get("ORCA_GUARD_EVENT") == "PreToolUse" else "{}\n"
+
     tc = payload.get("toolCall") or payload.get("tool_call") or {}
     args = tc.get("args") or payload.get("tool_input") or {}
     cmd = str(args.get("CommandLine") or args.get("command") or "")
     if not cmd:
-        sys.stdout.write("{}\n")
+        sys.stdout.write(allow_out)
         return
 
     # Guard 1: Unescaped backticks inside double-quoted inline scripts (`python3 -c "...`key`..."`)
@@ -214,7 +297,7 @@ def main() -> None:
         sys.stdout.write(json.dumps({"decision": "deny", "reason": reason}) + "\n")
         return
 
-    sys.stdout.write("{}\n")
+    sys.stdout.write(allow_out)
 
 
 if __name__ == "__main__":
