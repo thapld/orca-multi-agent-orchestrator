@@ -71,6 +71,9 @@ if [[ "$SPEC" != "[ROLE:"* ]]; then
     ui|ux|frontend|design)
       SPEC="[ROLE: PRINCIPAL UI/UX ARCHITECT] Nhiệm vụ: ${SPEC}. Chuẩn mực: Tinh chỉnh chuẩn xác CSS/DOM qua Orca Design Mode, đảm bảo Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. CẤM VƯỢT RÀO: Chỉ sửa tầng UI/Frontend; CẤM sửa backend core/DB schema. BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: Build/typecheck EXIT_CODE=0, không lỗi Console, kiểm tra snapshot/screenshot thực tế và git commit kèm Commit Hash."
       ;;
+    bench|benchmark|perf|performance)
+      SPEC="[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: ${SPEC}. Chuẩn mực: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: (1) Phải git merge --no-edit <nhánh-dev> để đo trên code mới nhất, (2) CẤM nhận xét cảm tính ('Hệ thống mượt') — bắt buộc xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM, chỉ rõ file:line gây nghẽn và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND."
+      ;;
     *)
       SPEC="[ROLE: PRINCIPAL FULL-STACK DEV] Nhiệm vụ: ${SPEC}. Chuẩn mực: Clean Architecture, type-safe 100%, xử lý triệt để edge cases (null, timeout, thread-safety/concurrency, backward-compat), không để TODO/mock giả/hardcode secret. CẤM VƯỢT RÀO: Chỉ sửa code ứng dụng & unit test của mình; CẤM sửa K8s/Docker/CI của DevOps; CẤM xóa/skip/comment-out (@Ignore, .skip) test cũ đang fail để lách lỗi. BẰNG CHỨNG BẮT BUỘC trước khi gửi worker_done: (1) Chạy compile/build & unit test thực tế đạt EXIT_CODE=0, (2) git add & git commit sạch sẽ vào nhánh worktree (git status rỗng), (3) Báo rõ Branch, Commit Hash và log test."
       ;;

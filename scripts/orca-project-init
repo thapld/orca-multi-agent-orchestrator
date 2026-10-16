@@ -514,6 +514,19 @@ if [[ "$ENABLE_DEVOPS" == true ]]; then
   DEVOPS_EFFORT="$SELECTED_EFFORT"
 fi
 
+# 6.3 Performance & Benchmark Specialist
+echo ""
+echo "6.3. Performance & Benchmark Specialist (Đo tải RPS/EPS, Latency p95/p99, Stress Test, Profiling)"
+ask_toggle "Performance & Benchmark Specialist" "y"
+ENABLE_BENCH="$TOGGLE_RESULT"
+if [[ "$ENABLE_BENCH" == true ]]; then
+  choose_agent "Performance & Benchmark Specialist" 5
+  BENCH_AGENT="$SELECTED_AGENT"
+  choose_model "$BENCH_AGENT" "Performance & Benchmark Specialist" "high" "tier3"
+  BENCH_MODEL="$SELECTED_MODEL"
+  BENCH_EFFORT="$SELECTED_EFFORT"
+fi
+
 # ── 7. Host Môi trường Thực thi ──
 local host_menu=(
   "local (Chạy trực tiếp trên máy macOS)"
@@ -562,6 +575,9 @@ echo "│  UI/UX Designer:  $(fmt_agent_model "$UI_AGENT" "$UI_MODEL" "$UI_EFFOR
 fi
 if [[ "$ENABLE_DEVOPS" == true ]]; then
 echo "│  DevOps / Infra:  $(fmt_agent_model "$DEVOPS_AGENT" "$DEVOPS_MODEL" "$DEVOPS_EFFORT")"
+fi
+if [[ "$ENABLE_BENCH" == true ]]; then
+echo "│  Bench & Perf:    $(fmt_agent_model "$BENCH_AGENT" "$BENCH_MODEL" "$BENCH_EFFORT")"
 fi
 echo "│  Execution Host:  $HOST_LABEL"
 echo "└──────────────────────────────────────────────────────────────────────────┘"
@@ -640,6 +656,13 @@ cat > "$TARGET_CONFIG" << JSON
       "model": $([[ -n "$DEVOPS_MODEL" ]] && echo "\"$DEVOPS_MODEL\"" || echo "null"),
       "effort": $([[ -n "$DEVOPS_EFFORT" ]] && echo "\"$DEVOPS_EFFORT\"" || echo "null"),
       "utilities": ["ssh-remote-execution", "orca-per-workspace-env"]
+    },
+    "benchSpecialist": {
+      "enabled": $ENABLE_BENCH,
+      "agent": "${BENCH_AGENT:-none}",
+      "model": $([[ -n "$BENCH_MODEL" ]] && echo "\"$BENCH_MODEL\"" || echo "null"),
+      "effort": $([[ -n "$BENCH_EFFORT" ]] && echo "\"$BENCH_EFFORT\"" || echo "null"),
+      "utilities": ["git-worktrees", "ssh-remote-execution", "orca-skills-registry"]
     }
   }
 }
@@ -666,6 +689,14 @@ if [[ "$ENABLE_UI" == true ]]; then
   orca orchestration worker-start --task <UI_TASK_ID> --worktree new-child --name ui-worker $(fmt_worker_args "$UI_AGENT" "$UI_MODEL" "${UI_EFFORT:-medium}") --json"$'\n'
 fi
 
+if [[ "$ENABLE_BENCH" == true ]]; then
+  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **Bench & Perf Specialist** | $(fmt_md_cell "$BENCH_AGENT" "$BENCH_MODEL") | On-demand | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |"$'\n'
+  EXTRA_STEP1_RULES="${EXTRA_STEP1_RULES}  # Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):
+  orca orchestration task-create --spec \"[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: [Đo tải, benchmark & profiling]. Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! BẰNG CHỨNG BẮT BUỘC: (1) Phải git merge --no-edit <nhánh-dev> để đo trên code mới nhất, (2) CẤM nhận xét cảm tính ('Hệ thống mượt') — bắt buộc xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM, chỉ rõ file:line gây nghẽn và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND.\" --json"$'\n'
+  EXTRA_STEP2_CMDS="${EXTRA_STEP2_CMDS}  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):
+  orca orchestration worker-start --task <BENCH_TASK_ID> --worktree new-child --name bench-worker $(fmt_worker_args "$BENCH_AGENT" "$BENCH_MODEL" "${BENCH_EFFORT:-high}") --json"$'\n'
+fi
+
 # ── Ghi file Directive GEMINI.md (Token-Optimized) ──
 cat > "$TARGET_RULE" << RULE
 # 👑 Orca Multi-Agent Orchestration Directive
@@ -675,8 +706,8 @@ cat > "$TARGET_RULE" << RULE
 >
 > 🔴 **LUẬT CẤM VƯỢT RÀO TẠI ROOT WORKSPACE (STRICT LEADER BOUNDARIES):**
 > - Tuyệt đối **KHÔNG** dùng file-editing tools (\`write_to_file\`, \`replace_file_content\`) để sửa code, config hay viết test tại root.
-> - Tuyệt đối **KHÔNG** tự chạy lệnh build, test, đóng gói hay hạ tầng (\`docker\`, \`kubectl\`, \`helm\`, \`mvn\`, \`gradle\`, \`npm/pytest\`, \`psql\`, \`curl\` test...) trực tiếp trên terminal của Leader!
-> - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** Code ứng dụng ➔ **\`dev-worker\`** | Docker, K8s, Helm, DB migration, \`.env\`, infra ➔ **\`devops-worker\`** | Kiểm toán bảo mật & rò rỉ ➔ **\`sec-worker\`** | Kiểm thử nghiệm thu ➔ **\`qa-worker\`** | Giao diện CSS/DOM ➔ **\`ui-worker\`**.
+> - Tuyệt đối **KHÔNG** tự chạy lệnh build, test, benchmark, đóng gói hay hạ tầng (\`docker\`, \`kubectl\`, \`helm\`, \`mvn\`, \`gradle\`, \`npm/pytest\`, \`k6\`, \`wrk\`, \`psql\`, \`curl\` test...) trực tiếp trên terminal của Leader!
+> - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** Code ứng dụng ➔ **\`dev-worker\`** | Docker, K8s, Helm, DB migration, \`.env\`, infra ➔ **\`devops-worker\`** | Kiểm toán bảo mật & rò rỉ ➔ **\`sec-worker\`** | Kiểm thử nghiệm thu ➔ **\`qa-worker\`** | Đo tải RPS/EPS & tối ưu hiệu năng ➔ **\`bench-worker\`** | Giao diện CSS/DOM ➔ **\`ui-worker\`**.
 > - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy lệnh \`orca orchestration ...\` và \`git merge\` (sau khi qua Human Gate).
 
 ---
@@ -711,7 +742,7 @@ ${EXTRA_STEP1_RULES}  # Principal AppSec Auditor (BẮT BUỘC khi có API mới
   \`\`\`
 
 ### BƯỚC 2: FAN-OUT (GIAO VIỆC ĐÚNG WORKER & MODEL TRONG CHILD WORKTREE)
-- Khởi chạy worker theo đúng Agent & Model trong bảng Topology (chạy \`dev-worker\` trước hoặc dùng \`--deps '["<DEV_TASK_ID>"]'\` để DevOps/Sec/QA lấy đúng commit mới của Dev):
+- Khởi chạy worker theo đúng Agent & Model trong bảng Topology (chạy \`dev-worker\` trước hoặc dùng \`--deps '["<DEV_TASK_ID>"]'\` để DevOps/Sec/QA/Bench lấy đúng commit mới của Dev):
   \`\`\`bash
   # Dev Worker:
   orca orchestration worker-start --task <DEV_TASK_ID> --worktree new-child --name dev-worker $(fmt_worker_args "$DEV_AGENT" "$DEV_MODEL" "${DEV_EFFORT:-high}") --json
@@ -728,16 +759,16 @@ ${EXTRA_STEP2_CMDS}  # Security Worker (khi có Task Security Audit):
   orca orchestration check --wait --types "worker_done,escalation" --timeout-ms 900000 --json
   \`\`\`
 - **Nghiệm thu Zero-Trust:** Đọc kỹ bằng \`orca orchestration worker-read --dispatch <DISPATCH_ID> --json\`. **BÁC BỎ NGAY** nếu vi phạm 1 trong 3 điều:
-  1. **Báo sạch giả (Fake Clean):** Báo \`succeeded\` nhưng thiếu log chạy lệnh thật (\`EXIT_CODE=0\`), chưa \`git commit\` (thiếu Commit Hash), \`Tests Run = 0\`, hoặc QA/DevOps/Sec chạy trên nhánh cũ mà chưa merge commit mới của Dev!
-  2. **Còn lỗi tồn đọng:** Còn lỗi compile, test fail, \`SECURITY_VERDICT: BLOCK\`, \`QA_VERDICT: FAIL\`, hoặc pod K8s bị \`CrashLoopBackOff\`/\`ErrImagePull\`.
-  3. **Vượt rào (Boundary Crossing):** QA tự sửa code app để ép test xanh, Dev xóa/skip test cũ, hoặc DevOps sửa lụi business logic.
-- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi, giao \`dev-worker\`/\`devops-worker\` sửa và bắt buộc chạy lại \`qa-worker\`/\`sec-worker\` xác nhận đến khi PASS 100%.
+  1. **Báo sạch giả (Fake Clean):** Báo \`succeeded\` nhưng thiếu log chạy lệnh thật (\`EXIT_CODE=0\`), chưa \`git commit\` (thiếu Commit Hash), \`Tests Run = 0\`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ mà chưa merge commit mới của Dev!
+  2. **Còn lỗi tồn đọng:** Còn lỗi compile, test fail, \`SECURITY_VERDICT: BLOCK\`, \`QA_VERDICT: FAIL\`, \`PERF_VERDICT: BOTTLENECK_FOUND\`, hoặc pod K8s bị \`CrashLoopBackOff\`/\`ErrImagePull\`.
+  3. **Vượt rào (Boundary Crossing):** QA/Bench tự sửa code app để ép test/benchmark đạt, Dev xóa/skip test cũ, hoặc DevOps sửa lụi business logic.
+- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao \`dev-worker\`/\`devops-worker\` sửa và bắt buộc chạy lại \`qa-worker\`/\`sec-worker\`/\`bench-worker\` xác nhận đến khi PASS 100%.
 - ⚠️ **KHÔNG GỌI \`worker-release\` Ở BƯỚC 3:** Giữ nguyên terminal worker để Orca Sidebar hiển thị **chấm xanh (\`🟢\`)**, **icon Agent (\`✓\`)** và **chuông thông báo (\`🔔\`)**!
 
 ### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)
-- Chỉ khi đủ bằng chứng thép của Dev (\`Commit Hash\` + \`Build OK\`), DevOps (\`Pod/Infra Ready\`), Security (\`PASS\`) và QA (\`PASS 100%\`), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):
+- Chỉ khi đủ bằng chứng thép của Dev (\`Commit Hash\` + \`Build OK\`), DevOps (\`Pod/Infra Ready\`), Security (\`PASS\`), QA (\`PASS 100%\`) và Benchmark (\`PERF_VERDICT: PASS\` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):
   \`\`\`bash
-  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng Build, DevOps, Security (PASS) và QA (PASS 100%). Merge code vào nhánh chính chứ sếp?" --options '["yes","wait"]' --json
+  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark. Merge code vào nhánh chính chứ sếp?" --options '["yes","wait"]' --json
   \`\`\`
 - Chỉ khi người dùng phản hồi \`"yes"\`: Thực hiện \`git merge\` vào nhánh chính, sau đó mới chạy \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\` để đóng các terminal worker.
 RULE

@@ -52,7 +52,12 @@ ROLE_ALIASES = {
     "design": "uiSpecialist",
     "devops": "devopsSpecialist",
     "devopsspecialist": "devopsSpecialist",
-    "infra": "devopsSpecialist"
+    "infra": "devopsSpecialist",
+    "bench": "benchSpecialist",
+    "benchmark": "benchSpecialist",
+    "perf": "benchSpecialist",
+    "performance": "benchSpecialist",
+    "benchspecialist": "benchSpecialist"
 }
 
 ROLE_LABELS = {
@@ -63,7 +68,8 @@ ROLE_LABELS = {
     "prReviewer": "PR Reviewer",
     "issueResolver": "Issue Resolver",
     "uiSpecialist": "UI/UX Specialist",
-    "devopsSpecialist": "DevOps Specialist"
+    "devopsSpecialist": "DevOps Specialist",
+    "benchSpecialist": "Bench & Perf Specialist"
 }
 
 KNOWN_AGENTS = [
@@ -126,7 +132,7 @@ def sync_gemini_directive(root: Path, config: dict):
     c_agent = coord.get("agent", "claude")
     c_model = coord.get("model")
     c_display = f"`{c_agent}`" + (f" ({c_model})" if c_model else "")
-    rows.append(f"| **Lead Coordinator** | {c_display} | 1 | Task DAG, Run Mailbox, Decision Gates |")
+    rows.append(f"| **Lead Coordinator** | {c_display} | 1 | Task DAG, Zero-Trust Audit, Decision Gates, Release |")
 
     # Developer
     roles = config.get("roles", {})
@@ -135,7 +141,7 @@ def sync_gemini_directive(root: Path, config: dict):
     d_model = dev.get("model")
     d_display = f"`{d_agent}`" + (f" ({d_model})" if d_model else "")
     d_count = dev.get("concurrency", 2)
-    rows.append(f"| **Full-Stack Devs** | {d_display} | {d_count} parallel | Isolated child worktrees, code implementation, unit tests |")
+    rows.append(f"| **Full-Stack Devs** | {d_display} | {d_count} parallel | Child worktrees, clean architecture, unit tests |")
 
     # QA
     qa = roles.get("qa", {})
@@ -143,7 +149,7 @@ def sync_gemini_directive(root: Path, config: dict):
     q_model = qa.get("model")
     q_display = f"`{q_agent}`" + (f" ({q_model})" if q_model else "")
     q_count = qa.get("concurrency", 1)
-    rows.append(f"| **QA & Testers** | {q_display} | {q_count} parallel | Integration test suites, browser verification, acceptance tests |")
+    rows.append(f"| **QA & Testers** | {q_display} | {q_count} parallel | Integration/E2E suites, adversarial edge-case testing |")
 
     # Security
     sec = roles.get("security", {})
@@ -151,38 +157,45 @@ def sync_gemini_directive(root: Path, config: dict):
     s_model = sec.get("model")
     s_display = f"`{s_agent}`" + (f" ({s_model})" if s_model else "")
     s_count = sec.get("concurrency", 1)
-    rows.append(f"| **Security & Bug Hunter** | {s_display} | {s_count} parallel | OWASP audit, concurrency checks, memory leak prevention |")
+    rows.append(f"| **Security & Bug Hunter** | {s_display} | {s_count} parallel | OWASP Top 10, concurrency/race conditions, leak audit |")
 
     # PR Reviewer
     pr = roles.get("prReviewer", {})
     p_agent = pr.get("agent", "claude")
     p_model = pr.get("model")
     p_display = f"`{p_agent}`" + (f" ({p_model})" if p_model else "")
-    rows.append(f"| **PR Reviewer** | {p_display} | On-demand | PR checkout (`--pr`), line-by-line diff review, CI verification |")
+    rows.append(f"| **PR Reviewer** | {p_display} | On-demand | PR checkout (`--pr`), line-by-line diff audit |")
 
     # Issue Resolver
     issue = roles.get("issueResolver", {})
     i_agent = issue.get("agent", "kimi")
     i_model = issue.get("model")
     i_display = f"`{i_agent}`" + (f" ({i_model})" if i_model else "")
-    rows.append(f"| **Issue Resolver** | {i_display} | On-demand | Issue checkout (`--issue`), auto-reproduce, commit & push |")
+    rows.append(f"| **Issue Resolver** | {i_display} | On-demand | Issue checkout (`--issue`), reproduction test & fix |")
 
     # UI Specialist
     ui = roles.get("uiSpecialist", {})
-    if ui.get("enabled", True):
+    if ui.get("enabled", True) and ui.get("agent") and ui.get("agent") != "none":
         u_agent = ui.get("agent", "claude")
         u_model = ui.get("model")
         u_display = f"`{u_agent}`" + (f" ({u_model})" if u_model else "")
-        rows.append(f"| **UI/UX Specialist** | {u_display} | On-demand | Design Mode (Click-to-code), DOM & CSS live inspection |")
+        rows.append(f"| **UI/UX Specialist** | {u_display} | On-demand | Design Mode (Click-to-code), responsive & a11y |")
 
     # DevOps Specialist
     devops = roles.get("devopsSpecialist", {})
-    if devops.get("enabled", True):
+    if devops.get("enabled", True) and devops.get("agent") and devops.get("agent") != "none":
         do_agent = devops.get("agent", "codex")
         do_model = devops.get("model")
         do_display = f"`{do_agent}`" + (f" ({do_model})" if do_model else "")
-        host = config.get("executionHost", "local")
-        rows.append(f"| **DevOps Specialist** | {do_display} | On-demand | DB migrations, Docker/Orb, SSH worktrees (`--host {host}`) |")
+        rows.append(f"| **DevOps Specialist** | {do_display} | On-demand | Docker/K8s rollout, DB migrations, SSH worktrees |")
+
+    # Bench & Perf Specialist
+    bench = roles.get("benchSpecialist", {})
+    if bench.get("enabled", False) and bench.get("agent") and bench.get("agent") != "none":
+        b_agent = bench.get("agent", "antigravity")
+        b_model = bench.get("model")
+        b_display = f"`{b_agent}`" + (f" ({b_model})" if b_model else "")
+        rows.append(f"| **Bench & Perf Specialist** | {b_display} | On-demand | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |")
 
     table_text = "\n".join(rows)
 
@@ -201,6 +214,7 @@ def sync_gemini_directive(root: Path, config: dict):
         "sec-worker": (s_agent, s_model, sec.get("effort") or "high"),
         "devops-worker": (devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort") or "high"),
         "ui-worker": (ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort") or "medium"),
+        "bench-worker": (bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort") or "high"),
     }
     for w_name, (w_ag, w_mod, w_eff) in worker_map.items():
         if not w_ag or w_ag == "none":
@@ -945,12 +959,13 @@ def cmd_status(root: Path, config: dict):
         ("prReviewer", "5. PR Reviewer"),
         ("issueResolver", "6. Issue Resolver"),
         ("uiSpecialist", "7. UI/UX Specialist"),
-        ("devopsSpecialist", "8. DevOps Infra")
+        ("devopsSpecialist", "8. DevOps Infra"),
+        ("benchSpecialist", "9. Bench & Perf")
     ]
 
     for key, label in role_order:
         data = roles.get(key, {})
-        enabled = data.get("enabled", True)
+        enabled = data.get("enabled", True if key not in ["uiSpecialist", "devopsSpecialist", "benchSpecialist"] else False)
         if not enabled:
             print(f"{label:<24} | {'[ĐÃ TẮT]':<12} | {'-':<26} | {'-':<8} | -")
             continue
@@ -971,7 +986,7 @@ def cmd_set(root: Path, config: dict, args: list):
 
     if not args:
         print("❌ Thiếu vai trò cần cấu hình. Dùng: orca-team set <role> [options]", file=sys.stderr)
-        print("👉 Các role hợp lệ: coord, dev, qa, sec, pr, issue, ui, devops", file=sys.stderr)
+        print("👉 Các role hợp lệ: coord, dev, qa, sec, pr, issue, ui, devops, bench", file=sys.stderr)
         sys.exit(1)
 
     role_raw = args[0].lower()
@@ -1524,8 +1539,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             size_str = f"{size_b/1024:.1f} KB" if size_b > 1024 else f"{size_b} B"
             tokens_str = f"~{tokens} tokens"
             base_tokens += tokens
-            if tokens > 2800:
-                status = "⚠️ Quá lớn (>2.8k tok)"
+            if tokens > 3200:
+                status = "⚠️ Quá lớn (>3.2k tok)"
                 warning_issues.append(f"File '{rel_name}' có kích thước lớn (~{tokens} tokens). Sẽ bị nạp lại vào context của AI Leader trên MỖI turn.")
             else:
                 status = "🟢 Gọn gàng"
@@ -1552,9 +1567,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
     print("-" * 85)
     print(f"👉 Tổng token cơ sở (Base Context Tokens) nạp mỗi turn: ~{base_tokens:,} tokens")
-    if base_tokens < 3200:
-        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn, bao gồm đầy đủ Hiến pháp 8 Vai trò cấp Principal).")
-    elif base_tokens < 4500:
+    if base_tokens < 3600:
+        passed_items.append(f"Context chỉ dẫn ban đầu rất gọn gàng (~{base_tokens:,} tokens/turn, bao gồm đầy đủ Hiến pháp 9 Vai trò cấp Principal).")
+    elif base_tokens < 4800:
         warning_issues.append(f"Context chỉ dẫn ban đầu ở mức trung bình (~{base_tokens:,} tokens/turn).")
     else:
         critical_issues.append(f"Context chỉ dẫn ban đầu quá lớn (~{base_tokens:,} tokens/turn). Cần tinh gọn lại các file chỉ dẫn.")

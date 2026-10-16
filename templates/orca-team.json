@@ -41,6 +41,11 @@
       "enabled": true,
       "agent": "codex",
       "utilities": ["ssh-remote-execution", "orca-per-workspace-env"]
+    },
+    "benchSpecialist": {
+      "enabled": true,
+      "agent": "antigravity",
+      "utilities": ["git-worktrees", "ssh-remote-execution", "orca-skills-registry"]
     }
   }
 }

@@ -95,7 +95,7 @@ orca-project-init /path/to/project
 3. Chọn agent, model, số lượng song song & gói tiện ích cho **QA Testers**.
 4. Chọn agent, model & gói tiện ích cho **Bug Hunter & Security**.
 5. Chọn agent & model cho **PR Reviewer** và **Git Issue Resolver**.
-6. Bật/tắt các vai trò mở rộng: **UI/UX Designer** (Design Mode) và **DevOps Specialist** (Docker/K8s/DB/SSH).
+6. Bật/tắt các vai trò mở rộng: **UI/UX Designer** (Design Mode), **DevOps Specialist** (Docker/K8s/DB/SSH) và **Performance & Benchmark Specialist** (Đo tải RPS/EPS, p95/p99 latency, profiling).
 7. Chọn môi trường thực thi: **Local** hoặc **SSH (`orb`)**.
 
 ### Vận hành tự động sau khi khởi tạo:
