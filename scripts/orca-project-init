@@ -45,7 +45,9 @@ if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "--clean" ]]; then
       echo "  🗑️  Đã xóa symlink: $link_name"
     fi
   done
-  rm -rf "$TARGET_PATH/.agents" "$TARGET_PATH/.orca" "$TARGET_PATH/.orca-cache"
+  rm -f "$TARGET_PATH/.agents/GEMINI.md"
+  rmdir "$TARGET_PATH/.agents" 2>/dev/null || true
+  rm -rf "$TARGET_PATH/.orca" "$TARGET_PATH/.orca-cache"
   echo "🎉 Dự án đã được khôi phục về trạng thái ban đầu sạch sẽ!"
   exit 0
 fi

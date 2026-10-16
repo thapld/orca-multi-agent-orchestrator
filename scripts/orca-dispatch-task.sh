@@ -27,12 +27,15 @@ else
 fi
 
 # Tự động lấy agent của dev/qa/sec/devops/bench/re từ orca-team nếu truyền role name
+ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
 ROLE_QUERY="${REQ_AGENT:-dev}"
+EFF_ROLE_QUERY="$ROLE_QUERY"
 CONFIG_AGENT=""
-if command -v orca-team &>/dev/null; then
-  CONFIG_AGENT=$(orca-team get "$ROLE_QUERY" 2>/dev/null || true)
+if [[ -x "$ORCA_TEAM_BIN" ]]; then
+  CONFIG_AGENT=$("$ORCA_TEAM_BIN" get "$ROLE_QUERY" 2>/dev/null || true)
   if [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
-    CONFIG_AGENT=$(orca-team get coord 2>/dev/null || true)
+    EFF_ROLE_QUERY="coord"
+    CONFIG_AGENT=$("$ORCA_TEAM_BIN" get coord 2>/dev/null || true)
   fi
 fi
 [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
@@ -48,9 +51,9 @@ TIMEOUT_MS="${TIMEOUT_MS:-300000}"
 
 # Lấy model và reasoning effort nếu đã được cấu hình trong orca-team
 MODEL_ARGS=()
-if command -v orca-team &>/dev/null; then
-  DEV_MODEL=$(orca-team get "$ROLE_QUERY" --field model 2>/dev/null || true)
-  DEV_EFFORT=$(orca-team get "$ROLE_QUERY" --field effort 2>/dev/null || true)
+if [[ -x "$ORCA_TEAM_BIN" ]]; then
+  DEV_MODEL=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field model 2>/dev/null || true)
+  DEV_EFFORT=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field effort 2>/dev/null || true)
   if [[ -n "$DEV_MODEL" && "$DEV_MODEL" != "null" && "$DEV_MODEL" != "(default)" ]]; then
     MODEL_ARGS+=(--model "$DEV_MODEL")
     if [[ -n "$DEV_EFFORT" && "$DEV_EFFORT" != "null" && "$DEV_EFFORT" != "-" ]]; then
@@ -146,6 +149,7 @@ if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
     --timeout-ms "$TIMEOUT_MS" \
     --json 2>&1) || true
 else
+  WORKTREE_NAME="current"
   echo "⚠️  Git repository chưa có commit đầu tiên. Đang khởi chạy worker trên workspace hiện tại..."
   START_RECEIPT=$($ORCA_BIN orchestration worker-start \
     --task "$TASK_ID" \

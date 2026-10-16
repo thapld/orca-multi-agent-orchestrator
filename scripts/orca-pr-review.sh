@@ -10,9 +10,11 @@ if ! [[ "$PR_NUM" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
 CONFIG_AGENT=""
-if command -v orca-team &>/dev/null; then
-  CONFIG_AGENT=$(orca-team get pr 2>/dev/null || true)
+if [[ -x "$ORCA_TEAM_BIN" ]]; then
+  CONFIG_AGENT=$("$ORCA_TEAM_BIN" get pr 2>/dev/null || true)
+  [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
 fi
 AGENT="${2:-${CONFIG_AGENT:-antigravity}}"
 WORKTREE_NAME="review-pr-$PR_NUM"
@@ -26,6 +28,7 @@ ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca
 RECEIPT=$($ORCA_BIN worktree create \
   --name "$WORKTREE_NAME" \
   --pr "$PR_NUM" \
+  --no-parent \
   --agent "$AGENT" \
   --prompt "$PR_PROMPT" \
   --setup run \

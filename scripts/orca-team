@@ -1465,7 +1465,14 @@ def cmd_link(root: Path, args: list):
         print("   • orca-team link clean : Dọn dẹp symlink ở root\n")
 
 def cmd_uninstall_project(root: Path, args: list):
-    """Gỡ bỏ toàn bộ cấu hình Orchestrator khỏi project hiện tại."""
+    """Gỡ bỏ toàn bộ cấu hình Orchestrator khỏi project hiện tại hoặc đường dẫn chỉ định."""
+    for a in (args or []):
+        if not a.startswith("-"):
+            cand = Path(a).expanduser().resolve()
+            if cand.exists() and cand.is_dir():
+                root = cand
+                break
+
     # Bảo vệ: Không bao giờ tự gỡ bỏ chính kho mã nguồn của framework
     if (root / "templates").is_dir() and (root / "package.json").is_file():
         try:
@@ -1506,17 +1513,17 @@ def cmd_uninstall_project(root: Path, args: list):
         cfg.unlink(missing_ok=True)
         deleted.append("orca-team.json")
 
-    # 3. Xóa .agents/ và directive GEMINI.md
+    # 3. Xóa .agents/GEMINI.md và chỉ xóa thư mục .agents/ nếu rỗng (bảo vệ .agents/skills hoặc .agents/workflows của user)
     agents_dir = root / ".agents"
     if agents_dir.exists() and agents_dir.is_dir():
         gemini_md = agents_dir / "GEMINI.md"
-        if gemini_md.exists():
+        if gemini_md.exists() or gemini_md.is_symlink():
             gemini_md.unlink(missing_ok=True)
             deleted.append(".agents/GEMINI.md")
-        # Xóa các file/thư mục khác trong .agents nếu có hoặc xóa toàn bộ thư mục nếu rỗng/chỉ chứa file orchestrator
         try:
-            shutil.rmtree(agents_dir)
-            deleted.append(".agents/ (thư mục)")
+            if not any(agents_dir.iterdir()):
+                agents_dir.rmdir()
+                deleted.append(".agents/ (thư mục rỗng)")
         except Exception:
             pass
 
@@ -2241,11 +2248,21 @@ def main():
     # Nếu được gọi trực tiếp qua alias 'orca-monitor'
     prog_name = Path(sys.argv[0]).name
     if prog_name == "orca-monitor":
+        for a in sys.argv[1:]:
+            if not a.startswith("-") and Path(a).expanduser().is_dir():
+                root = Path(a).expanduser().resolve()
+                config = load_config(root)
+                break
         cmd_monitor(root, config, sys.argv[1:])
         return
 
     args = sys.argv[1:]
     if not args or args[0] in ["status", "list", "show"]:
+        for a in args[1:]:
+            if not a.startswith("-") and Path(a).expanduser().is_dir():
+                root = Path(a).expanduser().resolve()
+                config = load_config(root)
+                break
         cmd_status(root, config)
     elif args[0] == "set":
         cmd_set(root, config, args[1:])
@@ -2254,6 +2271,11 @@ def main():
     elif args[0] in ["watchdog", "workers", "health"]:
         cmd_watchdog(root, args[1:])
     elif args[0] in ["monitor", "debug", "tokens", "token", "audit-tokens"]:
+        for a in args[1:]:
+            if not a.startswith("-") and Path(a).expanduser().is_dir():
+                root = Path(a).expanduser().resolve()
+                config = load_config(root)
+                break
         cmd_monitor(root, config, args[1:])
     elif args[0] in ["link", "discovery"]:
         cmd_link(root, args[1:])
