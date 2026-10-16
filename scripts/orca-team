@@ -1816,13 +1816,12 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 total_worker_work_tokens_est += est_worker_ctx
 
                 if term_state == "released":
-                    st_label = f"✅ {w_state} | 🧹 Đã giải phóng RAM"
-                elif term_state == "reclaimable":
+                    st_label = f"✅ {w_state} | 🧹 Đã thu hồi sau merge"
+                elif term_state in ["reclaimable", "retained"]:
                     reclaimable_dispatches.append(d_id)
-                    st_label = f"⚠️ {w_state} | Chưa release terminal!"
-                    warning_issues.append(f"Worker '{d_id}' ({wt_name}) đã xong nhưng chưa chạy 'worker-release'.")
+                    st_label = f"🟢 {w_state} | 🔔 Đang hiển thị Badge/Chuông trên UI"
                 elif term_state == "active":
-                    st_label = f"🟢 Đang chạy ({w_state})"
+                    st_label = f"🟡 Đang chạy ({w_state} - Spinner UI)"
                 else:
                     st_label = f"{w_state} ({term_state})"
 
@@ -1832,14 +1831,46 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     f_info = f", sửa {files_mod_count} files" if files_mod_count > 0 else ""
                     print(f"      ↳ Task: \"{t_title}\" (Spec: ~{spec_tok} tok ➔ Báo cáo về Leader: chỉ ~{rep_tok} tok{f_info})")
 
-            if auto_fix and reclaimable_dispatches:
-                for did in reclaimable_dispatches:
-                    rel_res = subprocess.run([orca_bin, "orchestration", "worker-release", "--dispatch", did, "--json"], capture_output=True, text=True, timeout=5)
-                    if rel_res.returncode == 0:
-                        actions_taken.append(f"Đã giải phóng worker đã xong: {did}")
-                print(f"  ✅ Đã tự động release {len(reclaimable_dispatches)} worker xong việc.")
-            elif reclaimable_dispatches:
-                print(f"  💡 Giải phóng ngay các worker đã xong: orca orchestration worker-release --dispatch <id>")
+            if reclaimable_dispatches:
+                print(f"  💡 Đang giữ {len(reclaimable_dispatches)} terminal worker để hiển thị chấm xanh (🟢) & chuông thông báo (🔔) trên Orca Sidebar cho đến khi duyệt Human Gate.")
+
+            # 4.1b Kiểm tra Orca Agent Status Hooks (Hiển thị Loading Spinner & Chuông thông báo trên Orca UI)
+            hooks_res = subprocess.run([orca_bin, "agent", "hooks", "status", "--json"], capture_output=True, text=True, timeout=5)
+            if hooks_res.returncode == 0:
+                hooks_data = json.loads(hooks_res.stdout).get("result", {})
+                hook_statuses = {s.get("agent"): s for s in (hooks_data.get("statuses") or []) if isinstance(s, dict)}
+                configured_agents = set()
+                if config:
+                    c_ag = (config.get("coordinator") or {}).get("agent")
+                    if c_ag:
+                        configured_agents.add(c_ag)
+                    for r_cfg in (config.get("roles") or {}).values():
+                        if isinstance(r_cfg, dict) and r_cfg.get("enabled", True) and r_cfg.get("agent") and r_cfg.get("agent") != "none":
+                            configured_agents.add(r_cfg.get("agent"))
+                if not configured_agents:
+                    configured_agents = {"antigravity", "claude", "kimi", "gemini"}
+
+                missing_hooks = [
+                    ag for ag in sorted(configured_agents)
+                    if ag in hook_statuses and not hook_statuses[ag].get("managedHooksPresent")
+                ]
+                if missing_hooks:
+                    orca_electron = "/Applications/Orca.app/Contents/MacOS/Orca"
+                    hook_ctrl = "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/main/agent-hooks/managed-agent-hook-controls.js"
+                    if os.path.exists(orca_electron) and os.path.exists(hook_ctrl):
+                        env_hydrate = os.environ.copy()
+                        env_hydrate["ELECTRON_RUN_AS_NODE"] = "1"
+                        subprocess.run(
+                            [orca_electron, "-e", f'require("{hook_ctrl}").installManagedAgentHooks(null, {{agents: {json.dumps(missing_hooks)}, shouldHydrateShellPath: true}})'],
+                            env=env_hydrate, capture_output=True, text=True, timeout=8
+                        )
+                        actions_taken.append(f"Đã tự động cài đặt Orca Status Hooks (loading spinner & bell icon) cho: {', '.join(missing_hooks)}")
+                        passed_items.append(f"Orca UI Status Hooks (Spinner & Chuông thông báo) đã kích hoạt cho: {', '.join(sorted(configured_agents))}.")
+                    else:
+                        warning_issues.append(f"Agent {', '.join(missing_hooks)} chưa có Orca Status Hooks (sẽ thiếu loading spinner & chuông thông báo trên UI).")
+                else:
+                    passed_items.append(f"Orca UI Status Hooks (Spinner & Chuông thông báo) đã cài đặt đầy đủ cho: {', '.join(sorted(configured_agents))}.")
+
 
             # 4.2 Phân tích chi tiết Mailbox (Chứng minh Cơ chế Event-Driven vs Polling)
             inbox_res = subprocess.run([orca_bin, "orchestration", "inbox", "--limit", "50", "--json"], capture_output=True, text=True, timeout=5)

@@ -51,22 +51,23 @@
   orca orchestration worker-start --task <QA_TASK_ID> --worktree new-child --name qa-worker --agent <QA_AGENT> --model "<QA_MODEL>" --effort medium --json
   ```
 
-### BƯỚC 3: WAITING & VERIFY LOOP (CHỐNG ĐỐT TOKEN & TỰ ĐỘNG CHỮA LỖI)
+### BƯỚC 3: WAITING & VERIFY LOOP (CHỐNG ĐỐT TOKEN & GIỮ TRẠNG THÁI UI ORCA)
 - 🔴 **BẮT BUỘC DÙNG LỆNH CHỜ REACTIVE (KHÔNG POLL VÒNG LẶP):**
   ```bash
   orca orchestration check --wait --types "worker_done,escalation" --timeout-ms 900000 --json
   ```
   Sau khi chạy lệnh trên hoặc lệnh dispatch, **DỪNG GỌI TOOL** để đợi tín hiệu thông báo từ worker.
 - Khi nhận tín hiệu hoàn tất:
-  - Đọc báo cáo: `orca orchestration worker-read --dispatch <DISPATCH_ID>`
-  - Giải phóng terminal: `orca orchestration worker-release --dispatch <DISPATCH_ID> --json`
+  - Đọc báo cáo: `orca orchestration worker-read --dispatch <DISPATCH_ID> --json`
+  - ⚠️ **TUYỆT ĐỐI KHÔNG GỌI `worker-release` Ở BƯỚC NÀY:** Giữ nguyên terminal của worker (hoặc gọi `orca orchestration worker-retain --dispatch <DISPATCH_ID> --reason "Waiting for Human Gate" --json`) để Sidebar của Orca hiển thị **chấm xanh hoàn tất (`🟢`)**, **icon Agent kèm dấu tích (`✓`)** và **chuông thông báo (`🔔`)** trên từng worktree!
 - **Tự động chữa lỗi nếu QA fail:** Không tự sửa code ở root! Tạo Task mới mô tả chi tiết log lỗi và start một Dev Worker mới để fix. Lặp lại bước chờ cho đến khi QA báo pass 100%.
 
-### BƯỚC 4: HUMAN GATE (CHỐT CHẶN TRƯỚC KHI MERGE)
+### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU KHI MERGE (CHỐT CHẶN CUỐI)
 - Khi toàn bộ task đều xanh (pass 100%), **KHÔNG ĐƯỢC tự ý merge code**.
-- Tạo một cổng kiểm duyệt (Gate) để chặn luồng và xin phê duyệt của người dùng:
+- Tạo một cổng kiểm duyệt (Gate) để chặn luồng và báo thông báo chuông về màn hình/điện thoại của người dùng:
   ```bash
   orca orchestration gate-create --task <FINAL_TASK_ID> --question "Tất cả test đã xanh. Merge code vào nhánh chính chứ sếp?" --options '["yes","wait"]' --json
   ```
-- Chỉ thực hiện merge code vào nhánh chính khi người dùng chọn phản hồi `"yes"`.
-
+- Chỉ khi người dùng phản hồi `"yes"`:
+  1. Thực hiện lệnh Git merge code vào nhánh chính.
+  2. Sau khi merge xong mới giải phóng các terminal worker: `orca orchestration worker-release --dispatch <DISPATCH_ID> --json`.
