@@ -63,7 +63,7 @@ data["orca-command-guard"] = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"ORCA_GUARD_EVENT=PreToolUse python3 '{guard_bin}'",
+                    "command": f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PreToolUse python3 '{guard_bin}' --event PreToolUse; else printf '{{\"decision\":\"ask\"}}\\n'; cat >/dev/null 2>&1 || :; fi",
                     "timeout": 5
                 }
             ]
@@ -75,7 +75,7 @@ data["orca-command-guard"] = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"ORCA_GUARD_EVENT=PostToolUse python3 '{guard_bin}'",
+                    "command": f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PostToolUse python3 '{guard_bin}' --event PostToolUse; else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi",
                     "timeout": 5
                 }
             ]

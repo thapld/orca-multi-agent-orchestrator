@@ -1866,22 +1866,42 @@ def cmd_watchdog(root: Path, args: list = None):
         return
 
     try:
-        res = subprocess.run([orca_bin, "orchestration", "worker-list", "--terminal-state", "active", "--json"], capture_output=True, text=True, timeout=10)
-        if res.returncode != 0:
-            try:
-                err_data = json.loads(res.stdout)
-                msg = err_data.get("error", {}).get("message", "Lỗi kết nối Orca Runtime")
-                print(f"⚠️ {msg}")
-                print("💡 Hãy đảm bảo Orca đang mở hoặc chạy lệnh trực tiếp trên terminal máy host.\n")
-                return
-            except Exception:
-                print(f"⚠️ Không thể kết nối Orca Runtime (mã lỗi: {res.returncode}).\n")
-                return
+        r_res = subprocess.run([orca_bin, "orchestration", "run-list", "--json"], capture_output=True, text=True, timeout=6)
+        workers = []
+        seen_dispatches = set()
+        if r_res.returncode == 0:
+            r_data = json.loads(r_res.stdout)
+            r_obj = r_data.get("result", r_data) if isinstance(r_data, dict) else {}
+            all_runs = [r for r in (r_obj.get("runs", []) if isinstance(r_obj, dict) else []) if not r.get("legacy")]
+            for r in all_runs[:6]:
+                rid = r.get("id")
+                if not rid:
+                    continue
+                w_res = subprocess.run([orca_bin, "orchestration", "worker-list", "--run", rid, "--terminal-state", "active", "--json"], capture_output=True, text=True, timeout=5)
+                if w_res.returncode == 0:
+                    w_data = json.loads(w_res.stdout)
+                    w_obj = w_data.get("result", w_data) if isinstance(w_data, dict) else {}
+                    for w_item in (w_obj.get("workers", []) if isinstance(w_obj, dict) else []):
+                        did = w_item.get("dispatchId") or w_item.get("id")
+                        if did and did not in seen_dispatches:
+                            seen_dispatches.add(did)
+                            workers.append(w_item)
+        else:
+            res = subprocess.run([orca_bin, "orchestration", "worker-list", "--terminal-state", "active", "--json"], capture_output=True, text=True, timeout=10)
+            if res.returncode != 0:
+                try:
+                    err_data = json.loads(res.stdout)
+                    msg = err_data.get("error", {}).get("message", "Lỗi kết nối Orca Runtime")
+                    print(f"⚠️ {msg}")
+                    print("💡 Hãy đảm bảo Orca đang mở hoặc chạy lệnh trực tiếp trên terminal máy host.\n")
+                    return
+                except Exception:
+                    print(f"⚠️ Không thể kết nối Orca Runtime (mã lỗi: {res.returncode}).\n")
+                    return
+            data = json.loads(res.stdout)
+            res_obj = data.get("result", data) if isinstance(data, dict) else {}
+            workers = res_obj.get("workers", []) if isinstance(res_obj, dict) else (data if isinstance(data, list) else [])
 
-        data = json.loads(res.stdout)
-        res_obj = data.get("result", data) if isinstance(data, dict) else {}
-        workers = res_obj.get("workers", []) if isinstance(res_obj, dict) else (data if isinstance(data, list) else [])
-        
         if not workers:
             print("✨ Hiện không có worker nào đang chạy ngầm cần xử lý.\n")
             return
@@ -1889,11 +1909,14 @@ def cmd_watchdog(root: Path, args: list = None):
         print(f"{'DISPATCH ID':<28} | {'TERMINAL':<14} | {'STATE':<14} | {'GHI CHÚ / TRẠNG THÁI'}")
         print("-" * 82)
         
+        cli_index = _index_cli_transcripts()
         hung_count = 0
         for w in workers:
             d_id = str(w.get("dispatchId") or w.get("id") or "-")
+            t_id = str(w.get("taskId") or "-")
             term = str(w.get("terminalHandle") or w.get("agentTerminalHandle") or "-")
             state = str(w.get("terminalState") or w.get("state") or "-")
+            w_state = str(w.get("workerState") or w.get("state") or "-")
             
             note = ""
             if d_id != "-":
@@ -1902,6 +1925,9 @@ def cmd_watchdog(root: Path, args: list = None):
                     if show_res.returncode == 0:
                         s_data = json.loads(show_res.stdout)
                         s_res = s_data.get("result", s_data) if isinstance(s_data, dict) else {}
+                        w_info = s_res.get("worker") or {}
+                        if w_info.get("state"):
+                            w_state = str(w_info.get("state"))
                         obs = s_res.get("observation", {})
                         if obs.get("agentWait"):
                             if auto_unblock and term != "-":
@@ -1950,9 +1976,31 @@ def cmd_watchdog(root: Path, args: list = None):
                 except Exception:
                     pass
 
+            tf_match = (
+                cli_index["by_dispatch"].get(d_id)
+                or cli_index["by_task"].get(t_id)
+                or cli_index["by_term"].get(term)
+            )
+            t_metrics = _analyze_antigravity_transcript(tf_match, scope_id=d_id) if tf_match else {}
+            if t_metrics and t_metrics.get("bloated_logs") and auto_unblock:
+                tasks_dir = tf_match.parent.parent / "tasks"
+                guard_bin = os.path.expanduser("~/.local/bin/orca-command-guard")
+                if os.path.exists(guard_bin):
+                    try:
+                        from importlib.machinery import SourceFileLoader
+                        guard_mod = SourceFileLoader("orca_guard", guard_bin).load_module()
+                        guard_mod._enforce_task_log_cap(tasks_dir)
+                        note = "🛡️ ĐÃ NGẮT LỆNH XẢ LOG >16MB & CẮT GỌN FILE LOG"
+                    except Exception:
+                        pass
+
             if not note:
-                if state == "active":
-                    note = "🟢 Đang thực thi"
+                idle_s = t_metrics.get("idle_since_last_secs", 0.0) if t_metrics else 0.0
+                if w_state not in ("succeeded", "failed", "stopped") and idle_s > 180:
+                    note = f"⚠️ KHÔNG PHẢN HỒI {_fmt_dur(idle_s)} (last_tool={t_metrics.get('last_tool', '-')})"
+                    hung_count += 1
+                elif state == "active":
+                    note = f"🟢 Đang thực thi ({t_metrics.get('turns', 0)}t, {t_metrics.get('out_tok_s', 0.0):.1f} tok/s)" if t_metrics else "🟢 Đang thực thi"
                 elif state == "reclaimable":
                     note = "⚪ Đã xong / Sẵn sàng giải phóng"
                 elif state == "retained":
@@ -1964,12 +2012,12 @@ def cmd_watchdog(root: Path, args: list = None):
 
         print("-" * 82)
         if hung_count > 0:
-            print(f"⚠️ Phát hiện {hung_count} worker đang bị treo chờ input!")
+            print(f"⚠️ Phát hiện {hung_count} worker đang bị treo hoặc chờ input!")
             if not auto_unblock:
                 print("👉 Tự động mở khóa các worker an toàn: orca-team watchdog --unblock")
             else:
-                print("👉 Các worker còn lại đang chờ duyệt lệnh nhạy cảm. Hãy vào Orca Terminal để duyệt thủ công.")
-            print("👉 Để dừng worker cạn token: orca orchestration worker-stop --dispatch <id>\n")
+                print("👉 Các worker còn lại đang chờ duyệt lệnh nhạy cảm hoặc bị kẹt tiến trình.")
+            print("👉 Để dừng worker bị treo:              orca orchestration worker-stop --dispatch <id>\n")
         else:
             print("✅ Toàn bộ worker đều hoạt động trơn tru.\n")
     except Exception as e:
@@ -2018,14 +2066,87 @@ def _fmt_tok(n: int) -> str:
     return f"{n:,}"
 
 
-def _analyze_antigravity_transcript(tf_path: Path) -> dict:
+def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) -> list:
+    """Slice multi-dispatch worker transcripts or multi-run leader transcripts to the exact `scope_id` window."""
+    if not scope_id or not steps:
+        return steps
+    try:
+        if scope_id.startswith("ctx_"):
+            # Worker transcript may contain multiple dispatches when 1 Role = 1 Worktree terminal reuse is active
+            dispatch_starts = []
+            full_tf = tf_path.parent / "transcript_full.jsonl"
+            full_lines = None
+            for idx_pos, s in enumerate(steps):
+                if s.get("type") == "USER_INPUT":
+                    c = str(s.get("content") or "")
+                    if "truncated_fields" in s and full_tf.exists():
+                        if full_lines is None:
+                            try:
+                                full_lines = full_tf.read_text(encoding="utf-8", errors="ignore").splitlines()
+                            except Exception:
+                                full_lines = []
+                        if idx_pos < len(full_lines):
+                            c = full_lines[idx_pos]
+                    if "You are a dispatched worker" in c or "ctx_" in c:
+                        cids = re.findall(r"ctx_[a-f0-9]+", c)
+                        if cids:
+                            dispatch_starts.append((idx_pos, set(cids)))
+            if len(dispatch_starts) >= 2:
+                for k, (start_pos, cids_set) in enumerate(dispatch_starts):
+                    if scope_id in cids_set:
+                        end_pos = dispatch_starts[k + 1][0] if k + 1 < len(dispatch_starts) else len(steps)
+                        return steps[start_pos:end_pos]
+
+        elif scope_id.startswith("run_"):
+            # Leader transcript may contain multiple sequential orchestration runs (`run-create`)
+            run_creates = []
+            for idx_pos, s in enumerate(steps):
+                tcs = str(s.get("tool_calls") or "")
+                if "run-create" in tcs and idx_pos + 1 < len(steps):
+                    nxt_str = json.dumps(steps[idx_pos + 1])
+                    rids = re.findall(r"run_[a-f0-9]{12}", nxt_str)
+                    if rids:
+                        run_creates.append((idx_pos, rids[0]))
+            if len(run_creates) >= 2:
+                for k, (rc_pos, rid) in enumerate(run_creates):
+                    if rid == scope_id:
+                        # Find the USER_INPUT that initiated this run (backward from rc_pos, but after previous run)
+                        prev_rc_pos = run_creates[k - 1][0] if k > 0 else 0
+                        start_pos = rc_pos
+                        for back_pos in range(rc_pos - 1, prev_rc_pos, -1):
+                            if steps[back_pos].get("type") == "USER_INPUT":
+                                start_pos = back_pos
+                                break
+                        if k == 0:
+                            start_pos = 0
+                        if k + 1 < len(run_creates):
+                            next_rc_pos = run_creates[k + 1][0]
+                            end_pos = next_rc_pos
+                            for back_pos in range(next_rc_pos - 1, rc_pos, -1):
+                                if steps[back_pos].get("type") == "USER_INPUT":
+                                    end_pos = back_pos
+                                    break
+                        else:
+                            end_pos = len(steps)
+                        if end_pos > start_pos:
+                            return steps[start_pos:end_pos]
+    except Exception:
+        pass
+    return steps
+
+
+def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict:
     try:
         raw_lines = tf_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        steps = [json.loads(ln) for ln in raw_lines if ln.strip()]
+        all_steps = [json.loads(ln) for ln in raw_lines if ln.strip()]
     except Exception:
         return {}
-    if not steps:
+    if not all_steps:
         return {}
+
+    steps = _slice_transcript_steps(all_steps, tf_path, scope_id)
+    if not steps:
+        steps = all_steps
 
     measured_llm_secs = 0.0
     measured_out_tok = 0
@@ -2173,34 +2294,50 @@ def _index_cli_transcripts() -> dict:
             full_tf = cid_dir / ".system_generated" / "logs" / "transcript_full.jsonl"
             if not tf.exists():
                 continue
-            src = full_tf if full_tf.exists() else tf
             try:
-                with open(src, "r", encoding="utf-8", errors="ignore") as f:
+                with open(tf, "r", encoding="utf-8", errors="ignore") as f:
                     first_line = f.readline()
+                    if "truncated_fields" in first_line and full_tf.exists():
+                        with open(full_tf, "r", encoding="utf-8", errors="ignore") as ff:
+                            first_line = ff.readline()
                     is_dispatched_worker = "You are a dispatched worker" in first_line
-                    rest_sample = "" if is_dispatched_worker else f.read()
+                    rest_text = f.read()
             except Exception:
                 continue
 
             if is_dispatched_worker:
-                for cid_match in re.findall(r"ctx_[a-f0-9]+", first_line):
+                # Scan first_line plus any subsequent USER_INPUT lines (for 1 Role = 1 Worktree reused workers)
+                worker_inputs = [first_line]
+                if '"USER_INPUT"' in rest_text:
+                    src_for_inputs = full_tf if full_tf.exists() else tf
+                    try:
+                        with open(src_for_inputs, "r", encoding="utf-8", errors="ignore") as ff:
+                            for ln in ff:
+                                if '"USER_INPUT"' in ln and ("ctx_" in ln or "task_" in ln):
+                                    worker_inputs.append(ln)
+                    except Exception:
+                        pass
+                blob = "\n".join(worker_inputs)
+                for cid_match in re.findall(r"ctx_[a-f0-9]+", blob):
                     by_dispatch[cid_match] = tf
-                for tid_match in re.findall(r"task_[a-f0-9]+", first_line):
+                for tid_match in re.findall(r"task_[a-f0-9]+", blob):
                     by_task[tid_match] = tf
-                for trm_match in re.findall(r"term_[a-f0-9-]+", first_line):
+                for trm_match in re.findall(r"term_[a-f0-9-]+", blob):
                     by_term[trm_match] = tf
             else:
-                combined = first_line + "\n" + rest_sample
-                for rid_match in set(re.findall(r"run_[a-f0-9]+", combined)):
-                    prev = by_leader_run.get(rid_match)
-                    if not prev or ("antigravity-cli" in str(tf) and "antigravity-cli" not in str(prev)):
-                        by_leader_run[rid_match] = tf
+                combined = first_line + "\n" + rest_text
+                if "orchestration" in combined and ("worker-start" in combined or "run-create" in combined or "task-create" in combined):
+                    for rid_match in set(re.findall(r"run_[a-f0-9]{12}", combined)):
+                        prev = by_leader_run.get(rid_match)
+                        if not prev or ("antigravity-cli" in str(tf) and "antigravity-cli" not in str(prev)):
+                            by_leader_run[rid_match] = tf
     return {
         "by_dispatch": by_dispatch,
         "by_task": by_task,
         "by_term": by_term,
         "by_leader_run": by_leader_run,
     }
+
 
 
 def _collect_git_diff_stats(wt_path: str, wt_name: str) -> dict:
@@ -2296,8 +2433,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             size_str = f"{size_b/1024:.1f} KB" if size_b > 1024 else f"{size_b} B"
             tokens_str = f"~{tokens} tokens"
             base_tokens += tokens
-            if tokens > 5600:
-                status = "WARN (>5.6k tok)"
+            if tokens > 5900:
+                status = "WARN (>5.9k tok)"
                 warning_issues.append(f"File '{rel_name}' nặng ~{tokens} tokens (nạp lại vào context trên mỗi turn).")
             else:
                 status = "OK"
@@ -2442,8 +2579,18 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
         proj_slug = root.name.lower()
         candidate_runs = [r for r in all_runs if not r.get("legacy")]
 
+        explicit_run_id = None
+        for idx_a, a in enumerate(args):
+            if a == "--run" and idx_a + 1 < len(args):
+                explicit_run_id = args[idx_a + 1]
+            elif a.startswith("--run="):
+                explicit_run_id = a.split("=", 1)[1]
+            elif a.startswith("run_"):
+                explicit_run_id = a
+
         selected_run = None
-        for r in candidate_runs[:6]:
+        scan_runs = [r for r in candidate_runs if r.get("id") == explicit_run_id] if explicit_run_id else candidate_runs[:6]
+        for r in scan_runs:
             rid = r.get("id")
             if not rid:
                 continue
@@ -2458,7 +2605,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 to = json.loads(t_chk.stdout).get("result", {})
                 t_list_tmp = to.get("tasks", []) if isinstance(to, dict) else []
 
-            belongs_to_proj = (proj_slug in str(r.get("objective", "")).lower())
+            belongs_to_proj = bool(explicit_run_id) or (proj_slug in str(r.get("objective", "")).lower())
             for w_item in w_list_tmp:
                 ws_str = str((w_item.get("resource") or {}).get("worktreeId") or "")
                 if proj_slug in ws_str.lower() or str(root).lower() in ws_str.lower():
@@ -2513,6 +2660,27 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             total_report_tokens = 0
             worker_metrics_list = []
 
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _fetch_ws(did_str: str):
+                if not did_str or did_str == "-":
+                    return None
+                try:
+                    r = subprocess.run([orca_bin, "orchestration", "worker-show", "--dispatch", did_str, "--json"], capture_output=True, text=True, timeout=4)
+                    if r.returncode == 0:
+                        return json.loads(r.stdout).get("result", {})
+                except Exception:
+                    pass
+                return None
+
+            ws_map = {}
+            if workers:
+                d_ids = [str(w.get("dispatchId") or w.get("id") or "-") for w in workers]
+                with ThreadPoolExecutor(max_workers=min(8, max(1, len(d_ids)))) as pool:
+                    for did_k, ws_val in zip(d_ids, pool.map(_fetch_ws, d_ids)):
+                        if ws_val:
+                            ws_map[did_k] = ws_val
+
             for w in workers:
                 d_id = str(w.get("dispatchId") or w.get("id") or "-")
                 t_id = str(w.get("taskId") or "-")
@@ -2535,9 +2703,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     wt_name = ws_id.rsplit("/", 1)[-1]
 
                 try:
-                    ws_res = subprocess.run([orca_bin, "orchestration", "worker-show", "--dispatch", d_id, "--json"], capture_output=True, text=True, timeout=4)
-                    if ws_res.returncode == 0:
-                        ws_json = json.loads(ws_res.stdout).get("result", {})
+                    ws_json = ws_map.get(d_id)
+                    if ws_json:
                         w_info = ws_json.get("worker", {})
                         d_info = ws_json.get("dispatch", {})
                         t_info = ws_json.get("terminal") or {}
@@ -2590,7 +2757,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     or cli_index["by_task"].get(t_id)
                     or cli_index["by_term"].get(term)
                 )
-                t_metrics = _analyze_antigravity_transcript(tf_match) if tf_match else {}
+                t_metrics = _analyze_antigravity_transcript(tf_match, scope_id=d_id) if tf_match else {}
 
                 t_obj_info = run_tasks.get(t_id, {})
                 spec_txt = str(t_obj_info.get("spec") or "")
@@ -2679,8 +2846,14 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         mb_sz = bl_sz / (1024 * 1024)
                         if auto_fix:
                             try:
-                                bl_path.write_bytes(b"[TRUNCATED BY ORCA-MONITOR AUTO-FIX: runaway stdout log >10MB]\n")
-                                actions_taken.append(f"Đã cắt gọn file log phình to bất thường {bl_path.name} ({mb_sz:.1f} MB) của {wt_name}.")
+                                guard_bin_fix = os.path.expanduser("~/.local/bin/orca-command-guard")
+                                if os.path.exists(guard_bin_fix):
+                                    from importlib.machinery import SourceFileLoader
+                                    guard_mod = SourceFileLoader("orca_guard", guard_bin_fix).load_module()
+                                    guard_mod._enforce_task_log_cap(bl_path.parent)
+                                else:
+                                    bl_path.write_bytes(b"[TRUNCATED BY ORCA-MONITOR AUTO-FIX: runaway stdout log >10MB]\n")
+                                actions_taken.append(f"Đã cắt gọn file log phình to bất thường {bl_path.name} ({mb_sz:.1f} MB) của {wt_name} (giữ lại 256KB đầu + 128KB cuối).")
                             except Exception:
                                 pass
                         else:
@@ -2821,19 +2994,25 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     if os.path.exists(agy_hooks_path):
                         with open(agy_hooks_path, "r", encoding="utf-8") as hf:
                             agy_hooks = json.load(hf)
-                    if not isinstance(agy_hooks, dict) or "orca-command-guard" not in agy_hooks:
+                    expected_pre = f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PreToolUse python3 '{guard_bin}' --event PreToolUse; else printf '{{\"decision\":\"ask\"}}\\n'; cat >/dev/null 2>&1 || :; fi"
+                    expected_post = f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PostToolUse python3 '{guard_bin}' --event PostToolUse; else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi"
+                    curr_pre = ""
+                    try:
+                        curr_pre = agy_hooks.get("orca-command-guard", {}).get("PreToolUse", [{}])[0].get("hooks", [{}])[0].get("command", "")
+                    except Exception:
+                        curr_pre = ""
+                    if not isinstance(agy_hooks, dict) or curr_pre != expected_pre:
                         if not isinstance(agy_hooks, dict):
                             agy_hooks = {}
                         agy_hooks["orca-command-guard"] = {
-                            "PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": f"{guard_bin} --event PreToolUse"}]}],
-                            "PostToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": f"{guard_bin} --event PostToolUse"}]}],
-                            "PostToolUseFailure": [{"matcher": "run_command", "hooks": [{"type": "command", "command": f"{guard_bin} --event PostToolUseFailure"}]}],
+                            "PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": expected_pre, "timeout": 5}]}],
+                            "PostToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": expected_post, "timeout": 5}]}],
                         }
                         os.makedirs(os.path.dirname(agy_hooks_path), exist_ok=True)
                         with open(agy_hooks_path, "w", encoding="utf-8") as hf:
                             json.dump(agy_hooks, hf, indent=2)
                         actions_taken.append("Kích hoạt Orca Command & Stdout Flood Guard (16MB Circuit-Breaker) trong ~/.gemini/config/hooks.json")
-                    passed_items.append("Orca Command & Stdout Flood Guard (Backtick Blocker + 16MB Log Circuit-Breaker) active.")
+                    passed_items.append("Orca Command & Stdout Flood Guard (Backtick/Find Blocker + 16MB Log Circuit-Breaker + Stream Filter) active.")
                 except Exception as e:
                     warning_issues.append(f"Không thể kiểm tra Orca Command Guard hook: {e}")
 
@@ -2862,7 +3041,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             # 4.3 BẢNG TỔNG HỢP SỐ LIỆU ĐO ĐẠC THỰC TẾ (LEADER VS WORKERS TELEMETRY)
             if workers:
                 leader_tf = cli_index["by_leader_run"].get(active_run_id) if active_run_id else None
-                leader_m = _analyze_antigravity_transcript(leader_tf) if leader_tf else {}
+                leader_m = _analyze_antigravity_transcript(leader_tf, scope_id=active_run_id) if leader_tf else {}
 
                 w_with_m = [wm["telemetry"] for wm in worker_metrics_list if wm.get("telemetry")]
                 w_turns = sum(m["turns"] for m in w_with_m)
