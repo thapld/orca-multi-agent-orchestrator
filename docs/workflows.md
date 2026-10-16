@@ -26,9 +26,9 @@ sequenceDiagram
     Lead->>Orca: orca orchestration run-create
     Lead->>Orca: orca orchestration task-create (Tạo Task DAG có dependency)
 
-    par Khởi chạy Devs song song
-        Lead->>Orca: worker-start Dev 1 (worktree new-child: dev-backend)
-        Lead->>Orca: worker-start Dev 2 (worktree new-child: dev-frontend)
+    par Khởi chạy Workers (1 Role = 1 Worktree định danh, gom nhóm Terminal Tabs)
+        Lead->>Orca: worker-start Dev (path:.../dev-worker hoặc new-child: dev-worker)
+        Lead->>Orca: worker-start DevOps (path:.../devops-worker hoặc new-child: devops-worker)
     end
 
     loop Trong khi code
@@ -36,11 +36,11 @@ sequenceDiagram
         Devs->>Devs: Viết code, Unit test & git commit
     end
 
-    Devs->>Orca: send --from <handle> --type handoff --subject "Dev Handoff" --body "DEV_HANDOFF: branch=..., commit=..."
+    Devs->>Orca: send --from <handle> --type handoff --subject "Dev Handoff" --body "DEV_HANDOFF: branch=dev-worker, commit=..."
     Devs->>Orca: send --from <handle> --type worker_done --outcome succeeded
-    Lead->>Orca: check --ack <DELIVERY_ID> & worker-read (Kiểm duyệt Commit Hash & Build=0)
+    Lead->>Orca: check --ack <DELIVERY_ID>, worker-read & worker-retain (Kiểm duyệt Commit Hash & Build=0)
 
-    Lead->>Orca: worker-start QA & Security Auditor (Truyền nhánh đã được Coordinator duyệt)
+    Lead->>Orca: worker-start QA & Security Auditor (Mở tab mới trong worktree qa-worker & sec-worker)
     QA->>Orca: send --from <handle> --type worker_done --outcome succeeded (QA_VERDICT: PASS + Runtime Log Clean)
     Sec->>Orca: send --from <handle> --type worker_done --outcome succeeded (SECURITY_VERDICT: PASS)
 
@@ -171,10 +171,10 @@ sequenceDiagram
         Lead->>Orca: orca orchestration reply --id <MSG_ID> --body "Quyết định của Chief Architect: Dùng Authorization: Bearer <token>" --json
         Orca-->>Worker: Mở khóa 'ask' và trả về câu trả lời của Coordinator
     else Trường hợp B: Worker trình duyệt kết quả bàn giao (Handoff Submission)
-        Worker->>Orca: orca orchestration send --from <handle> --task-id <tid> --dispatch-id <did> --type handoff --subject "Dev Handoff" --body "DEV_HANDOFF: branch=..., commit=..." --json
+        Worker->>Orca: orca orchestration send --from <handle> --task-id <tid> --dispatch-id <did> --type handoff --subject "Dev Handoff" --body "DEV_HANDOFF: branch=dev-worker, commit=..." --json
         Orca-->>Lead: Sự kiện 'handoff'
         Lead->>Lead: Kiểm duyệt Commit Hash / Clean-Room Spec / Runtime Logs
-        Lead->>Orca: Duyệt & Điều phối cho role kế tiếp (send --to dispatch:<LIVE_ID> --type dispatch hoặc task-create + worker-start)
+        Lead->>Orca: Duyệt & Điều phối cho role kế tiếp (send --to dispatch:<LIVE_ID> --type dispatch hoặc task-create + worker-start --worktree path:<wt_path>)
     else Trường hợp C: Worker thực thi Quyền Phủ quyết Chuyên môn (Domain Veto / Escalation)
         Worker->>Orca: orca orchestration send --from <handle> --task-id <tid> --dispatch-id <did> --type escalation --subject "Runtime Log Error" --body "DEVOPS_ALERT / QA_ALERT / SEC_BLOCK: <error_detail>" --json
         Orca-->>Lead: Sự kiện 'escalation'
@@ -182,7 +182,7 @@ sequenceDiagram
         alt Worker cần sửa vẫn đang chạy (live)
             Lead->>Orca: orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "<Chỉ dẫn vá lỗi>" --json
         else Worker cần sửa đã kết thúc (settled / đã gửi worker_done)
-            Lead->>Orca: orca orchestration task-create & worker-start (hoặc --retry-of <OLD_DISPATCH_ID>)
+            Lead->>Orca: orca orchestration task-create & worker-start --worktree path:<wt_path> (Mở tab mới trong worktree định danh của role)
         end
     else Trường hợp D: Vấn đề vượt phạm vi spec cần ý kiến con người
         Lead->>Orca: orca orchestration gate-create --title "..." --question "..." --options "approve,revise" --json
@@ -222,9 +222,9 @@ sequenceDiagram
     else Trường hợp 2: Cạn Token / Tràn Context / Tiến trình đã thoát
         Lead->>Orca: orca orchestration worker-read --dispatch <id> (Đọc log cuối xác nhận cạn token)
         Lead->>Orca: orca orchestration worker-stop --dispatch <id> (Dừng worker cũ an toàn)
-        Note over Lead,Orca: Toàn bộ code viết dở vẫn nằm nguyên vẹn trên worktree con
-        Lead->>Orca: worker-start --task <id> --retry-of <id> --worktree current --agent <agent> [--model <model>]
-        Note over Worker: Worker mới kế thừa worktree, đọc git log & viết tiếp phần dở dang đến khi xong
+        Note over Lead,Orca: Toàn bộ code viết dở vẫn nằm nguyên vẹn trên worktree con của role
+        Lead->>Orca: worker-start --task <id> --retry-of <id> --worktree path:<role_worktree_path> --agent <agent> [--model <model>]
+        Note over Worker: Tab worker mới mở ngay trong worktree của role, đọc git log & viết tiếp phần dở dang đến khi xong
     else Trường hợp 3: Quá thời gian timeout 5 phút
         Orca-->>Lead: Báo lỗi timeout (outcome: timed_out)
         Lead->>Orca: orca terminal read --terminal <handle>
@@ -238,7 +238,7 @@ Khi phát hiện worker bị dừng, Leader phân tích chính xác bản chất
 
 1. **Tràn Context Window Phiên (Session Context Overflow):**
    * *Hiện tượng:* Agent đọc quá nhiều file hoặc log test quá dài vượt quá context window (128k/200k tokens).
-   * *Giải pháp:* Khởi tạo worker mới (kể cả cùng model) với context sạch (`fresh context`), tiếp quản worktree dang dở (`--retry-of <dispatch_id> --worktree current`).
+   * *Giải pháp:* Khởi tạo worker tab mới (kể cả cùng model) với context sạch (`fresh context`), tiếp quản ngay trong worktree định danh của role (`--retry-of <dispatch_id> --worktree path:<role_worktree_path>`).
 
 2. **Khóa Hạn Ngạch Toàn Tài Khoản (Account Rate Limit / HTTP 429 / Insufficient Quota):**
    * *Hiện tượng:* Tài khoản nhà cung cấp bị cạn tiền hoặc dính giới hạn request/phút (429).

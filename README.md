@@ -13,7 +13,7 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
 2. **Cấu Hình Concurrency (Song Song Hóa Tác Vụ):**
    * Cho phép chỉ định số lượng agent song song (1–5 workers) cho nhóm Developer, QA hoặc Security.
 3. **Khai Thác 100% Tiện Ích Độc Quyền Của Orca & REA:**
-   * **Git Worktrees:** Mỗi task/agent sở hữu một worktree độc lập (`--worktree new-child`), loại bỏ hoàn toàn xung đột git.
+   * **Git Worktrees & Terminal Tab Grouping:** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`...) sở hữu **1 worktree định danh duy nhất** và tự động gom nhóm các Terminal Tab mới bên trong worktree đó (`--worktree path:<abs_path>`), loại bỏ hoàn toàn xung đột git và rác worktree trùng lặp (`-2`, `-3`).
    * **Embedded Browser & Design Mode:** Click trực tiếp vào element trên màn hình để trích xuất HTML/CSS và mã nguồn ném thẳng vào terminal của agent.
    * **Computer Use:** Cho phép agent tương tác GUI với các phần mềm desktop ngoài trình duyệt qua Accessibility Tree.
    * **SSH Remote Worktrees:** Chạy các tác vụ nặng trên máy chủ từ xa (như host `orb` hay GPU box) trong khi giao diện editor vẫn nằm trên macOS.

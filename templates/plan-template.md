@@ -28,16 +28,16 @@ graph LR
 ```
 
 ### Task 1: Backend Service & API Logic
-* **Worker đảm nhiệm:** Dev A (`kimi` / `claude`)
-* **Worktree:** `new-child` (`dev-backend-auth`)
+* **Worker đảm nhiệm:** Full-Stack Dev (`antigravity` / `claude`)
+* **Worktree định danh:** `dev-worker` (tái sử dụng `path:.../dev-worker` & gom nhóm Terminal Tab)
 * **Nhiệm vụ cụ thể:**
   - Viết logic xử lý nghiệp vụ...
   - Viết Unit test với độ bao phủ > 90%...
 * **Acceptance Criteria:** Unit tests pass 100%, 0 lint error.
 
 ### Task 2: Frontend Component & State Management
-* **Worker đảm nhiệm:** Dev B (`kimi` / `claude`)
-* **Worktree:** `new-child` (`dev-frontend-auth`)
+* **Worker đảm nhiệm:** UI/UX Specialist (`antigravity` / `claude`)
+* **Worktree định danh:** `ui-worker` (tái sử dụng `path:.../ui-worker` & gom nhóm Terminal Tab)
 * **Nhiệm vụ cụ thể:**
   - Tạo Component giao diện...
   - Sử dụng Orca Design Mode để căn chỉnh CSS chuẩn mockup...
