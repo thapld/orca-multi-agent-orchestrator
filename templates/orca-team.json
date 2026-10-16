@@ -46,6 +46,11 @@
       "enabled": true,
       "agent": "antigravity",
       "utilities": ["git-worktrees", "ssh-remote-execution", "orca-skills-registry"]
+    },
+    "reSpecialist": {
+      "enabled": true,
+      "agent": "antigravity",
+      "utilities": ["git-worktrees", "orca-skills-registry", "reverse-engineer-anything"]
     }
   }
 }

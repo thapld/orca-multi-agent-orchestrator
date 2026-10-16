@@ -57,7 +57,11 @@ ROLE_ALIASES = {
     "benchmark": "benchSpecialist",
     "perf": "benchSpecialist",
     "performance": "benchSpecialist",
-    "benchspecialist": "benchSpecialist"
+    "benchspecialist": "benchSpecialist",
+    "re": "reSpecialist",
+    "reverse": "reSpecialist",
+    "rea": "reSpecialist",
+    "respecialist": "reSpecialist"
 }
 
 ROLE_LABELS = {
@@ -69,13 +73,111 @@ ROLE_LABELS = {
     "issueResolver": "Issue Resolver",
     "uiSpecialist": "UI/UX Specialist",
     "devopsSpecialist": "DevOps Specialist",
-    "benchSpecialist": "Bench & Perf Specialist"
+    "benchSpecialist": "Bench & Perf Specialist",
+    "reSpecialist": "Reverse Eng Specialist (REA)"
 }
 
 KNOWN_AGENTS = [
     "kimi", "claude", "codex", "cursor", "antigravity", 
     "opencode", "aider", "goose", "copilot", "gemini", "muse"
 ]
+
+REA_REPO_URL = "https://github.com/morluto/rea.git"
+REA_CLIENT_MAP = {
+    "antigravity": "antigravity",
+    "gemini": "gemini_cli",
+    "claude": "claude_code",
+    "codex": "codex",
+    "cursor": "cursor",
+    "opencode": "opencode",
+    "copilot": "copilot_cli",
+}
+
+def ensure_rea_skill(agent: str = "antigravity"):
+    """
+    Đảm bảo skill 'reverse-engineer-anything' (từ https://github.com/morluto/rea.git)
+    và công cụ 'rea' được cài đặt/đồng bộ cho các agent CLI (Antigravity, Claude, Codex, Kimi...).
+    """
+    import subprocess
+    import tempfile
+
+    skill_targets = [
+        Path.home() / ".gemini" / "config" / "skills" / "reverse-engineer-anything",
+        Path.home() / ".agents" / "skills" / "reverse-engineer-anything",
+        Path.home() / ".claude" / "skills" / "reverse-engineer-anything",
+    ]
+
+    # 1. Kiểm tra xem đã có bản cài đặt chuẩn ở một trong các thư mục chưa
+    existing_src = None
+    for st in skill_targets:
+        if (st / "SKILL.md").exists():
+            existing_src = st
+            break
+
+    # 2. Nếu chưa có ở bất kỳ đâu, thử chạy rea setup hoặc git clone từ https://github.com/morluto/rea.git
+    env = _build_discovery_env()
+    rea_bin = _find_cli_binary(["rea"], env)
+    rea_client = REA_CLIENT_MAP.get((agent or "antigravity").lower(), "antigravity")
+
+    if not existing_src:
+        print(f"   🔧 [REA] Đang cài đặt skill 'reverse-engineer-anything' từ {REA_REPO_URL}...")
+        if rea_bin:
+            try:
+                subprocess.run([rea_bin, "setup", "--client", rea_client, "--yes"], capture_output=True, text=True, env=env, timeout=30)
+            except Exception:
+                pass
+        for st in skill_targets:
+            if (st / "SKILL.md").exists():
+                existing_src = st
+                break
+
+    if not existing_src:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="orca-rea-"))
+        try:
+            res = subprocess.run(
+                ["git", "clone", "--depth", "1", REA_REPO_URL, str(tmp_dir)],
+                capture_output=True, text=True, timeout=45
+            )
+            if res.returncode == 0:
+                candidates = [
+                    tmp_dir / "skills" / "reverse-engineer-anything",
+                    tmp_dir / "skill" / "reverse-engineer-anything",
+                    tmp_dir / "reverse-engineer-anything",
+                    tmp_dir,
+                ]
+                for cand in candidates:
+                    if (cand / "SKILL.md").exists():
+                        target_primary = skill_targets[0]
+                        target_primary.parent.mkdir(parents=True, exist_ok=True)
+                        if target_primary.exists():
+                            shutil.rmtree(target_primary, ignore_errors=True)
+                        shutil.copytree(cand, target_primary, dirs_exist_ok=True)
+                        existing_src = target_primary
+                        print(f"   ✅ [REA] Đã tải và cài đặt skill 'reverse-engineer-anything' vào {target_primary}")
+                        break
+        except Exception as e:
+            print(f"   ⚠️  [REA] Không thể clone tự động từ {REA_REPO_URL}: {e}", file=sys.stderr)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # 3. Đồng bộ sang các thư mục skill chung (~/.agents/skills và ~/.claude/skills) để mọi worker đều đọc được
+    if existing_src and (existing_src / "SKILL.md").exists():
+        for st in skill_targets:
+            if st == existing_src or (st / "SKILL.md").exists():
+                continue
+            try:
+                st.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(existing_src, st, dirs_exist_ok=True)
+            except Exception:
+                pass
+
+    # 4. Nếu có binary 'rea', đảm bảo đăng ký MCP/client cho agent được chọn
+    if rea_bin:
+        try:
+            subprocess.run([rea_bin, "setup", "--client", rea_client, "--yes"], capture_output=True, text=True, env=env, timeout=20)
+        except Exception:
+            pass
+
 
 def find_project_root():
     curr = Path.cwd().resolve()
@@ -197,6 +299,14 @@ def sync_gemini_directive(root: Path, config: dict):
         b_display = f"`{b_agent}`" + (f" ({b_model})" if b_model else "")
         rows.append(f"| **Bench & Perf Specialist** | {b_display} | On-demand | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |")
 
+    # Reverse Engineering Specialist (REA)
+    re_spec = roles.get("reSpecialist", {})
+    if re_spec.get("enabled", False) and re_spec.get("agent") and re_spec.get("agent") != "none":
+        r_agent = re_spec.get("agent", "antigravity")
+        r_model = re_spec.get("model")
+        r_display = f"`{r_agent}`" + (f" ({r_model})" if r_model else "")
+        rows.append(f"| **Reverse Eng (REA)** | {r_display} | On-demand | Binary/Package/ASAR/Protocol decompile (`rea` skill) |")
+
     table_text = "\n".join(rows)
 
     # Regex replace the table under ## 👥 Configured Agent (Team)? Topology
@@ -215,6 +325,7 @@ def sync_gemini_directive(root: Path, config: dict):
         "devops-worker": (devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort") or "high"),
         "ui-worker": (ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort") or "medium"),
         "bench-worker": (bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort") or "high"),
+        "re-worker": (re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort") or "high"),
     }
     for w_name, (w_ag, w_mod, w_eff) in worker_map.items():
         if not w_ag or w_ag == "none":
@@ -583,6 +694,8 @@ ROLE_TIER_MAP = {
     "issueResolver": ("tier2", "high"),
     "uiSpecialist": ("tier3", "medium"),
     "devopsSpecialist": ("tier3", "high"),
+    "benchSpecialist": ("tier3", "high"),
+    "reSpecialist": ("tier2", "high"),
 }
 
 def recommend_model_index(models: list, role_tier: str = "tier2", target_effort: str = "high") -> int:
@@ -960,12 +1073,13 @@ def cmd_status(root: Path, config: dict):
         ("issueResolver", "6. Issue Resolver"),
         ("uiSpecialist", "7. UI/UX Specialist"),
         ("devopsSpecialist", "8. DevOps Infra"),
-        ("benchSpecialist", "9. Bench & Perf")
+        ("benchSpecialist", "9. Bench & Perf"),
+        ("reSpecialist", "10. Reverse Eng (REA)")
     ]
 
     for key, label in role_order:
         data = roles.get(key, {})
-        enabled = data.get("enabled", True if key not in ["uiSpecialist", "devopsSpecialist", "benchSpecialist"] else False)
+        enabled = data.get("enabled", True if key not in ["uiSpecialist", "devopsSpecialist", "benchSpecialist", "reSpecialist"] else False)
         if not enabled:
             print(f"{label:<24} | {'[ĐÃ TẮT]':<12} | {'-':<26} | {'-':<8} | -")
             continue
@@ -986,7 +1100,7 @@ def cmd_set(root: Path, config: dict, args: list):
 
     if not args:
         print("❌ Thiếu vai trò cần cấu hình. Dùng: orca-team set <role> [options]", file=sys.stderr)
-        print("👉 Các role hợp lệ: coord, dev, qa, sec, pr, issue, ui, devops, bench", file=sys.stderr)
+        print("👉 Các role hợp lệ: coord, dev, qa, sec, pr, issue, ui, devops, bench, re", file=sys.stderr)
         sys.exit(1)
 
     role_raw = args[0].lower()
@@ -1163,6 +1277,12 @@ def cmd_set(root: Path, config: dict, args: list):
     if not changes:
         print("ℹ️ Không có thay đổi nào được yêu cầu.")
         return
+
+    if role_key == "reSpecialist" and target.get("enabled", True):
+        if not target.get("utilities"):
+            target["utilities"] = ["git-worktrees", "orca-skills-registry", "reverse-engineer-anything"]
+        ensure_rea_skill(target.get("agent") or "antigravity")
+        changes.append("Skill: Đã đồng bộ 'reverse-engineer-anything' (morluto/rea)")
 
     if role_key == "coordinator" and new_agent:
         gemini_md = root / ".agents" / "GEMINI.md"
