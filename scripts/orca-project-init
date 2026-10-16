@@ -1135,6 +1135,25 @@ elif command -v orca >/dev/null 2>&1; then
   orca agent hooks on --json >/dev/null 2>&1 || true
 fi
 
+# ── Tự động gỡ bỏ Orca Worktree Setup Hook lỗi (ví dụ 'pnpm install' khi root không có package.json) ──
+if [[ ! -f "$PROJECT_PATH/package.json" && -x "/Applications/Orca.app/Contents/MacOS/Orca" && -f "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/cli/runtime-client.js" ]]; then
+  ELECTRON_RUN_AS_NODE=1 /Applications/Orca.app/Contents/MacOS/Orca -e "
+    const { RuntimeClient } = require('/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/cli/runtime-client.js');
+    (async () => {
+      const c = new RuntimeClient();
+      const info = await c.call('repo.show', { repo: 'path:$PROJECT_PATH' });
+      const setup = info?.repo?.hookSettings?.scripts?.setup || '';
+      if (/\b(pnpm|npm|yarn|bun)\s+(install|i)\b/.test(setup)) {
+        await c.call('repo.update', {
+          repo: 'path:$PROJECT_PATH',
+          updates: { hookSettings: { mode: 'auto', setupRunPolicy: 'run-by-default', setupAgentStartupPolicy: 'start-immediately', scripts: { setup: '', archive: '' }, commandSourcePolicy: 'local-only' } }
+        });
+      }
+    })().catch(() => {});
+  " >/dev/null 2>&1 || true
+  rm -f "$PROJECT_PATH"/.git/worktrees/*/orca/setup-runner.sh 2>/dev/null || true
+fi
+
 echo ""
 echo "🎉 [HOÀN TẤT] Đã tạo xong hệ thống Full-Spectrum Orchestrator (Token-Optimized)!"
 echo "   1. Directive Rule:   $TARGET_RULE (Hiến pháp 11 Vai trò cấp Principal, tối ưu token)"

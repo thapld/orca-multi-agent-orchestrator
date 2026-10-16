@@ -3356,6 +3356,70 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 except Exception as e:
                     warning_issues.append(f"Không thể kiểm tra Orca Command Guard hook: {e}")
 
+            # 4.1d Kiểm tra Orca Worktree Setup Hook (setup-runner.sh / ERR_PNPM_NO_PKG_MANIFEST Trap)
+            try:
+                repo_res = _safe_orca_run([orca_bin, "repo", "show", "--repo", f"path:{root}", "--json"], capture_output=True, text=True, timeout=5)
+                broken_setup_script = ""
+                if repo_res.returncode == 0:
+                    repo_obj = json.loads(repo_res.stdout).get("result", {}).get("repo", {})
+                    setup_cmd = str((repo_obj.get("hookSettings") or {}).get("scripts", {}).get("setup") or "").strip()
+                    if setup_cmd:
+                        has_pkg = (root / "package.json").is_file()
+                        has_pnpm = (root / "pnpm-lock.yaml").is_file() or (root / "pnpm-workspace.yaml").is_file()
+                        has_yarn = (root / "yarn.lock").is_file()
+                        if (
+                            (re.search(r"\b(?:pnpm|npm|yarn|bun)\s+(?:install|i)\b", setup_cmd) and not has_pkg)
+                            or (re.search(r"\bpnpm\s+(?:install|i)\b", setup_cmd) and not has_pnpm)
+                            or (re.search(r"\byarn\b", setup_cmd) and not has_yarn)
+                        ):
+                            broken_setup_script = setup_cmd
+                stale_runners = []
+                wt_git_dir = root / ".git" / "worktrees"
+                if wt_git_dir.is_dir():
+                    for sr in wt_git_dir.glob("*/orca/setup-runner.sh"):
+                        try:
+                            sr_txt = sr.read_text(encoding="utf-8", errors="ignore")
+                            if re.search(r"\b(?:pnpm|npm|yarn|bun)\s+(?:install|i)\b", sr_txt) and not (root / "package.json").is_file():
+                                stale_runners.append(sr)
+                        except Exception:
+                            pass
+                if broken_setup_script or stale_runners:
+                    if not auto_fix:
+                        warning_issues.append(
+                            f"Orca Worktree Setup Hook ('{broken_setup_script or 'setup-runner.sh'}') bị lỗi do thiếu package.json/lockfile ở root "
+                            f"(gây lỗi ERR_PNPM_NO_PKG_MANIFEST khi mở worker worktree — chạy 'orca-monitor --fix' để gỡ)."
+                        )
+                    else:
+                        orca_electron = "/Applications/Orca.app/Contents/MacOS/Orca"
+                        rt_client_js = "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/cli/runtime-client.js"
+                        if broken_setup_script and os.path.exists(orca_electron) and os.path.exists(rt_client_js):
+                            env_node = os.environ.copy()
+                            env_node["ELECTRON_RUN_AS_NODE"] = "1"
+                            js_code = (
+                                f'const {{ RuntimeClient }} = require({json.dumps(rt_client_js)});'
+                                f'(async () => {{'
+                                f'  const c = new RuntimeClient();'
+                                f'  await c.call("repo.update", {{'
+                                f'    repo: {json.dumps(f"path:{root}")},'
+                                f'    updates: {{ hookSettings: {{ mode: "auto", setupRunPolicy: "run-by-default", setupAgentStartupPolicy: "start-immediately", scripts: {{ setup: "", archive: "" }}, commandSourcePolicy: "local-only" }} }}'
+                                f'  }});'
+                                f'}})();'
+                            )
+                            subprocess.run([orca_electron, "-e", js_code], env=env_node, capture_output=True, text=True, timeout=8)
+                            actions_taken.append(f"Xóa Orca Setup Hook lỗi ('{broken_setup_script}') trong cấu hình repo '{root.name}'.")
+                        for sr in stale_runners:
+                            try:
+                                sr.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                        if stale_runners:
+                            actions_taken.append(f"Xóa {len(stale_runners)} file 'orca/setup-runner.sh' lỗi trong .git/worktrees/*.")
+                        passed_items.append("Orca Worktree Setup Hook (setup-runner.sh): Clean (không bị lỗi thiếu package.json).")
+                else:
+                    passed_items.append("Orca Worktree Setup Hook (setup-runner.sh): Clean (không bị lỗi thiếu package.json).")
+            except Exception:
+                pass
+
             # 4.2 Phân tích Mailbox
             inbox_res = _safe_orca_run([orca_bin, "orchestration", "inbox", "--limit", "50", "--json"], capture_output=True, text=True, timeout=5)
             hb_count = done_count = esc_count = handoff_count = done_tokens = 0
