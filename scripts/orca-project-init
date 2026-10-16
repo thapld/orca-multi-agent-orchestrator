@@ -612,10 +612,34 @@ cat > "$TARGET_CONFIG" << JSON
 }
 JSON
 
-# Chuẩn bị các dòng bảng tùy chọn (tránh dòng trống làm vỡ bảng Markdown)
+# Chuẩn bị các dòng bảng tùy chọn và lệnh điều phối theo đúng vai trò đã bật
 EXTRA_TABLE_ROWS=""
-[[ "$ENABLE_UI" == true ]] && EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | $(fmt_md_cell "$UI_AGENT" "$UI_MODEL") | On-demand | Design Mode (Click-to-code), live inspection |"$'\n'
-[[ "$ENABLE_DEVOPS" == true ]] && EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **DevOps Specialist** | $(fmt_md_cell "$DEVOPS_AGENT" "$DEVOPS_MODEL") | On-demand | DB migrations, Docker/Orb, SSH worktrees |"$'\n'
+EXTRA_STEP1_RULES=""
+EXTRA_STEP2_CMDS=""
+
+if [[ "$ENABLE_DEVOPS" == true ]]; then
+  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **DevOps Specialist** | $(fmt_md_cell "$DEVOPS_AGENT" "$DEVOPS_MODEL") | On-demand | DB migrations, Docker/Orb, SSH worktrees |"$'\n'
+  EXTRA_STEP1_RULES="${EXTRA_STEP1_RULES}  - **Task cho DevOps** *(BẮT BUỘC kích hoạt khi yêu cầu có Docker, Dockerfile, Kubernetes/K8s, pod, Helm, CI/CD, DB migration, \`.env\`, triển khai hạ tầng)*:
+    \`\`\`bash
+    orca orchestration task-create --spec \"DevOps: [Mô tả đóng gói Docker, cấu hình/deploy K8s, migration, kiểm tra pod/infra]\" --json
+    \`\`\`"$'\n'
+  EXTRA_STEP2_CMDS="${EXTRA_STEP2_CMDS}- **Khởi chạy DevOps Worker (khi có Task DevOps — Docker / K8s / DB / Infra):**
+  \`\`\`bash
+  orca orchestration worker-start --task <DEVOPS_TASK_ID> --worktree new-child --name devops-worker --agent ${DEVOPS_AGENT} --model \"${DEVOPS_MODEL}\" --effort ${DEVOPS_EFFORT:-high} --json
+  \`\`\`"$'\n'
+fi
+
+if [[ "$ENABLE_UI" == true ]]; then
+  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | $(fmt_md_cell "$UI_AGENT" "$UI_MODEL") | On-demand | Design Mode (Click-to-code), live inspection |"$'\n'
+  EXTRA_STEP1_RULES="${EXTRA_STEP1_RULES}  - **Task cho UI/UX Specialist** *(BẮT BUỘC kích hoạt khi yêu cầu có giao diện Frontend, CSS/DOM, Design Mode)*:
+    \`\`\`bash
+    orca orchestration task-create --spec \"UI: [Mô tả thiết kế giao diện, CSS/DOM và kiểm tra hiển thị]\" --json
+    \`\`\`"$'\n'
+  EXTRA_STEP2_CMDS="${EXTRA_STEP2_CMDS}- **Khởi chạy UI Worker (khi có Task Frontend / UI):**
+  \`\`\`bash
+  orca orchestration worker-start --task <UI_TASK_ID> --worktree new-child --name ui-worker --agent ${UI_AGENT} --model \"${UI_MODEL}\" --effort ${UI_EFFORT:-medium} --json
+  \`\`\`"$'\n'
+fi
 
 # ── Ghi file Directive GEMINI.md (Token-Optimized) ──
 cat > "$TARGET_RULE" << RULE
@@ -647,28 +671,42 @@ ${EXTRA_TABLE_ROWS}
 
 ## ⚡ QUY TRÌNH 4 BƯỚC BẮT BUỘC KHI NHẬN TASK CỦA USER:
 
-### BƯỚC 1: KHỞI TẠO RUN & TASKS
-- Khi nhận yêu cầu làm tính năng / fix bug / kiểm thử, phân tích kiến trúc và tạo một Run mới:
+### BƯỚC 1: KHỞI TẠO RUN & PHÂN RÃ TASKS THEO ĐÚNG VAI TRÒ (KHÔNG GỘP VIỆC)
+- Khi nhận yêu cầu, phân tích kiến trúc và tạo một Run mới:
   \`\`\`bash
   orca orchestration run-create --objective "[Mô tả tổng thể tính năng]" --json
   \`\`\`
-- Tạo các Task độc lập cho Dev và QA. Trích xuất Task ID trả về:
-  \`\`\`bash
-  orca orchestration task-create --spec "Dev: [Mô tả chi tiết task code và đường dẫn file]" --json
-  orca orchestration task-create --spec "QA: [Mô tả chi tiết test case và tiêu chí pass]" --json
-  \`\`\`
-  *(Hoặc dùng lệnh tiện ích: \`orca-dispatch "<tên-task>" dev "<spec>"\`)*
+- 🔴 **QUY TẮC BẮT BUỘC PHÂN VAI (ROLE DISPATCH RULES):** Tuyệt đối KHÔNG gộp việc của DevOps hay Security vào cho Dev/QA! Phải tạo Task độc lập cho từng vai trò có liên quan trong yêu cầu:
+  - **Task cho Dev** *(khi viết code, API, business logic)*:
+    \`\`\`bash
+    orca orchestration task-create --spec "Dev: [Mô tả chi tiết task code và đường dẫn file]" --json
+    \`\`\`
+${EXTRA_STEP1_RULES}  - **Task cho Security & Bug Hunter** *(BẮT BUỘC kích hoạt khi thêm API mới, Auth/JWT, xử lý dữ liệu đầu vào, concurrency/race conditions, kiểm toán lỗ hổng OWASP)*:
+    \`\`\`bash
+    orca orchestration task-create --spec "Security: [Mô tả kiểm toán bảo mật OWASP, race conditions, memory/resource leak]" --json
+    \`\`\`
+  - **Task cho QA** *(viết và chạy bộ test kiểm thử độc lập)*:
+    \`\`\`bash
+    orca orchestration task-create --spec "QA: [Mô tả chi tiết test case và tiêu chí nghiệm thu pass 100%]" --json
+    \`\`\`
 
-### BƯỚC 2: FAN-OUT (GIAO VIỆC CHO WORKER)
-- Khởi chạy worker trong các worktree riêng biệt, áp dụng đúng Agent và Model đã cấu hình ở bảng Topology trên:
+### BƯỚC 2: FAN-OUT (KHỞI CHẠY ĐÚNG WORKER TRONG CÁC WORKTREE RIÊNG BIỆT)
+- Khởi chạy các worker tương ứng với các Task đã tạo ở Bước 1, áp dụng đúng Agent và Model đã cấu hình:
 - **Khởi chạy Dev Worker:**
   \`\`\`bash
-  orca orchestration worker-start --task <DEV_TASK_ID> --worktree new-child --name dev-worker --agent ${DEV_AGENT} --model "${DEV_MODEL}" --effort high --json
+  orca orchestration worker-start --task <DEV_TASK_ID> --worktree new-child --name dev-worker --agent ${DEV_AGENT} --model "${DEV_MODEL}" --effort ${DEV_EFFORT:-high} --json
+  \`\`\`
+${EXTRA_STEP2_CMDS}- **Khởi chạy Security Worker (khi có Task Security Audit / Bug Hunt):**
+  \`\`\`bash
+  orca orchestration worker-start --task <SEC_TASK_ID> --worktree new-child --name sec-worker --agent ${SEC_AGENT} --model "${SEC_MODEL}" --effort ${SEC_EFFORT:-high} --json
   \`\`\`
 - **Khởi chạy Test Worker (QA):**
   \`\`\`bash
-  orca orchestration worker-start --task <QA_TASK_ID> --worktree new-child --name qa-worker --agent ${QA_AGENT} --model "${QA_MODEL}" --effort medium --json
+  orca orchestration worker-start --task <QA_TASK_ID> --worktree new-child --name qa-worker --agent ${QA_AGENT} --model "${QA_MODEL}" --effort ${QA_EFFORT:-medium} --json
   \`\`\`
+- **Khi xử lý Pull Request hoặc GitHub/GitLab Issue (On-demand):**
+  - Review PR: \`orca-review-pr <PR_NUMBER>\`
+  - Xử lý Issue: \`orca-hotfix <ISSUE_ID>\`
 
 ### BƯỚC 3: WAITING & VERIFY LOOP (CHỐNG ĐỐT TOKEN & GIỮ TRẠNG THÁI UI ORCA)
 - 🔴 **BẮT BUỘC DÙNG LỆNH CHỜ REACTIVE (KHÔNG POLL VÒNG LẶP):**
