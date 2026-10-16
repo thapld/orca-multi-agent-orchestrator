@@ -11,6 +11,7 @@ BINARIES=(
   "orca-dispatch"
   "orca-hotfix"
   "orca-review"
+  "orca-review-pr"
 )
 
 echo "🐋 [Orca Orchestrator Uninstaller] Đang gỡ bỏ các CLI khỏi $INSTALL_DIR..."

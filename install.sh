@@ -28,6 +28,18 @@ link_or_copy "$SCRIPT_DIR/scripts/orca-team" "$INSTALL_DIR/orca-monitor"
 link_or_copy "$SCRIPT_DIR/scripts/orca-dispatch-task.sh" "$INSTALL_DIR/orca-dispatch"
 link_or_copy "$SCRIPT_DIR/scripts/orca-issue-hotfix.sh" "$INSTALL_DIR/orca-hotfix"
 link_or_copy "$SCRIPT_DIR/scripts/orca-pr-review.sh" "$INSTALL_DIR/orca-review"
+link_or_copy "$SCRIPT_DIR/scripts/orca-pr-review.sh" "$INSTALL_DIR/orca-review-pr"
+
+# Kích hoạt Orca Agent Status Hooks (vòng xoay vàng, chấm xanh & chuông thông báo cho Antigravity/Claude/Kimi/Gemini)
+if [[ -x "/Applications/Orca.app/Contents/MacOS/Orca" && -f "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/main/agent-hooks/managed-agent-hook-controls.js" ]]; then
+  ELECTRON_RUN_AS_NODE=1 /Applications/Orca.app/Contents/MacOS/Orca -e '
+    const m = require("/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/main/agent-hooks/managed-agent-hook-controls.js");
+    m.installManagedAgentHooks(null, {shouldHydrateShellPath: true}).catch(() => {});
+  ' >/dev/null 2>&1 || true
+  echo "  🔔 Đã kích hoạt Orca Agent Status Hooks (hiển thị vòng xoay loading, chấm xanh & chuông thông báo)."
+elif command -v orca >/dev/null 2>&1; then
+  orca agent hooks on --json >/dev/null 2>&1 || true
+fi
 
 echo ""
 echo "🎉 Cài đặt hoàn tất! Hãy đảm bảo '$INSTALL_DIR' có trong PATH của bạn:"
@@ -47,9 +59,9 @@ echo "   - Antigravity: agy"
 echo "   - Claude Code: claude"
 echo "   - Orca ADE:    orca"
 echo ""
-echo "4. Khi bạn prompt yêu cầu làm tính năng (ví dụ: 'Làm tính năng login JWT'),"
-echo "   Lead Coordinator sẽ tự động phân rã task và gọi lệnh 'orca-dispatch'"
-echo "   để giao việc cho các agent chuyên trách (Dev, QA, Security) trong các"
-echo "   child worktree độc lập thay vì tự viết code trực tiếp!"
+echo "4. Khi bạn prompt yêu cầu làm tính năng, Lead Coordinator sẽ tự động tuân thủ"
+echo "   quy trình 4 bước (run-create/task-create ➔ worker-start cho Dev/DevOps/Sec/QA"
+echo "   ➔ check --wait ➔ gate-create chờ duyệt trước khi merge)!"
 echo "========================================================================"
 echo ""
+
