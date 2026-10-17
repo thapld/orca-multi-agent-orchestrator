@@ -193,78 +193,15 @@ else
   fi
 fi
 
-# Tự động chọn Worktree Slot đang rảnh (<role>-worker .. <role>-worker-N) khi role có Concurrency >= 2
-ROLE_CONCURRENCY=1
-DEV_CONCURRENCY=1
+# Tự động chọn Worktree Slot đang rảnh (<role>-worker) hoặc tự đẻ slot mới (<role>-worker-2, <role>-worker-3...) nếu bận
 ROLE_GOAL_MODE="true"
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
-  RAW_CONC=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$ROLE_QUERY" --field concurrency 2>/dev/null || true)
-  [[ "$RAW_CONC" =~ ^[0-9]+$ ]] && ROLE_CONCURRENCY="$RAW_CONC"
-  RAW_DEV_CONC=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get dev --field concurrency 2>/dev/null || true)
-  [[ "$RAW_DEV_CONC" =~ ^[0-9]+$ ]] && DEV_CONCURRENCY="$RAW_DEV_CONC"
   RAW_GOAL=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$ROLE_QUERY" --field goal 2>/dev/null || true)
   [[ "$RAW_GOAL" == "false" ]] && ROLE_GOAL_MODE="false"
-fi
-
-if [[ "$EXPLICIT_SLOT" == false && "$ROLE_CONCURRENCY" -ge 2 ]]; then
-  ACTIVE_WORKERS_JSON=$("$ORCA_BIN" orchestration worker-list --json 2>/dev/null || true)
-  git worktree prune >/dev/null 2>&1 || true
-  REPO_WT_PATHS=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree / { print substr($0, 10) }' || true)
-  CHOSEN_SLOT=$(python3 -c '
-import sys, json, os
-
-base_wt = sys.argv[1]
-try:
-    conc = max(1, min(10, int(sys.argv[2])))
-except Exception:
-    conc = 1
-repo_root = (sys.argv[3] if len(sys.argv) > 3 else "").rstrip("/")
-repo_slug = os.path.basename(repo_root).lower() if repo_root else ""
-repo_wts = set(ln.strip() for ln in (sys.argv[4] if len(sys.argv) > 4 else "").splitlines() if ln.strip())
-
-slots = [base_wt if i == 1 else f"{base_wt}-{i}" for i in range(1, conc + 1)]
-live_slots = set()
-counts = {s: 0 for s in slots}
-try:
-    d = json.loads(sys.stdin.read())
-    res = d.get("result") if isinstance(d, dict) and isinstance(d.get("result"), dict) else (d if isinstance(d, dict) else {})
-    scope = str(res.get("scope") or "")
-    for w in (res.get("workers") or []):
-        res_obj = w.get("resource") if isinstance(w.get("resource"), dict) else {}
-        ws_id = str(res_obj.get("worktreeId") or w.get("worktreeId") or "")
-        wt_path_part = ws_id.split("::", 1)[1] if "::" in ws_id else ws_id
-        if scope == "all" and repo_root:
-            ws_low = ws_id.lower()
-            if (
-                wt_path_part not in repo_wts
-                and repo_root.lower() not in ws_low
-                and (not repo_slug or (f"/{repo_slug}/" not in ws_low and not ws_low.endswith(f"/{repo_slug}")))
-            ):
-                continue
-        wt_n = ws_id.rsplit("/", 1)[-1] if "/" in ws_id else (ws_id.split("::", 1)[-1] if "::" in ws_id else ws_id)
-        st = str(w.get("workerState") or w.get("state") or "").lower()
-        d_st = str(w.get("dispatchStatus") or "").lower()
-        t_st = str(w.get("terminalState") or res_obj.get("terminalState") or "").lower()
-        lv = str((w.get("liveness") or {}).get("verdict") or "").lower()
-        if wt_n in counts:
-            counts[wt_n] += 1
-            is_dead = (
-                st in ("succeeded", "failed", "stopped", "timed_out", "settled", "completed", "cancelled", "released")
-                or d_st in ("succeeded", "failed", "stopped", "timed_out", "completed", "cancelled")
-                or t_st in ("released", "closed", "exited")
-                or lv in ("exited", "dead")
-            )
-            if not is_dead:
-                live_slots.add(wt_n)
-except Exception:
-    pass
-free_slots = [s for s in slots if s not in live_slots]
-if free_slots:
-    print(free_slots[0])
-else:
-    print(min(slots, key=lambda s: (counts.get(s, 0), slots.index(s))))
-' "$ROLE_WORKTREE" "$ROLE_CONCURRENCY" "$REPO_ROOT" "$REPO_WT_PATHS" <<< "$ACTIVE_WORKERS_JSON" 2>/dev/null || true)
-  [[ -n "$CHOSEN_SLOT" ]] && ROLE_WORKTREE="$CHOSEN_SLOT"
+  if [[ "$EXPLICIT_SLOT" == false ]]; then
+    CHOSEN_SLOT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" worktree-arg "$ROLE_QUERY" --slot-only 2>/dev/null || true)
+    [[ -n "$CHOSEN_SLOT" ]] && ROLE_WORKTREE="$CHOSEN_SLOT"
+  fi
 fi
 
 GOAL_MODE_CLAUSE=" CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build & test EXIT_CODE=0, runtime log); khi chạy Jest phải kèm --forceExit để chống treo open handles và khi lệnh chuyển sang background (task-XX) CẤM gọi manage_task(status) lặp liên tục 2-3s mỗi lần (hãy dừng gọi tool để hệ thống tự đánh thức khi xong hoặc dùng schedule >=20s); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ + gộp lệnh gửi bản tin báo cáo && gửi worker-done về Coordinator mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal."
@@ -280,14 +217,9 @@ if [[ -x "$ORCA_TEAM_BIN" ]]; then
 fi
 if [[ "$SPEC" != "[ROLE:"* ]]; then
   CLEAN_SPEC="${SPEC%.}"
-  MERGE_DEV_CMD="git merge --no-edit main && (! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker)"
-  if [[ "$DEV_CONCURRENCY" -ge 2 ]]; then
-    for ((k_slot=2; k_slot<=DEV_CONCURRENCY; k_slot++)); do
-      MERGE_DEV_CMD="${MERGE_DEV_CMD} && (! git rev-parse --verify --quiet dev-worker-${k_slot} >/dev/null || git merge --no-edit dev-worker-${k_slot})"
-    done
-  fi
-  MERGE_DEVOPS_UPSTREAM="${MERGE_DEV_CMD} && (! git rev-parse --verify --quiet ui-worker >/dev/null || git merge --no-edit ui-worker)"
-  MERGE_ALL_CMD="${MERGE_DEV_CMD} && (! git rev-parse --verify --quiet devops-worker >/dev/null || git merge --no-edit devops-worker) && (! git rev-parse --verify --quiet ui-worker >/dev/null || git merge --no-edit ui-worker)"
+  MERGE_DEV_CMD="git merge --no-edit main && (for _br in \$(git for-each-ref --format='%(refname:short)' 'refs/heads/dev-worker*'); do git merge --no-edit \"\$_br\" || exit 1; done)"
+  MERGE_DEVOPS_UPSTREAM="${MERGE_DEV_CMD} && (for _br in \$(git for-each-ref --format='%(refname:short)' 'refs/heads/ui-worker*'); do git merge --no-edit \"\$_br\" || exit 1; done)"
+  MERGE_ALL_CMD="${MERGE_DEV_CMD} && (for _br in \$(git for-each-ref --format='%(refname:short)' 'refs/heads/devops-worker*'); do git merge --no-edit \"\$_br\" || exit 1; done) && (for _br in \$(git for-each-ref --format='%(refname:short)' 'refs/heads/ui-worker*'); do git merge --no-edit \"\$_br\" || exit 1; done)"
   case "$ROLE_BASE_KEY" in
     devops|devopsspecialist|infra|sre|ops)
       SPEC="[ROLE: PRINCIPAL DEVOPS/SRE] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. CẤM VƯỢT RÀO & CHỐNG TREO (ANTI-RABBIT-HOLE): Chỉ sửa Infra/Docker/K8s/DB/CI; CẤM sửa business logic của Dev; CẤM TUYỆT ĐỐI tự ý dịch ngược hoặc đọc/cat/strings/grep trực tiếp file binary trong container (nếu cần giải phẫu binary phải báo Coordinator giao re-worker); CẤM đặt dấu backtick (\`) bên trong chuỗi nháy kép (\"...\") của bash/zsh/python -c vì shell sẽ thực thi command substitution gây biến rỗng và treo vòng lặp stdout! RÀ SOÁT RUNTIME LOGS & BÁO CÁO COORDINATOR (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): (1) Đầu ca chạy git merge --no-edit main và orca orchestration check --terminal <worker_handle> --json; khi hộp thư có bàn giao nhánh Dev đã được Coordinator duyệt cần build/rollout thì chạy ${MERGE_DEVOPS_UPSTREAM}, (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! Bắt buộc chờ qua chu kỳ chạy thật của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start (kubectl logs/docker logs KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) cùng trạng thái DB, (3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, SSLHandshakeException, Auth 401/403 hay health=ERROR nào lúc runtime (hoặc nếu vướng lỗi quá 15 turns chưa xử lý được ở tầng Infra/DB) ➔ BẮT BUỘC dừng đào bới và trình báo ngay lên Coordinator: orca orchestration send --from <worker_handle> --type escalation --subject 'Runtime Log Error' --body '<Chi tiết pod & log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json (KHÔNG dùng --to '@all'!) rồi chờ chỉ đạo hoặc báo worker-done --outcome failed (CẤM báo succeeded khi runtime log còn lỗi!); khi sạch lỗi 100%, gộp gửi handoff và worker-done trong cùng 1 lệnh (&&): orca orchestration send --from <worker_handle> --type handoff --subject 'Infra Ready' --body '<Pod/Port/Log sạch 100%>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json."
@@ -356,6 +288,7 @@ except Exception:
 ' <<< "$TASK_JSON" 2>/dev/null || true)
 
 if [[ -z "$TASK_ID" ]]; then
+  [[ -x "$ORCA_TEAM_BIN" ]] && "$ORCA_TEAM_BIN" --path "$REPO_ROOT" worktree-arg "$ROLE_WORKTREE" --release >/dev/null 2>&1 || true
   echo "❌ Không thể tạo task trong Orca. Kết quả: $TASK_JSON"
   exit 1
 fi
@@ -448,6 +381,7 @@ except Exception:
 ' <<< "$START_RECEIPT" 2>/dev/null || true)
 
 if [[ -z "$DISPATCH_ID" ]]; then
+  [[ -x "$ORCA_TEAM_BIN" ]] && "$ORCA_TEAM_BIN" --path "$REPO_ROOT" worktree-arg "$ROLE_WORKTREE" --release >/dev/null 2>&1 || true
   echo "❌ Khởi chạy worker thất bại: $START_RECEIPT"
   exit 1
 fi
@@ -468,6 +402,7 @@ except Exception:
     pass
 " <<< "$START_RECEIPT" 2>/dev/null || true)
 if [[ -n "$START_STATE_INFO" ]]; then
+  [[ -x "$ORCA_TEAM_BIN" ]] && "$ORCA_TEAM_BIN" --path "$REPO_ROOT" worktree-arg "$ROLE_WORKTREE" --release >/dev/null 2>&1 || true
   echo "❌ Worker dispatch $DISPATCH_ID chưa sẵn sàng (state: ${START_STATE_INFO%%$'\n'*})"
   [[ "$START_STATE_INFO" == *$'\n'* ]] && echo "${START_STATE_INFO#*$'\n'}"
   exit 1

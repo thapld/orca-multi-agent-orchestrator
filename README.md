@@ -13,10 +13,12 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
 2. **Cơ Chế Phản Biện & Đồng Thuận Biện Chứng Chống Leader Độc Đoán (Anti-Autocracy & Dialectical Consensus):**
    * Vai trò **Principal Research & Adversarial Critic (`critic-worker`)** điều tra độc lập (`file:line` + git blame + runtime log, lập giả thuyết riêng trước khi đọc giả thuyết Leader) và tranh biện 2 chiều với Leader qua `orca orchestration ask`/`reply` (tối đa 3 vòng). Bắt buộc khi gặp 1 trong 4 trigger: bug tái phát sau fix, escalation quy lỗi liên role/liên tầng, thay đổi schema/API/auth/payment hoặc ≥2 tầng, worker báo cáo mâu thuẫn. Bế tắc ➔ Human Gate trình cả 2 phương án, Leader không được tự phán quyết.
    * *Lưu ý trung thực:* đây là ràng buộc ở tầng chỉ dẫn (directive) + kiểm tra Zero-Trust, không phải cơ chế chặn cứng — Orca CLI không ngăn Leader bỏ qua Critic. Chi phí trên mỗi turn của Leader chỉ ~650 tokens (do toàn bộ Hiến pháp `[ROLE: PRINCIPAL ...]` của cả 10 vai trò worker đã được offload sang `orca-team spec <role> "<nhiệm vụ>"`, chỉ nạp vào task của Worker khi khởi tạo, giúp tổng directive của Leader giảm ~2.500 tokens/turn từ ~6.808 xuống ~4.327 tokens; có thể tắt hẳn Critic bằng `orca-team set critic --disable` xuống còn ~3.634 tokens).
-3. **Cấu Hình Concurrency (Song Song Hóa Tác Vụ):**
-   * Cho phép chỉ định số lượng agent song song (1–5 workers) cho nhóm Developer, QA hoặc Security.
+3. **Tự Động Co Giãn Worktree & Agent Song Song (Dynamic Elastic Worktree Scaling):**
+   * Bỏ hoàn toàn việc chọn cứng số lượng agent khi cài đặt. Khi có task mới cho bất kỳ vai trò nào (`dev`, `qa`, `sec`, `devops`, `bench`, `re`, `ui`, `critic`), lệnh `orca-team worktree-arg <role>` tự động kiểm tra trạng thái toàn cục (`orca worktree ps` + `worker-list` + khóa đặt chỗ atomic):
+   * **Khi rảnh (`done` / `settled` / `released`):** Tái sử dụng ngay worktree hiện có (`--worktree path:<abs_path>`) và gom nhóm Terminal Tab mới bên trong đó.
+   * **Khi bận (`working` / `live` ở bất kỳ Leader/Run nào):** Tự động đẻ thêm hoặc chọn worktree slot kế tiếp (`<role>-worker-2`, `<role>-worker-3`...) hoàn toàn cô lập, ngăn chặn 100% rủi ro 2 agent/2 Leader giẫm chân lên cùng một worktree hoặc đụng `git index.lock`.
 4. **Khai Thác 100% Tiện Ích Độc Quyền Của Orca & REA:**
-   * **Git Worktrees & Terminal Tab Grouping:** Mỗi vai trò (`dev-worker`, `critic-worker`, `devops-worker`, `qa-worker`, `sec-worker`...) sở hữu **1 worktree định danh duy nhất** và tự động gom nhóm các Terminal Tab mới bên trong worktree đó (`--worktree path:<abs_path>`), loại bỏ hoàn toàn xung đột git và rác worktree trùng lặp (`-2`, `-3`).
+   * **Elastic Git Worktrees & Terminal Tab Grouping:** Tái sử dụng worktree định danh khi rảnh để gom nhóm Terminal Tabs gọn gàng (`--worktree path:<abs_path>`), đồng thời tự động mở rộng sang `<role>-worker-2`, `<role>-worker-3`... khi chạy đa luồng hoặc đa Leader.
    * **Embedded Browser & Design Mode:** Click trực tiếp vào element trên màn hình để trích xuất HTML/CSS và mã nguồn ném thẳng vào terminal của agent.
    * **Computer Use:** Cho phép agent tương tác GUI với các phần mềm desktop ngoài trình duyệt qua Accessibility Tree.
    * **SSH Remote Worktrees:** Chạy các tác vụ nặng trên máy chủ từ xa (như host `orb` hay GPU box) trong khi giao diện editor vẫn nằm trên macOS.
@@ -33,7 +35,7 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
 9. **Universal Auto-Discovery (Khởi chạy tự động không cần dán prompt):**
    * Tự động tạo symlink `CLAUDE.md` và `AGENTS.md` trỏ về `.agents/GEMINI.md`. Dù bạn mở Antigravity, Claude Code (`claude`), hay Codex CLI làm Leader, agent đều tự động đọc toàn bộ directive và quy trình điều phối ngay khi khởi động mà không cần dán prompt thủ công.
 10. **Điều Chỉnh Model & Agent Năng Động Ngay Khi Ở Leader (`orca-team` CLI):**
-   * Cung cấp công cụ dòng lệnh `orca-team` để xem và thay đổi agent, model provider, reasoning effort hoặc số lượng concurrency của bất kỳ vai trò nào ngay trong lúc làm việc mà không cần sửa file thủ công.
+   * Cung cấp công cụ dòng lệnh `orca-team` để xem và thay đổi agent, model provider, reasoning effort hoặc chế độ `/goal` của bất kỳ vai trò nào ngay trong lúc làm việc mà không cần sửa file thủ công.
 
 ---
 
@@ -95,9 +97,9 @@ orca-project-init /path/to/project
 
 ### Các bước wizard (điều hướng 100% bằng phím mũi tên `↑`/`↓` & `Enter`):
 1. Chọn agent & model cho **Lead Coordinator** (ví dụ: `antigravity` / `claude`).
-2. Chọn agent, model, số lượng song song & gói tiện ích cho **Developers**.
-3. Chọn agent, model, số lượng song song & gói tiện ích cho **QA Testers**.
-4. Chọn agent, model & gói tiện ích cho **Bug Hunter & Security**.
+2. Chọn agent, model & gói tiện ích cho **Developers** (tự động co giãn worktree `dev-worker`, `dev-worker-2`... khi bận).
+3. Chọn agent, model & gói tiện ích cho **QA Testers** (tự động co giãn worktree `qa-worker`, `qa-worker-2`... khi bận).
+4. Chọn agent, model & gói tiện ích cho **Bug Hunter & Security** (tự động co giãn worktree `sec-worker`, `sec-worker-2`... khi bận).
 5. Chọn agent & model cho **PR Reviewer** và **Git Issue Resolver**.
 6. Bật/tắt các vai trò mở rộng: **UI/UX Designer** (Design Mode), **DevOps Specialist** (Docker/K8s/DB/SSH), **Performance & Benchmark Specialist** (Đo tải RPS/EPS, p95/p99 latency, profiling), **Reverse Engineering Specialist (REA)** (Giải phẫu Binary/ASAR/APK/Firmware/Protocol với skill [`morluto/rea`](https://github.com/morluto/rea.git)) và **Research & Adversarial Critic (`critic-worker`)** (Điều tra nguyên nhân gốc & phản biện thiết kế với Leader).
 7. Chọn môi trường thực thi: **Local** hoặc **SSH (`orb`)**.
@@ -112,14 +114,14 @@ orca-project-init /path/to/project
 
 ## 🎛️ Thay Đổi Agent & Model Khi Ở Leader (`orca-team` CLI)
 
-Trong quá trình làm việc, nếu bạn muốn đổi sang model mạnh hơn cho Developer, đổi agent cho QA hay tăng/giảm số worker song song:
+Trong quá trình làm việc, nếu bạn muốn đổi sang model mạnh hơn cho Developer hay đổi agent cho QA/Security:
 
 ```bash
 # 1. Xem đội hình và model hiện tại:
 orca-team status
 
 # 2. Đổi agent & model cho Developer (ví dụ sang Claude Sonnet 4.6 với reasoning high):
-orca-team set dev --agent claude --model claude-sonnet-4-6 --effort high --concurrency 3
+orca-team set dev --agent claude --model claude-sonnet-4-6 --effort high
 
 # 3. Đổi agent cho QA & Tester:
 orca-team set qa --agent antigravity
@@ -138,9 +140,10 @@ orca-team set critic --enable --agent antigravity --model gemini-4-argon-high
 orca-team set dev
 orca-team set critic
 
-# 7. Sinh bản Hiến pháp Vai trò cấp Principal (Role Spec Offloading cho Worker):
+# 7. Sinh bản Hiến pháp Vai trò cấp Principal & Cấp phát Worktree Slot tự động:
 orca-team spec critic "Kiểm chứng chéo giả thuyết lỗi và phản biện thiết kế của Leader"
 orca-team spec dev "Triển khai API..."
+orca-team worktree-arg dev   # Trả về --worktree path:... nếu rảnh, hoặc --worktree new-child --name dev-worker-2 nếu bận
 
 # 8. Quản lý Discovery Links cho nhiều AI CLI (Claude / Antigravity / Codex):
 orca-team link all      # Kích hoạt CLAUDE.md và AGENTS.md để mở bất kỳ AI CLI nào làm Leader

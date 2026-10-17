@@ -471,8 +471,8 @@ def _strip_single_quotes_and_quoted_heredocs(cmd: str) -> str:
 
 
 def _is_safe_orca_spec_inner(inner: str) -> bool:
-    """Verify the interior of $(orca-team spec ...) has no unescaped backticks, nested $(), or command chaining."""
-    if not re.match(r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt)\b", inner):
+    """Verify the interior of $(orca-team spec|worktree-arg ...) has no unescaped backticks, nested $(), or command chaining."""
+    if not re.match(r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|worktree-arg|wt-arg|slot-arg)\b", inner):
         return False
     i = 0
     n = len(inner)

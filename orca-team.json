@@ -15,7 +15,6 @@
   "roles": {
     "developer": {
       "agent": "antigravity",
-      "concurrency": 2,
       "goalMode": true,
       "utilities": [
         "git-worktrees",
@@ -27,7 +26,6 @@
     },
     "qa": {
       "agent": "antigravity",
-      "concurrency": 1,
       "goalMode": true,
       "utilities": [
         "git-worktrees",
@@ -39,7 +37,6 @@
     },
     "security": {
       "agent": "antigravity",
-      "concurrency": 1,
       "goalMode": true,
       "utilities": [
         "git-worktrees",
