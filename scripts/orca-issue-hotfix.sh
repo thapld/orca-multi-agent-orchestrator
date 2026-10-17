@@ -44,7 +44,7 @@ ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
 # Kiểm tra xem worktree định danh hotfix-issue-<ISSUE_NUM> đã tồn tại trong repo chưa (tránh đẻ worktree trùng lặp -2, -3)
-EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\).*\[${WORKTREE_NAME}\].*/\1/p" | head -n 1)
+EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\/${WORKTREE_NAME}\) .*/\1/p; s/^\([^ ]*\).*\[${WORKTREE_NAME}\].*/\1/p" | head -n 1)
 
 if [[ -n "$EXISTING_WT_PATH" ]]; then
   echo "♻️  [Orca Hotfix] Tái sử dụng worktree định danh hiện có: $WORKTREE_NAME ($EXISTING_WT_PATH)..."
@@ -56,6 +56,9 @@ fi
 
 echo "🐋 [Orca Hotfix] Đang khởi tạo worktree song song cho Issue #$ISSUE_NUM bằng agent: $AGENT..."
 
+SETUP_POLICY="skip"
+[[ -f "$REPO_ROOT/package.json" ]] && SETUP_POLICY="run"
+
 RECEIPT=$($ORCA_BIN worktree create \
   --repo "path:$REPO_ROOT" \
   --name "$WORKTREE_NAME" \
@@ -63,7 +66,7 @@ RECEIPT=$($ORCA_BIN worktree create \
   --no-parent \
   --agent "$AGENT" \
   --prompt "$ISSUE_PROMPT" \
-  --setup run \
+  --setup "$SETUP_POLICY" \
   --json 2>&1) || true
 
 WT_NAME=$(python3 -c "

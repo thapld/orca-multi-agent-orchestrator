@@ -35,47 +35,47 @@
 ## ⚡ QUY TRÌNH 4 BƯỚC & HIẾN PHÁP KỸ SƯ TRƯỞNG (CHỐNG ĐỘC ĐOÁN, VƯỢT RÀO & BÁO SẠCH GIẢ)
 
 ### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ (CẤM GỘP VIỆC — TỰ ĐỘNG TIÊM SỔ TAY WORKER)
-- Tạo Run mới và **tách Task riêng cho từng vai trò**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế, không tự gõ lại hiến pháp nội bộ của Worker):
+- Tạo Run mới và **tách Task riêng cho từng vai trò**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **KHÔNG** thêm `--json` vào `task-create` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng `orca orchestration task-list --brief`):
   ```bash
-  orca orchestration run-create --objective "[Mô tả tổng thể]" --json
+  orca orchestration run-create --objective "[Mô tả tổng thể]"
 
   # 1. Principal Dev (Code/API/Logic):
-  orca orchestration task-create --spec "$(orca-team spec dev '[Chi tiết code, file paths & yêu cầu]')" --json
+  orca orchestration task-create --spec "$(orca-team spec dev '[Chi tiết code, file paths & yêu cầu]')"
   # 2. Principal DevOps/SRE (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):
-  orca orchestration task-create --spec "$(orca-team spec devops '[Docker/K8s/DB/Infra cần triển khai]')" --json
+  orca orchestration task-create --spec "$(orca-team spec devops '[Docker/K8s/DB/Infra cần triển khai]')"
   # 3. Principal Research & Adversarial Critic (BẮT BUỘC khi gặp 1 trong 4 trigger Anti-Autocracy ở Bước 3):
-  orca orchestration task-create --spec "$(orca-team spec critic 'Triệu chứng & bằng chứng thô: [...] | Giả thuyết/Kế hoạch của Leader: [...]')" --json
+  orca orchestration task-create --spec "$(orca-team spec critic 'Triệu chứng & bằng chứng thô: [...] | Giả thuyết/Kế hoạch của Leader: [...]')"
   # 4. Principal AppSec Auditor (BẮT BUỘC khi có API mới, Auth/JWT, input validation, concurrency, OWASP):
-  orca orchestration task-create --spec "$(orca-team spec sec 'Kiểm toán Red-Team cho [module/diff]')" --json
+  orca orchestration task-create --spec "$(orca-team spec sec 'Kiểm toán Red-Team cho [module/diff]')"
   # 5. Principal SDET / QA (Kiểm thử độc lập, Nghiệm thu & Kiểm toán Runtime Logs):
-  orca orchestration task-create --spec "$(orca-team spec qa 'Kiểm thử nghiệm thu, Adversarial Testing & Runtime Logs cho [chi tiết]')" --json
+  orca orchestration task-create --spec "$(orca-team spec qa 'Kiểm thử nghiệm thu, Adversarial Testing & Runtime Logs cho [chi tiết]')"
   # 6. Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):
-  orca orchestration task-create --spec "$(orca-team spec bench '[Đo tải, benchmark & profiling]')" --json
+  orca orchestration task-create --spec "$(orca-team spec bench '[Đo tải, benchmark & profiling]')"
   # 7. Principal Reverse Engineer - REA (BẮT BUỘC khi dịch ngược binary/JAR/ASAR/APK/firmware/network capture hoặc tái tạo giao thức đóng):
-  orca orchestration task-create --spec "$(orca-team spec re '[Giải phẫu artifact/binary/protocol với rea]')" --json
+  orca orchestration task-create --spec "$(orca-team spec re '[Giải phẫu artifact/binary/protocol với rea]')"
   # 8. Principal UI/UX (Khi có Frontend, CSS/DOM, Design Mode):
-  orca orchestration task-create --spec "$(orca-team spec ui '[Giao diện, CSS/DOM, Responsive & a11y]')" --json
+  orca orchestration task-create --spec "$(orca-team spec ui '[Giao diện, CSS/DOM, Responsive & a11y]')"
   ```
 
 ### BƯỚC 2: FAN-OUT (1 ROLE = 1 WORKTREE ĐỊNH DANH DUY NHẤT & GOM NHÓM TERMINAL TABS)
 - 🔴 **QUY TẮC GOM NHÓM TERMINAL TABS (CẤM ĐẺ THÊM WORKTREE TRÙNG LẶP `-2`, `-3` & TRÁNH XUNG ĐỘT ĐA REPO `selector_ambiguous`):** Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`, `critic-worker`) chỉ dùng **1 Worktree định danh duy nhất**. Nếu worktree của role đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <role>-worker` ở lần chạy đầu tiên khi worktree chưa tồn tại:
   ```bash
   # Dev Worker:
-  orca orchestration worker-start --task <DEV_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[dev-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name dev-worker") --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
+  orca orchestration worker-start --task <DEV_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/dev-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[dev-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name dev-worker") --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
   # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):
-  orca orchestration worker-start --task <DEVOPS_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[devops-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name devops-worker") --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
-  # Security Worker (khi có Task Security Audit):
-  orca orchestration worker-start --task <SEC_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[sec-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name sec-worker") --agent antigravity --model "gemini-4-argon-high" --effort high --json
-  # QA Worker (Test nghiệm thu):
-  orca orchestration worker-start --task <QA_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[qa-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name qa-worker") --agent antigravity --model "gemini-3.8-flash-medium" --effort medium --json
-  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):
-  orca orchestration worker-start --task <BENCH_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[bench-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name bench-worker") --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
-  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):
-  orca orchestration worker-start --task <RE_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[re-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name re-worker") --agent antigravity --model "gemini-4-argon-high" --effort high --json
-  # UI Worker (khi có Task Frontend/UI):
-  orca orchestration worker-start --task <UI_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[ui-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name ui-worker") --agent antigravity --model "gemini-3.8-flash-medium" --effort medium --json
+  orca orchestration worker-start --task <DEVOPS_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/devops-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[devops-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name devops-worker") --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
   # Research & Critic Worker (khi cần khảo sát sâu, phản biện kế hoạch Leader & thống nhất root-cause):
-  orca orchestration worker-start --task <CRITIC_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[critic-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name critic-worker") --agent antigravity --model "gemini-4-argon-high" --effort high --json
+  orca orchestration worker-start --task <CRITIC_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/critic-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[critic-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name critic-worker") --agent antigravity --model "gemini-4-argon-high" --effort high --json
+  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):
+  orca orchestration worker-start --task <BENCH_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/bench-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[bench-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name bench-worker") --agent antigravity --model "gemini-3.8-flash-high" --effort high --json
+  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):
+  orca orchestration worker-start --task <RE_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/re-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[re-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name re-worker") --agent antigravity --model "gemini-4-argon-high" --effort high --json
+  # UI Worker (khi có Task Frontend/UI):
+  orca orchestration worker-start --task <UI_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/ui-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[ui-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name ui-worker") --agent antigravity --model "gemini-3.8-flash-medium" --effort medium --json
+  # Security Worker (khi có Task Security Audit):
+  orca orchestration worker-start --task <SEC_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/sec-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[sec-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name sec-worker") --agent antigravity --model "gemini-4-argon-high" --effort high --json
+  # QA Worker (Test nghiệm thu):
+  orca orchestration worker-start --task <QA_TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/qa-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[qa-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name qa-worker") --agent antigravity --model "gemini-3.8-flash-medium" --effort medium --json
   ```
   *(On-demand Git: Review PR dùng `orca-review-pr <PR_NUM>` | Sửa Issue dùng `orca-hotfix <ISSUE_ID>`)*
 
@@ -106,7 +106,7 @@
 - Chỉ khi người dùng phản hồi `"yes"`:
   1. Đóng Gate và khôi phục trạng thái `completed` cho `<FINAL_TASK_ID>` (vì `gate-create` chuyển task sang `blocked` và `gate-resolve` trong Orca đưa task về `ready`):
      ```bash
-     orca orchestration gate-resolve --id <GATE_ID> --resolution "yes" --json
-     orca orchestration task-update --id <FINAL_TASK_ID> --status completed --json
+     orca orchestration gate-resolve --id <GATE_ID> --resolution "yes"
+     orca orchestration task-update --id <FINAL_TASK_ID> --status completed
      ```
   2. Thực hiện `git merge` vào nhánh chính, sau đó chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention và đóng các terminal worker.

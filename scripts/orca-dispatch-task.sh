@@ -121,6 +121,12 @@ if [[ "$SPEC" != "[ROLE:"* ]]; then
     critic|research|researcher|challenger|advocate|criticspecialist)
       SPEC="[ROLE: PRINCIPAL RESEARCH & ADVERSARIAL CRITIC] Nhiệm vụ: ${SPEC} (Spec phải tách riêng Triệu chứng + bằng chứng thô và Giả thuyết/Kế hoạch của Leader). Chuẩn: (1) Lập giả thuyết ĐỘC LẬP từ bằng chứng thô TRƯỚC khi đọc giả thuyết Leader (chống anchoring), kiểm chứng bằng file:line, git log/blame/diff, DB state, runtime logs; (2) Chỉ ra giả định sai, điểm mù/blast radius, quy kết nhầm role (App vs Infra/DB) và phương án đối trọng. CẤM VƯỢT RÀO: Read-Only 100% với code app & infra; CẤM hùa theo Leader khi chưa tự kiểm chứng; CẤM phản biện không kèm bằng chứng file:line/log. GIAO THỨC TRANH BIỆN (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id từ Preamble): (a) Bác bỏ ➔ orca orchestration ask --from <worker_handle> --question 'CRITIC_CHALLENGE vòng <n>/3: <bằng chứng file:line/log> | Đề xuất: <phương án>' --timeout-ms 900000 --json (lệnh chặn tới khi Leader reply; timeout thì chạy lại với --resume <message_id>), kiểm chứng phản hồi của Leader rồi lặp tối đa 3 vòng; (b) Đồng thuận ➔ orca orchestration send --from <worker_handle> --type handoff --subject 'Critic Consensus' --body 'CRITIC_VERDICT: CONSENSUS_REACHED | <root-cause/spec đã thống nhất + file:line>' --task-id <task_id> --dispatch-id <dispatch_id> --json; (c) Hết 3 vòng vẫn bất đồng ➔ cùng lệnh send với --subject 'Critic Deadlock' --body 'CRITIC_VERDICT: HYPOTHESIS_CHALLENGED | Phương án Leader vs Critic + bằng chứng mỗi bên'. CẤM gửi worker_done trước khi đã gửi (b) hoặc (c)."
       ;;
+    pr|prreviewer|reviewer)
+      SPEC="[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: ${SPEC}. Chuẩn: Đồng bộ commit mới nhất của PR, đọc từng dòng diff (git diff), kiểm tra kiến trúc, OWASP Top 10, Race Conditions, Memory Leaks và BẮT BUỘC chạy test suite + linter thực tế (CẤM duyệt suông bằng mắt). CẤM VƯỢT RÀO: Read-Only (không tự sửa code PR khi chưa được yêu cầu). BẰNG CHỨNG BẮT BUỘC: Báo cáo file:line, EXIT_CODE test và chốt PR_VERDICT: APPROVE hoặc REQUEST_CHANGES."
+      ;;
+    issue|issueresolver|hotfix)
+      SPEC="[ROLE: PRINCIPAL ISSUE RESOLVER] Nhiệm vụ: ${SPEC}. Chuẩn: (1) Tìm Root Cause, (2) Viết Reproduction Test xác nhận FAIL trước khi sửa, (3) Sửa code tối thiểu tới khi Reproduction Test PASS, (4) Chạy regression test đạt EXIT_CODE=0. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ. BẰNG CHỨNG BẮT BUỘC: Commit sạch kèm Commit Hash + log chạy test."
+      ;;
     *)
       SPEC="[ROLE: PRINCIPAL FULL-STACK DEV] Nhiệm vụ: ${SPEC}. Chuẩn mực: Clean Architecture, type-safe 100%, xử lý triệt để edge cases (null, timeout, thread-safety/concurrency, backward-compat), không để TODO/mock giả/hardcode secret. CẤM VƯỢT RÀO: Chỉ sửa code ứng dụng & unit test của mình; CẤM sửa K8s/Docker/CI của DevOps; CẤM xóa/skip/comment-out (@Ignore, .skip) test cũ đang fail để lách lỗi. GIAO TIẾP & THẨM QUYỀN QUYẾT ĐỊNH (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble trước khi gửi worker_done): (1) Đồng bộ nhánh mới nhất (git merge --no-edit main) và kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) để nhận chỉ đạo/spec từ Coordinator; nếu cần quyết định kiến trúc/cấu hình, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json (worker KHÔNG tự ý đổi thiết kế liên role), (2) Chạy compile/build & unit test thực tế đạt EXIT_CODE=0 và git commit sạch sẽ vào nhánh dev-worker, (3) Trước khi gửi worker_done, BẮT BUỘC gửi bản tin bàn giao về cho Coordinator duyệt và điều phối: orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: dev-worker (<commit_hash>)' --body 'Tóm tắt file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench' --task-id <task_id> --dispatch-id <dispatch_id> --json."
       ;;
@@ -168,7 +174,7 @@ fi
 
 if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
   WORKTREE_NAME="$ROLE_WORKTREE"
-  EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\).*\[$ROLE_WORKTREE\].*/\1/p" | head -n 1)
+  EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\/${ROLE_WORKTREE}\) .*/\1/p; s/^\([^ ]*\).*\[${ROLE_WORKTREE}\].*/\1/p" | head -n 1)
   if [[ -n "$EXISTING_WT_PATH" ]]; then
     echo "🚀 Tái sử dụng worktree định danh '$ROLE_WORKTREE' ($EXISTING_WT_PATH) — Mở & gom nhóm Terminal Tab mới..."
     START_RECEIPT=$($ORCA_BIN orchestration worker-start \
@@ -179,6 +185,9 @@ if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
       --timeout-ms "$TIMEOUT_MS" \
       --json 2>&1) || true
   else
+    REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    SETUP_POLICY="skip"
+    [[ -f "$REPO_ROOT/package.json" ]] && SETUP_POLICY="run"
     echo "🚀 Khởi tạo worktree định danh lần đầu cho role: '$ROLE_WORKTREE'..."
     START_RECEIPT=$($ORCA_BIN orchestration worker-start \
       --task "$TASK_ID" \
@@ -186,7 +195,7 @@ if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
       --name "$ROLE_WORKTREE" \
       --agent "$AGENT" \
       "${MODEL_ARGS[@]}" \
-      --setup run \
+      --setup "$SETUP_POLICY" \
       --timeout-ms "$TIMEOUT_MS" \
       --json 2>&1) || true
   fi

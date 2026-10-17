@@ -43,8 +43,8 @@ PR_PROMPT="[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: Thẩm định toàn di�
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
-# Kiểm tra xem worktree định danh review-pr-<PR_NUM> đã tồn tại trong repo chưa (tránh đẻ worktree trùng lặp -2, -3)
-EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\).*\[${WORKTREE_NAME}\].*/\1/p" | head -n 1)
+# Kiểm tra xem worktree định danh review-pr-<PR_NUM> đã tồn tại trong repo chưa (tránh đẻ worktree trùng lặp -2, -3 kể cả khi đang ở detached HEAD hoặc nhánh PR)
+EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\/${WORKTREE_NAME}\) .*/\1/p; s/^\([^ ]*\).*\[${WORKTREE_NAME}\].*/\1/p" | head -n 1)
 
 if [[ -n "$EXISTING_WT_PATH" ]]; then
   echo "♻️  [Orca PR Review] Tái sử dụng worktree định danh hiện có: $WORKTREE_NAME ($EXISTING_WT_PATH)..."
@@ -56,6 +56,9 @@ fi
 
 echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_NUM bằng agent: $AGENT..."
 
+SETUP_POLICY="skip"
+[[ -f "$REPO_ROOT/package.json" ]] && SETUP_POLICY="run"
+
 RECEIPT=$($ORCA_BIN worktree create \
   --repo "path:$REPO_ROOT" \
   --name "$WORKTREE_NAME" \
@@ -63,7 +66,7 @@ RECEIPT=$($ORCA_BIN worktree create \
   --no-parent \
   --agent "$AGENT" \
   --prompt "$PR_PROMPT" \
-  --setup run \
+  --setup "$SETUP_POLICY" \
   --json 2>&1) || true
 
 WT_NAME=$(python3 -c "

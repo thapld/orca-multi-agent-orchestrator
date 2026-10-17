@@ -114,17 +114,37 @@ def _load_agent_pids(tasks_dir: Path) -> set[int]:
 
 
 def _looks_like_agent(args_str: str) -> bool:
-    """Match agent markers on the executable name (or the script name for node/python), NOT anywhere in argv.
-    Trước đây 'bash -c ... orca-build' hay script nằm trong ~/.gemini/antigravity/... bị coi là Agent và không bị kill."""
+    """Match agent markers on the executable name (or installed agent CLI paths for node/python),
+    never on arbitrary user script basenames like `python3 orca_test.py` or `node claude_test.js`."""
     toks = args_str.split()
     if not toks:
         return False
-    names = [os.path.basename(toks[0]).lower()]
-    if names[0] in INTERPRETERS and len(toks) > 1:
-        names.append(os.path.basename(toks[1]).lower())
-    if ".app/contents/" in args_str.lower():
-        names.append(args_str.lower().split(".app/contents/", 1)[0].rsplit("/", 1)[-1])
-    return any(m.strip("/") in n for n in names for m in PROTECTED_AGENT_MARKERS)
+    exe = os.path.basename(toks[0]).lower()
+    low_all = args_str.lower()
+    if ".app/contents/macos/" in low_all:
+        app_name = low_all.split(".app/contents/macos/", 1)[0].rsplit("/", 1)[-1]
+        if any(m in app_name for m in ("orca", "antigravity", "electron", "claude", "cursor")):
+            return True
+    if exe in INTERPRETERS:
+        if len(toks) > 1:
+            script_arg = toks[1].lower().replace("\\", "/")
+            if any(
+                pkg in script_arg
+                for pkg in (
+                    "@anthropic-ai/claude-code",
+                    "/claude-code/",
+                    "/antigravity/",
+                    "/antigravity-cli/",
+                    "/kimi-cli/",
+                    "@openai/codex",
+                    "/orca.app/",
+                )
+            ):
+                return True
+        return False
+    if exe.startswith("language_server"):
+        return True
+    return exe in {"agy", "antigravity", "claude", "kimi", "codex", "orca", "electron"}
 
 
 _INTERP_INLINE_RE = re.compile(
@@ -134,21 +154,100 @@ _INTERP_INLINE_RE = re.compile(
 _UNQUOTED_HEREDOC_RE = re.compile(
     r"(?:^|[\s;&|(])(?:\S*/)?(?:python3?|node|ruby|perl|bash|zsh|sh)\b[^\n<]*<<-?\s*(?P<delim>[A-Za-z_][A-Za-z0-9_]*)\s*\n"
 )
+_SAFE_TEXT_PATH_RE = re.compile(
+    r"(?:/|^)(?:\.[a-zA-Z0-9_.-]+|"
+    r"(?:dockerfile|makefile|procfile|gemfile|rakefile|caddyfile|jenkinsfile|vagrantfile)|"
+    r"[^\s/\"']+\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|tsx|jsx|vue|svelte|json|jsonc|ya?ml|toml|ini|cfg|conf|env|"
+    r"txt|md|rst|sql|html?|css|scss|less|xml|svg|csv|tsv|log|lock|prisma|graphql|gql|proto|go|rs|rb|php|java|"
+    r"kt|kts|scala|c|h|cpp|hpp|cc|cs|gradle|properties|pem|crt|key|pub|cnf)(?:\.[a-zA-Z0-9_.-]+)?)\s*['\"]?\s*$",
+    re.IGNORECASE,
+)
+_PROSE_FLAG_RE = re.compile(
+    r"(?:^|\s)(?:--(?:spec|body|question|objective|task-title|display-name|comment|resolution|result|subject|message|notes|title)|-m)"
+    r"(?:\s+|=)(?:\"([^\"\\]*(?:\\.[^\"\\]*)*)\"|'([^']*)')"
+)
+
+
+def _strip_single_quotes_and_quoted_heredocs(cmd: str) -> str:
+    """Replace single-quoted string contents ('...') and quoted heredoc bodies with spaces
+    because POSIX shells never expand backticks or execute inline commands inside single quotes."""
+    # 1. Strip quoted heredoc bodies: << 'EOF' ... EOF or << "EOF" ... EOF
+    def _heredoc_repl(m: re.Match) -> str:
+        return m.group(1) + "\n" + m.group(2)
+
+    cleaned = re.sub(
+        r"(<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"][^\n]*)\n.*?\n(\s*\2\b)",
+        _heredoc_repl,
+        cmd,
+        flags=re.DOTALL,
+    )
+    # 2. Blank out single-quoted literals while respecting double quotes and backslash escapes
+    out: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(cleaned)
+    while i < n:
+        ch = cleaned[i]
+        if ch == "\\" and not in_single:
+            if i + 1 < n:
+                out.append(cleaned[i : i + 2])
+            else:
+                out.append(ch)
+            i += 2
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            out.append("'")
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            out.append('"')
+            i += 1
+            continue
+        out.append(" " if in_single else ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_non_exec_prose_flags(cmd: str) -> str:
+    """Strip non-executable prose flag values (--spec, --body, --question, -m, etc.)
+    and non-executed cat/tee quoted heredocs (`cat << 'EOF' > file`),
+    unless the double-quoted value contains an active command substitution $(...) other than orca-team spec."""
+    cleaned = re.sub(
+        r"\b(?:cat|tee)\b[^\n<]*<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"][^\n]*\n.*?\n\s*\1\b",
+        "",
+        cmd,
+        flags=re.DOTALL,
+    )
+
+    def _repl(m: re.Match) -> str:
+        dq_body = m.group(1)
+        if dq_body is not None and "$(" in dq_body:
+            # Allow $(orca-team spec ...) prose templates to be stripped, but keep active $(python3 -c ...)
+            if not re.match(r"^\s*\$\(\s*(?:\S*/)?orca-team\s+spec\b", dq_body) or dq_body.count("$(") > 1:
+                return m.group(0)
+        prefix = m.group(0).split('"', 1)[0] if dq_body is not None else m.group(0).split("'", 1)[0]
+        return prefix + '""'
+
+    return _PROSE_FLAG_RE.sub(_repl, cleaned)
 
 
 def _double_quoted_arg_has_backtick(cmd: str, start: int) -> bool:
-    """cmd[start] is the opening double quote; scan to the closing quote honoring backslash escapes."""
+    """cmd[start] is the opening double quote; scan to the matching closing quote honoring backslash escapes."""
     i = start + 1
     n = len(cmd)
+    saw_backtick = False
     while i < n:
         ch = cmd[i]
         if ch == "\\":
             i += 2
             continue
         if ch == '"':
-            return False
+            return saw_backtick
         if ch == "`":
-            return True
+            saw_backtick = True
         i += 1
     return False
 
@@ -156,17 +255,18 @@ def _double_quoted_arg_has_backtick(cmd: str, start: int) -> bool:
 def _inline_script_backtick_risk(cmd: str) -> bool:
     """True only when the inline-script argument itself (-c/-e/--eval "...") contains an unescaped backtick,
     or an UNQUOTED heredoc fed to an interpreter contains one (the shell substitutes both)."""
-    for m in _INTERP_INLINE_RE.finditer(cmd):
+    sanitized = _strip_single_quotes_and_quoted_heredocs(_strip_non_exec_prose_flags(cmd))
+    for m in _INTERP_INLINE_RE.finditer(sanitized):
         interp, flag = m.group("interp"), m.group("flag")
         if interp in ("bash", "zsh", "sh") and flag != "-c":
             continue  # -e = errexit cho shell, không phải inline script
         if interp in ("python", "python3") and flag != "-c":
             continue
-        if _double_quoted_arg_has_backtick(cmd, m.end() - 1):
+        if _double_quoted_arg_has_backtick(sanitized, m.end() - 1):
             return True
-    for m in _UNQUOTED_HEREDOC_RE.finditer(cmd):
+    for m in _UNQUOTED_HEREDOC_RE.finditer(sanitized):
         delim = m.group("delim")
-        body = cmd[m.end():]
+        body = sanitized[m.end() :]
         end = re.search(rf"^\s*{re.escape(delim)}\s*$", body, re.M)
         body = body[: end.start()] if end else body
         if re.search(r"(?<!\\)`", body):
@@ -174,38 +274,105 @@ def _inline_script_backtick_risk(cmd: str) -> bool:
     return False
 
 
-def _has_unescaped_backtick_in_double_quotes(cmd: str) -> bool:
-    in_single = False
-    in_double = False
-    i = 0
-    n = len(cmd)
-    while i < n:
-        ch = cmd[i]
-        if ch == "\\" and not in_single:
-            i += 2
-            continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif ch == "`" and in_double:
+def _is_raw_binary_cat_risk(cmd: str) -> bool:
+    """Detect unbounded `cat` of compiled container/system binaries while allowing text/script/config files."""
+    sanitized = _strip_non_exec_prose_flags(cmd)
+    for m in re.finditer(
+        r"check_output\([^)]*['\"]cat['\"]\s*,\s*['\"](/(?:app|usr|bin|sbin|opt)/[^'\"]+)['\"]",
+        sanitized,
+    ):
+        target_path = m.group(1)
+        if not _SAFE_TEXT_PATH_RE.search(target_path):
             return True
-        i += 1
+    for m in re.finditer(
+        r"docker\s+exec\s+[^\n|>;]+?\bcat\s+(/(?:app|bin|sbin|usr/bin|usr/sbin|usr/local/bin)/[^\s|>;\"']+)\s*[\"']?\s*$",
+        sanitized,
+        re.MULTILINE,
+    ):
+        target_path = m.group(1)
+        if not _SAFE_TEXT_PATH_RE.search(target_path):
+            return True
     return False
 
 
+def _is_unbounded_find_loop_risk(cmd: str) -> bool:
+    """Detect unbounded `while True:` + `.find(` loops in inline Python scripts."""
+    sanitized = _strip_non_exec_prose_flags(cmd)
+    if (
+        "while True:" not in sanitized
+        or not re.search(r"\bpython3?(?:\s+-[a-zA-Z0-9]+)*\s+-c\b", sanitized)
+        or "range(" in sanitized
+    ):
+        return False
+    after_while = sanitized.split("while True:", 1)[1]
+    if ".find(" not in after_while or "len(" in after_while:
+        return False
+    # Strip EOF-only sentinel breaks (`if idx == -1: break` or `if pos < 0: break`) which still flood millions of lines
+    after_cleaned = re.sub(
+        r"if\s+[^:\n]+?(?:==\s*-1|<\s*0|is\s+None)\s*:\s*break\b",
+        "",
+        after_while,
+    )
+    if re.search(r"\bbreak\b", after_cleaned):
+        return False
+    return True
+
+
+def _align_utf8_split(data: bytes, pos: int) -> int:
+    """Back up pos (up to 3 bytes) so we never split inside a multi-byte UTF-8 sequence."""
+    if pos <= 0 or pos >= len(data):
+        return max(0, min(pos, len(data)))
+    start = max(0, pos - 3)
+    while pos > start and (data[pos] & 0xC0) == 0x80:
+        pos -= 1
+    return pos
+
+
+def _trim_utf8_head(data: bytes) -> bytes:
+    """Skip leading orphaned UTF-8 continuation bytes at the start of a tail slice."""
+    i = 0
+    lim = min(len(data), 3)
+    while i < lim and (data[i] & 0xC0) == 0x80:
+        i += 1
+    return data[i:]
+
+
+def _trim_utf8_tail(data: bytes) -> bytes:
+    """Strip trailing incomplete multi-byte UTF-8 starter sequence at the end of a head slice."""
+    if not data:
+        return data
+    for back in range(1, min(len(data), 3) + 1):
+        b = data[-back]
+        if (b & 0x80) == 0x00:
+            return data
+        if (b & 0xC0) == 0xC0:
+            expected_len = 2 if (b & 0xE0) == 0xC0 else (3 if (b & 0xF0) == 0xE0 else 4)
+            return data[:-back] if back < expected_len else data
+    return data
+
+
 def _wrap_long_lines(data: bytes, max_line: int = 4096) -> bytes:
-    """Strip NUL sparse-hole bytes, normalize CR to LF, and guarantee no single line exceeds max_line bytes."""
+    """Strip NUL sparse-hole bytes, normalize CR to LF, and guarantee no single line exceeds max_line bytes
+    without splitting multi-byte UTF-8 sequences."""
     if b"\x00" in data:
         data = data.replace(b"\x00", b"")
     data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    out_lines = []
+    out_lines: list[bytes] = []
     for raw_line in data.split(b"\n"):
         if len(raw_line) <= max_line:
             out_lines.append(raw_line)
         else:
-            for i in range(0, len(raw_line), max_line):
-                out_lines.append(raw_line[i : i + max_line])
+            pos = 0
+            n_line = len(raw_line)
+            while pos < n_line:
+                if n_line - pos <= max_line:
+                    out_lines.append(raw_line[pos:])
+                    break
+                end_pos = _align_utf8_split(raw_line, pos + max_line)
+                if end_pos <= pos:
+                    end_pos = pos + max_line
+                out_lines.append(raw_line[pos:end_pos])
+                pos = end_pos
     return b"\n".join(out_lines)
 
 
@@ -216,41 +383,72 @@ def _run_stream_filter() -> None:
     - Buffers the latest TAIL_KEEP_BYTES (128 KB) in a fixed-size ring buffer in RAM.
     - If upstream exceeds MAX_TASK_LOG_BYTES (16 MB), closes stdin (sending SIGPIPE to stop the producer)
       and flushes the ring-buffer tail with a circuit-breaker notice.
-    - Exit code: the filter always exits 0. Use `set -o pipefail` to surface the producer's exit code;
-      note that on cutoff the producer receives SIGPIPE (status 141). Output is normalized: NUL bytes
-      are stripped, CR becomes LF and lines are wrapped at 4KB.
     """
     stdin_fd = sys.stdin.buffer
     stdout_fd = sys.stdout.buffer
     total_read = 0
+    total_wrapped = 0
+    head_emitted = 0
     head_remaining = HEAD_KEEP_BYTES
     tail_chunks: deque[bytes] = deque()
     tail_buffered = 0
     cutoff_triggered = False
+    utf8_carry = b""
 
     try:
         while True:
             chunk = stdin_fd.read(65536)
             if not chunk:
+                if utf8_carry:
+                    wrapped_tail = _wrap_long_lines(utf8_carry, 4096)
+                    utf8_carry = b""
+                    total_wrapped += len(wrapped_tail)
+                    if head_remaining > 0:
+                        emit = wrapped_tail[:head_remaining]
+                        stdout_fd.write(emit)
+                        stdout_fd.flush()
+                        head_emitted += len(emit)
+                        head_remaining -= len(emit)
+                        rest = wrapped_tail[len(emit) :]
+                        if rest:
+                            tail_chunks.append(rest)
+                            tail_buffered += len(rest)
+                    else:
+                        tail_chunks.append(wrapped_tail)
+                        tail_buffered += len(wrapped_tail)
                 break
             total_read += len(chunk)
-            wrapped = _wrap_long_lines(chunk, 4096)
+            combined = utf8_carry + chunk
+            safe_trimmed = _trim_utf8_tail(combined)
+            utf8_carry = combined[len(safe_trimmed) :]
+            wrapped = _wrap_long_lines(safe_trimmed, 4096)
+            total_wrapped += len(wrapped)
 
             if head_remaining > 0:
-                emit = wrapped[:head_remaining]
+                if len(wrapped) <= head_remaining:
+                    emit = wrapped
+                    rest = b""
+                    head_remaining -= len(emit)
+                else:
+                    split_at = _align_utf8_split(wrapped, head_remaining)
+                    if split_at <= 0:
+                        split_at = head_remaining
+                    emit = wrapped[:split_at]
+                    rest = wrapped[split_at:]
+                    head_remaining = 0
                 stdout_fd.write(emit)
                 stdout_fd.flush()
-                head_remaining -= len(emit)
-                rest = wrapped[len(emit) :]
+                head_emitted += len(emit)
                 if rest:
                     tail_chunks.append(rest)
                     tail_buffered += len(rest)
             else:
                 tail_chunks.append(wrapped)
                 tail_buffered += len(wrapped)
-                while tail_buffered > TAIL_KEEP_BYTES and len(tail_chunks) > 1:
-                    removed = tail_chunks.popleft()
-                    tail_buffered -= len(removed)
+
+            while len(tail_chunks) > 1 and (tail_buffered - len(tail_chunks[0])) >= TAIL_KEEP_BYTES:
+                removed = tail_chunks.popleft()
+                tail_buffered -= len(removed)
 
             if total_read >= MAX_TASK_LOG_BYTES:
                 cutoff_triggered = True
@@ -263,14 +461,19 @@ def _run_stream_filter() -> None:
         return
 
     if tail_buffered > 0:
-        omitted = max(0, total_read - HEAD_KEEP_BYTES - tail_buffered)
+        raw_tail = b"".join(tail_chunks)
+        if len(raw_tail) > TAIL_KEEP_BYTES:
+            tail_data = _trim_utf8_head(raw_tail[-TAIL_KEEP_BYTES:])
+        else:
+            tail_data = raw_tail
+        tail_data = _wrap_long_lines(tail_data, 4096)
+        omitted = max(0, total_wrapped - head_emitted - len(tail_data))
         if omitted > 0 or cutoff_triggered:
             notice = (
                 f"\n[ORCA STREAM GUARD: Stream output reached {total_read / (1024 * 1024):.2f} MB "
-                f"(omitted {omitted:,} bytes in middle; ring-buffer preserved last {min(tail_buffered, TAIL_KEEP_BYTES):,} bytes)]\n"
+                f"(omitted {omitted:,} bytes in middle; ring-buffer preserved last {len(tail_data):,} bytes)]\n"
             ).encode("utf-8")
             stdout_fd.write(notice)
-        tail_data = b"".join(tail_chunks)[-TAIL_KEEP_BYTES:]
         stdout_fd.write(tail_data)
         if not tail_data.endswith(b"\n"):
             stdout_fd.write(b"\n")
@@ -321,7 +524,7 @@ def _collect_descendants(root_pid: int, children_map: dict[int, list[int]]) -> l
 def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
     """
     Find the process holding `log_file` open:
-    - If held directly by a non-agent child process, kill that process.
+    - If held directly by a non-agent child process, kill that process and its process group.
     - If held by the Agent parent process (`agy` / `language_server`), locate the active tool-execution
       child shell (`ppid == agent_pid`) and terminate its process group and descendants without touching the Agent CLI.
     """
@@ -348,14 +551,19 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
         my_pid = os.getpid()
         my_pgid = os.getpgrp()
         agent_pids = _load_agent_pids(tasks_dir)
+        agent_pgids = {proc_table[p][1] for p in agent_pids if p in proc_table}
 
-        # Check if we recorded a command snippet for this task log during PreToolUse
-        cmd_hint = ""
+        # Check if we recorded command snippets for this task log during PreToolUse
+        cmd_hints: list[str] = []
         cmd_map_file = tasks_dir / ".orca-task-cmds.json"
         if cmd_map_file.exists():
             try:
                 cmap = json.loads(cmd_map_file.read_text(encoding="utf-8"))
-                cmd_hint = str(cmap.get(log_file.name) or "")[:48].strip()
+                raw_entry = cmap.get(log_file.name)
+                if isinstance(raw_entry, list):
+                    cmd_hints = [str(x)[:160].strip() for x in raw_entry if str(x).strip()]
+                elif raw_entry:
+                    cmd_hints = [str(raw_entry)[:160].strip()]
             except Exception:
                 pass
 
@@ -374,12 +582,18 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
                 if any(ex in h_args_low for ex in EXCLUDED_CHILD_MARKERS):
                     continue
                 for d_pid in _collect_descendants(h_pid, children_map):
-                    if d_pid > 1 and d_pid != my_pid:
+                    if d_pid > 1 and d_pid != my_pid and d_pid not in agent_pids:
                         try:
                             os.kill(d_pid, signal.SIGKILL)
                             killed_any = True
                         except Exception:
                             pass
+                if h_pgid > 1 and h_pgid != my_pgid and h_pgid not in agent_pgids:
+                    try:
+                        os.killpg(h_pgid, signal.SIGKILL)
+                        killed_any = True
+                    except Exception:
+                        pass
             else:
                 # `h_pid` is the Agent parent (`agy` / `language_server`) writing PTY master output to `task-*.log`.
                 # Find its active tool-execution child process (`ppid == h_pid`).
@@ -396,7 +610,7 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
                     ch_low = ch_args.lower()
                     if any(ex in ch_low for ex in EXCLUDED_CHILD_MARKERS):
                         continue
-                    if ch_pid in agent_pids or _looks_like_agent(ch_args):
+                    if ch_pid in agent_pids or (not agent_pids and _looks_like_agent(ch_args)):
                         continue
                     # Exclude MCP servers that share process group with language_server and don't run a shell command
                     if ch_pgid == h_pgid and not re.search(r"\b(?:zsh|bash|sh|python3?|node|docker)\b", ch_low):
@@ -405,27 +619,36 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
 
                 # Chỉ kill khi xác định ĐƠN NHẤT được tiến trình chạy lệnh của log này.
                 # Mơ hồ (0 hoặc >1 ứng viên) ➔ KHÔNG kill gì (chỉ cắt log) để không giết nhầm dev server / MCP server / lệnh song song.
-                if cmd_hint:
-                    hint_tokens = [t for t in re.split(r"\s+", cmd_hint) if len(t) > 2][:4]
-                    matched = [
-                        c for c in candidate_children
-                        if cmd_hint in c[2] or (hint_tokens and all(t in c[2] for t in hint_tokens))
-                    ]
-                    candidate_children = matched if len(matched) == 1 else []
+                if cmd_hints:
+                    matched: list[tuple[int, int, str]] = []
+                    for hint in reversed(cmd_hints):
+                        exact = [c for c in candidate_children if hint in c[2]]
+                        if len(exact) == 1:
+                            matched = exact
+                            break
+                        hint_tokens = [t for t in re.split(r"\s+", hint) if len(t) > 2][:8]
+                        tok_match = [
+                            c for c in candidate_children
+                            if hint in c[2] or (hint_tokens and all(t in c[2] for t in hint_tokens))
+                        ]
+                        if len(tok_match) == 1:
+                            matched = tok_match
+                            break
+                    candidate_children = matched
                 elif len(candidate_children) != 1:
                     candidate_children = []
 
                 for ch_pid, ch_pgid, _ in candidate_children:
                     # Kill all descendants bottom-up first
                     for d_pid in _collect_descendants(ch_pid, children_map):
-                        if d_pid > 1 and d_pid != my_pid and d_pid != h_pid:
+                        if d_pid > 1 and d_pid != my_pid and d_pid != h_pid and d_pid not in agent_pids:
                             try:
                                 os.kill(d_pid, signal.SIGKILL)
                                 killed_any = True
                             except Exception:
                                 pass
                     # If the child is a PTY session/process-group leader (ch_pgid != h_pgid), kill its process group
-                    if ch_pgid > 1 and ch_pgid != h_pgid and ch_pgid != my_pgid:
+                    if ch_pgid > 1 and ch_pgid != h_pgid and ch_pgid != my_pgid and ch_pgid not in agent_pgids:
                         try:
                             os.killpg(ch_pgid, signal.SIGKILL)
                             killed_any = True
@@ -454,9 +677,9 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
             tail_bytes = b""
             try:
                 with open(log_file, "rb") as f:
-                    head_bytes = f.read(HEAD_KEEP_BYTES)
+                    head_bytes = _trim_utf8_tail(f.read(HEAD_KEEP_BYTES))
                     f.seek(max(HEAD_KEEP_BYTES, sz - TAIL_KEEP_BYTES))
-                    tail_bytes = f.read(TAIL_KEEP_BYTES)
+                    tail_bytes = _trim_utf8_head(f.read(TAIL_KEEP_BYTES))
             except Exception:
                 pass
 
@@ -469,6 +692,9 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
 
             # 3. Ensure every line has newline breaks <= 4096 bytes and zero \x00 sparse holes
             try:
+                marker = b"\n\n[ORCA CIRCUIT-BREAKER:"
+                if marker in head_bytes:
+                    head_bytes = head_bytes.split(marker, 1)[0]
                 head_bytes = _wrap_long_lines(head_bytes, 4096)
                 tail_bytes = _wrap_long_lines(tail_bytes, 4096)
                 notice = (
@@ -496,18 +722,20 @@ def _run_background_watcher(tasks_dir_str: str) -> None:
         pass
 
     start_ts = time.time()
-    # Monitor every 1.5s while any command is active (up to 10 minutes max for long builds/tasks)
+    # Monitor every 1.5s while any command is active (extending window whenever lock_file is touched)
     try:
-        while time.time() - start_ts < 600:
+        while True:
             _enforce_task_log_cap(tasks_dir)
             time.sleep(1.5)
             now = time.time()
-            lock_mtime = 0.0
+            lock_mtime = start_ts
             try:
                 if lock_file.exists():
                     lock_mtime = lock_file.stat().st_mtime
             except Exception:
                 pass
+            if now - max(start_ts, lock_mtime) >= 600:
+                break
             recent_log_activity = False
             try:
                 for lf in tasks_dir.glob("task-*.log"):
@@ -563,7 +791,7 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
         step_idx = payload.get("stepIdx")
         if step_idx is not None and cmd:
             cmd_map_file = tasks_dir / ".orca-task-cmds.json"
-            cmap = {}
+            cmap: dict = {}
             if cmd_map_file.exists():
                 try:
                     cmap = json.loads(cmd_map_file.read_text(encoding="utf-8"))
@@ -571,17 +799,30 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
                     cmap = {}
             if len(cmap) > 40:
                 cmap = dict(list(cmap.items())[-20:])
-            first_line_cmd = cmd.strip().splitlines()[0][:80] if cmd.strip() else ""
-            if str(step_idx).isdigit():
-                cmap[f"task-{step_idx}.log"] = first_line_cmd
-                cmap[f"task-{int(step_idx) + 1}.log"] = first_line_cmd
+            non_comment_lines = [
+                ln.strip()
+                for ln in cmd.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")
+            ]
+            first_line_cmd = non_comment_lines[0][:160] if non_comment_lines else ""
+            if str(step_idx).isdigit() and first_line_cmd:
+                for key in (f"task-{step_idx}.log", f"task-{int(step_idx) + 1}.log"):
+                    prev = cmap.get(key)
+                    if isinstance(prev, list):
+                        if first_line_cmd not in prev:
+                            cmap[key] = (prev + [first_line_cmd])[-4:]
+                    elif isinstance(prev, str) and prev and prev != first_line_cmd:
+                        cmap[key] = [prev, first_line_cmd]
+                    else:
+                        cmap[key] = [first_line_cmd]
             cmd_map_file.write_text(json.dumps(cmap), encoding="utf-8")
 
         lock_file = tasks_dir / ".orca-watcher.pid"
         if lock_file.exists():
             try:
                 old_pid_str = lock_file.read_text(encoding="utf-8").strip()
-                if old_pid_str.isdigit():
+                lock_age = time.time() - lock_file.stat().st_mtime
+                if old_pid_str.isdigit() and lock_age < 600:
                     old_pid = int(old_pid_str)
                     os.kill(old_pid, 0)
                     # Existing watcher is alive — touch lockfile to extend its window and return
@@ -590,7 +831,7 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
             except Exception:
                 pass
 
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, __file__, "--watch-dir", str(tasks_dir)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -598,6 +839,10 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
             close_fds=True,
             start_new_session=True,
         )
+        try:
+            lock_file.write_text(str(proc.pid), encoding="utf-8")
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -681,10 +926,7 @@ def main() -> None:
             return
 
         # Guard 2: Unbounded raw binary dump into stdout or subprocess.check_output
-        if (
-            re.search(r"check_output\([^)]*['\"]cat['\"]\s*,\s*['\"]/(?:app|usr|bin|sbin|opt)/", cmd)
-            or re.search(r"docker\s+exec\s+[^\n|>;]+?\bcat\s+/(?:app|bin|sbin|usr/bin|usr/sbin|usr/local/bin)/[^\s|>;]+\s*$", cmd)
-        ):
+        if _is_raw_binary_cat_risk(cmd[:200000]):
             reason = (
                 "[ORCA COMMAND GUARD] Blocked unbounded raw binary dump (`cat` on compiled container binary into stdout/memory). "
                 "Dumping multi-megabyte compiled binaries into stdout or check_output() hangs the Worker CLI. "
@@ -695,14 +937,7 @@ def main() -> None:
             return
 
         # Guard 3: Unbounded `while True:` + `.find(` binary search loops in inline Python scripts
-        if (
-            "while True:" in cmd
-            and ".find(" in cmd
-            and re.search(r"\bpython3?(?:\s+-[a-zA-Z0-9]+)*\s+-c\b", cmd)
-            and "range(" not in cmd
-            and "len(" not in cmd.split("while True:", 1)[1]
-            and not re.search(r"\bbreak\b", cmd.split("while True:", 1)[1])
-        ):
+        if _is_unbounded_find_loop_risk(cmd[:200000]):
             reason = (
                 "[ORCA COMMAND GUARD] Blocked unbounded 'while True:' loop with '.find()' in inline Python script. "
                 "If the target pattern is short or empty, 'while True: ... data.find()' loops millions of times and floods stdout. "
@@ -721,3 +956,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
