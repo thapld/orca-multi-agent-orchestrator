@@ -7,7 +7,7 @@ mkdir -p "$INSTALL_DIR"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ "$1" == "--uninstall" || "$1" == "uninstall" || "$1" == "-u" ]]; then
+if [[ "${1:-}" == "--uninstall" || "${1:-}" == "uninstall" || "${1:-}" == "-u" ]]; then
   exec "$SCRIPT_DIR/uninstall.sh"
 fi
 
@@ -35,7 +35,7 @@ link_or_copy "$SCRIPT_DIR/scripts/orca-command-guard.py" "$INSTALL_DIR/orca-comm
 if [[ -x "/Applications/Orca.app/Contents/MacOS/Orca" && -f "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/main/agent-hooks/managed-agent-hook-controls.js" ]]; then
   ELECTRON_RUN_AS_NODE=1 /Applications/Orca.app/Contents/MacOS/Orca -e '
     const m = require("/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/main/agent-hooks/managed-agent-hook-controls.js");
-    m.installManagedAgentHooks(null, {shouldHydrateShellPath: true}).catch(() => {});
+    m.installManagedAgentHooks(null, {shouldHydrateShellPath: true}).then(() => process.exit(0)).catch(() => process.exit(1));
   ' >/dev/null 2>&1 || true
   echo "  🔔 Đã kích hoạt Orca Agent Status Hooks (hiển thị vòng xoay loading, chấm xanh & chuông thông báo)."
 elif command -v orca >/dev/null 2>&1; then

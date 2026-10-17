@@ -276,10 +276,12 @@ def _ensure_critic_defaults(config: dict) -> dict:
     """Bổ sung criticSpecialist (trong bộ nhớ) cho config cũ — dùng chung cho status/get/sync."""
     if not isinstance(config, dict):
         return config
-    roles = config.setdefault("roles", {})
+    if not isinstance(config.get("roles"), dict):
+        config["roles"] = {}
+    roles = config["roles"]
     if "criticSpecialist" not in roles:
-        coord = config.get("coordinator") or {}
-        sec_cfg = roles.get("security") or {}
+        coord = config.get("coordinator") if isinstance(config.get("coordinator"), dict) else {}
+        sec_cfg = roles.get("security") if isinstance(roles.get("security"), dict) else {}
         roles["criticSpecialist"] = {
             "enabled": True,
             "agent": sec_cfg.get("agent") or coord.get("agent") or "antigravity",
@@ -560,15 +562,6 @@ def sync_gemini_directive(root: Path, config: dict):
         do_display = f"`{do_agent}`" + (f" ({do_model})" if do_model else "")
         rows.append(f"| **DevOps Specialist** | {do_display} | On-demand | Docker/K8s rollout, DB migrations, SSH worktrees |")
 
-    # UI Specialist
-    ui = roles.get("uiSpecialist", {})
-    ui_enabled = _is_role_enabled(ui, is_optional=True)
-    if ui_enabled:
-        u_agent = ui.get("agent", "claude")
-        u_model = ui.get("model")
-        u_display = f"`{u_agent}`" + (f" ({u_model})" if u_model else "")
-        rows.append(f"| **UI/UX Specialist** | {u_display} | On-demand | Design Mode (Click-to-code), responsive & a11y |")
-
     # Bench & Perf Specialist
     bench = roles.get("benchSpecialist", {})
     bench_enabled = _is_role_enabled(bench, is_optional=True)
@@ -586,6 +579,15 @@ def sync_gemini_directive(root: Path, config: dict):
         r_model = re_spec.get("model")
         r_display = f"`{r_agent}`" + (f" ({r_model})" if r_model else "")
         rows.append(f"| **Reverse Eng (REA)** | {r_display} | On-demand | Binary/Package/ASAR/Protocol decompile (`rea` skill) |")
+
+    # UI Specialist
+    ui = roles.get("uiSpecialist", {})
+    ui_enabled = _is_role_enabled(ui, is_optional=True)
+    if ui_enabled:
+        u_agent = ui.get("agent", "claude")
+        u_model = ui.get("model")
+        u_display = f"`{u_agent}`" + (f" ({u_model})" if u_model else "")
+        rows.append(f"| **UI/UX Specialist** | {u_display} | On-demand | Design Mode (Click-to-code), responsive & a11y |")
 
     # Research & Adversarial Critic Specialist (Auto-seed from security/coordinator if missing in legacy config)
     if "criticSpecialist" not in roles:
@@ -658,7 +660,7 @@ def sync_gemini_directive(root: Path, config: dict):
     # giải phóng ~2,500 tokens/turn khỏi bộ nhớ tĩnh của Leader!
     step1_lines = [
         "### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ (CẤM GỘP VIỆC — TỰ ĐỘNG TIÊM SỔ TAY WORKER)",
-        "- Tạo Run mới và **tách Task riêng cho từng vai trò**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế, không tự gõ lại hiến pháp nội bộ của Worker):",
+        "- Tạo Run mới và **tách Task riêng cho từng vai trò**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **KHÔNG** thêm `--json` vào `task-create` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng `orca orchestration task-list --brief`):",
         "  ```bash",
         '  orca orchestration run-create --objective "[Mô tả tổng thể]"',
         "",
@@ -865,7 +867,7 @@ def sync_gemini_directive(root: Path, config: dict):
         )
         content = old_wt_pat.sub(lambda m, wn=w_name: m.group(1) + _wt_expr(wn), content)
         w_pat = re.compile(
-            rf"(--name\s+{re.escape(w_name)}\"?\)?\s+)--agent\s+\S+(?:\s+--model\s+\"[^\"]*\")?(?:\s+--effort\s+\S+)?",
+            rf"(--name\s+{re.escape(w_name)}\"?\)?\s+)--agent\s+\S+(?:\s+--model\s+(?:\"[^\"]*\"|\S+))?(?:\s+--effort\s+\S+)?",
             re.MULTILINE
         )
         formatted_args = _fmt_worker_args_py(w_ag, w_mod, w_eff)
@@ -1309,11 +1311,19 @@ def cmd_models(args: list):
     refresh = False
     role_tier = "tier2"
     target_effort = "high"
+    explicit_tier = False
+    explicit_effort = False
 
     idx = 0
     while idx < len(args):
         a = args[idx]
-        if a == "--json":
+        if a in ("-h", "--help"):
+            print("Usage: orca-team models [agent] [--agent <agent>] [--json|--tsv] [--refresh] [--role <role>] [--tier <tier1|tier2|tier3>] [--effort <low|medium|high>]")
+            return
+        elif a in ("--agent", "-a") and idx + 1 < len(args):
+            agent = args[idx + 1].lower()
+            idx += 2
+        elif a == "--json":
             as_json = True
             idx += 1
         elif a == "--tsv":
@@ -1324,13 +1334,19 @@ def cmd_models(args: list):
             idx += 1
         elif a == "--tier" and idx + 1 < len(args):
             role_tier = args[idx + 1]
+            explicit_tier = True
             idx += 2
         elif a == "--effort" and idx + 1 < len(args):
             target_effort = args[idx + 1]
+            explicit_effort = True
             idx += 2
         elif a == "--role" and idx + 1 < len(args):
             r_key = ROLE_ALIASES.get(args[idx + 1].lower(), args[idx + 1])
-            role_tier, target_effort = ROLE_TIER_MAP.get(r_key, ("tier2", "high"))
+            def_t, def_e = ROLE_TIER_MAP.get(r_key, ("tier2", "high"))
+            if not explicit_tier:
+                role_tier = def_t
+            if not explicit_effort:
+                target_effort = def_e
             idx += 2
         elif not a.startswith("-"):
             agent = a.lower()
@@ -1356,8 +1372,9 @@ def cmd_models(args: list):
         # Các dòng sau: MODEL\t<id>\t<label>\t<bakedEffort>\t<efforts_csv>
         print(f"META\t{source_label}\t{rec_idx if models else 0}")
         for m in models:
-            eff_csv = ",".join(m.get("efforts") or [])
-            print(f"MODEL\t{m['id']}\t{m['label']}\t{m.get('bakedEffort', '')}\t{eff_csv}")
+            baked_val = m.get("bakedEffort") or "-"
+            eff_csv = ",".join(m.get("efforts") or []) or "-"
+            print(f"MODEL\t{m['id']}\t{m['label']}\t{baked_val}\t{eff_csv}")
         return
 
     print(f"\n🔍 Danh sách Model truy vấn động cho agent '{agent}' (Nguồn: {source_label}):")
@@ -1424,6 +1441,7 @@ def interactive_select(
     if not (sys.stdin.isatty() and sys.stderr.isatty()):
         return current_idx, items[current_idx]
 
+    import signal
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
 
@@ -1453,19 +1471,27 @@ def interactive_select(
         sys.stderr.flush()
         return lines_count
 
-    # Ẩn con trỏ terminal trong lúc tương tác
-    sys.stderr.write("\033[?25l")
-    sys.stderr.write(f"\r\n\033[1m{title}\033[0m\r\n")
-    sys.stderr.write(f"\033[90m({hint})\033[0m\r\n")
-    sys.stderr.flush()
-
     start_idx = 0
     if current_idx >= eff_max:
         start_idx = current_idx - eff_max + 1
 
-    last_rendered_lines = render_menu(start_idx, current_idx)
+    last_rendered_lines = 0
+    prev_sigterm = None
+    prev_sighup = None
+
+    def _sig_restore(signum, frame):
+        raise KeyboardInterrupt
 
     try:
+        prev_sigterm = signal.signal(signal.SIGTERM, _sig_restore)
+        prev_sighup = signal.signal(signal.SIGHUP, _sig_restore)
+        # Ẩn con trỏ terminal trong lúc tương tác
+        sys.stderr.write("\033[?25l")
+        sys.stderr.write(f"\r\n\033[1m{title}\033[0m\r\n")
+        sys.stderr.write(f"\033[90m({hint})\033[0m\r\n")
+        sys.stderr.flush()
+        last_rendered_lines = render_menu(start_idx, current_idx)
+
         tty.setraw(fd)
         while True:
             k = read_terminal_key(fd)
@@ -1483,11 +1509,9 @@ def interactive_select(
                 current_idx = min(len(items) - 1, current_idx + eff_max)
             elif k in ('\r', '\n', ' '):  # Enter hoặc Space để xác nhận
                 break
-            elif k == '\x03':  # Ctrl+C
+            elif k in ('\x03', 'q', 'Q', '\x1b'):  # Ctrl+C / Esc / q -> Hủy thao tác
                 raise KeyboardInterrupt
-            elif k in ('q', 'Q', '\x1b'):  # Esc / q
-                break
-            elif k.isdigit() and 1 <= int(k) <= len(items):  # Phím tắt số nhanh
+            elif k.isascii() and k.isdigit() and 1 <= int(k) <= len(items):  # Phím tắt số nhanh
                 current_idx = int(k) - 1
                 break
 
@@ -1503,8 +1527,19 @@ def interactive_select(
 
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        if prev_sigterm is not None:
+            try:
+                signal.signal(signal.SIGTERM, prev_sigterm)
+            except Exception:
+                pass
+        if prev_sighup is not None:
+            try:
+                signal.signal(signal.SIGHUP, prev_sighup)
+            except Exception:
+                pass
         # Xóa khối menu vừa hiển thị để giữ màn hình gọn đẹp
-        sys.stderr.write(f"\033[{last_rendered_lines}A\033[0J")
+        if last_rendered_lines > 0:
+            sys.stderr.write(f"\033[{last_rendered_lines}A\033[0J")
         # Hiện lại con trỏ terminal
         sys.stderr.write("\033[?25h")
         sys.stderr.flush()
@@ -1542,7 +1577,9 @@ def cmd_select(args: list):
             idx += 1
         elif a == "--options-json" and idx + 1 < len(args):
             try:
-                items = json.loads(args[idx + 1])
+                parsed = json.loads(args[idx + 1])
+                if isinstance(parsed, list):
+                    items = [str(x) for x in parsed]
             except Exception:
                 pass
             idx += 2
@@ -1660,13 +1697,15 @@ def cmd_set(root: Path, config: dict, args: list):
     while idx < len(args):
         opt = args[idx]
         if opt == "--agent" and idx + 1 < len(args):
-            new_agent = args[idx + 1]
+            new_agent = args[idx + 1].strip().lower()
             idx += 2
         elif opt == "--model" and idx + 1 < len(args):
-            new_model = args[idx + 1]
+            m_val = args[idx + 1].strip()
+            new_model = "" if m_val.lower() in ("none", "null", "default", "(default)", "-") else m_val
             idx += 2
         elif opt == "--effort" and idx + 1 < len(args):
-            new_effort = args[idx + 1]
+            e_val = args[idx + 1].strip().lower()
+            new_effort = "" if e_val in ("none", "null", "off", "-") else e_val
             idx += 2
         elif opt == "--concurrency" and idx + 1 < len(args):
             try:
@@ -2130,13 +2169,20 @@ def cmd_get(root: Path, config: dict, args: list):
         f_idx = args.index("--field")
         if f_idx + 1 < len(args):
             field = args[f_idx + 1]
+    elif len(args) >= 2 and not args[1].startswith("-"):
+        field = args[1]
 
+    is_opt = role_key in ("uiSpecialist", "devopsSpecialist", "benchSpecialist", "reSpecialist", "criticSpecialist")
     if field == "json":
         print(json.dumps(target))
-    elif field == "agent" and target.get("enabled") is False:
+    elif field == "agent" and not _is_role_enabled(target, is_optional=is_opt):
         print("none")
+    elif field == "enabled":
+        print("true" if _is_role_enabled(target, is_optional=is_opt) else "false")
     else:
         val = target.get(field)
+        if val is None and field == "concurrency" and role_key == "coordinator":
+            val = 1
         if val is None:
             sys.exit(1)
         print(json.dumps(val, ensure_ascii=False) if isinstance(val, (list, dict)) else val)
@@ -2195,10 +2241,32 @@ def _watchdog_prompt_is_safe(screen_text: str) -> tuple:
 def cmd_watchdog(root: Path, args: list = None):
     import subprocess
     args = args or []
+    for a in args:
+        if not a.startswith("-") and Path(a).expanduser().is_dir():
+            root = Path(a).expanduser().resolve()
+            break
     auto_unblock = any(a in args for a in ["--unblock", "--fix"])
     scan_all = any(a in args for a in ["--all", "-a"])
     proj_slug = root.name.lower() if root else ""
     root_str = str(root).lower() if root else ""
+
+    def _extract_wt_id_low(w_item: dict) -> str:
+        if not isinstance(w_item, dict):
+            return ""
+        return str(
+            (w_item.get("resource") or {}).get("worktreeId")
+            or ((w_item.get("projection") or {}).get("resource") or {}).get("worktreeId")
+            or w_item.get("worktreeId")
+            or ""
+        ).lower()
+
+    def _matches_proj(wt_id_low: str) -> bool:
+        if not wt_id_low:
+            return False
+        return (
+            (bool(root_str) and root_str in wt_id_low)
+            or (bool(proj_slug) and (f"/{proj_slug}/" in wt_id_low or wt_id_low.endswith(f"/{proj_slug}")))
+        )
 
     print(f"\n🩺 [ORCA AGENT WATCHDOG] Đang quét trạng thái worker ({'toàn hệ thống' if scan_all else root.name})...")
     if auto_unblock:
@@ -2227,11 +2295,7 @@ def cmd_watchdog(root: Path, args: list = None):
                     w_obj = w_data.get("result", w_data) if isinstance(w_data, dict) else {}
                     run_workers = w_obj.get("workers", []) if isinstance(w_obj, dict) else []
                     if not scan_all and proj_slug and run_workers:
-                        wt_match = any(
-                            proj_slug in str(w_item.get("worktreeId") or "").lower()
-                            or root_str in str(w_item.get("worktreeId") or "").lower()
-                            for w_item in run_workers
-                        )
+                        wt_match = any(_matches_proj(_extract_wt_id_low(w_item)) for w_item in run_workers)
                         if not wt_match:
                             continue
                     for w_item in run_workers:
@@ -2256,8 +2320,8 @@ def cmd_watchdog(root: Path, args: list = None):
             raw_workers = res_obj.get("workers", []) if isinstance(res_obj, dict) else (data if isinstance(data, list) else [])
             for w_item in raw_workers:
                 if not scan_all and proj_slug:
-                    wt_id_low = str(w_item.get("worktreeId") or "").lower()
-                    if wt_id_low and proj_slug not in wt_id_low and root_str not in wt_id_low:
+                    wt_id_low = _extract_wt_id_low(w_item)
+                    if wt_id_low and not _matches_proj(wt_id_low):
                         continue
                 workers.append(w_item)
 
@@ -2333,17 +2397,31 @@ def cmd_watchdog(root: Path, args: list = None):
                 or cli_index["by_term"].get(term)
             )
             t_metrics = _analyze_antigravity_transcript(tf_match, scope_id=d_id) if tf_match else {}
-            if t_metrics and t_metrics.get("bloated_logs") and auto_unblock:
-                tasks_dir = tf_match.parent.parent / "tasks"
-                guard_bin = os.path.expanduser("~/.local/bin/orca-command-guard")
-                if os.path.exists(guard_bin):
+            if t_metrics and t_metrics.get("bloated_logs"):
+                if auto_unblock:
+                    tasks_dir = tf_match.parent.parent / "tasks"
+                    guard_bin = os.path.expanduser("~/.local/bin/orca-command-guard")
                     try:
-                        from importlib.machinery import SourceFileLoader
-                        guard_mod = SourceFileLoader("orca_guard", guard_bin).load_module()
-                        guard_mod._enforce_task_log_cap(tasks_dir)
-                        note = "🛡️ ĐÃ NGẮT LỆNH XẢ LOG >16MB & CẮT GỌN FILE LOG"
+                        if os.path.exists(guard_bin):
+                            from importlib.machinery import SourceFileLoader
+                            guard_mod = SourceFileLoader("orca_guard", guard_bin).load_module()
+                            guard_mod._enforce_task_log_cap(tasks_dir)
+                        else:
+                            for bl_path, bl_sz in t_metrics["bloated_logs"]:
+                                bl_p = Path(bl_path)
+                                with open(bl_p, "rb") as bf:
+                                    head_b = bf.read(256 * 1024)
+                                    bf.seek(max(0, bl_sz - 128 * 1024))
+                                    tail_b = bf.read()
+                                bl_p.write_bytes(head_b + f"\n[... ORCA-WATCHDOG: đã lược bỏ {bl_sz - len(head_b) - len(tail_b):,} bytes giữa log ...]\n".encode() + tail_b)
+                        bl_msg = "🛡️ ĐÃ NGẮT LỆNH XẢ LOG >16MB & CẮT GỌN FILE LOG"
+                        note = f"{note} | {bl_msg}" if note else bl_msg
                     except Exception:
                         pass
+                else:
+                    bl_msg = "⚠️ LOG PHÌNH TO >10MB (chạy --unblock để cắt gọn)"
+                    note = f"{note} | {bl_msg}" if note else bl_msg
+                    hung_count += 1
 
             if not note:
                 idle_s = t_metrics.get("idle_since_last_secs", 0.0) if t_metrics else 0.0
@@ -2420,9 +2498,9 @@ def _fmt_tok(n: int) -> str:
 def _command_from_tool_call(tc: dict) -> str:
     if not isinstance(tc, dict):
         return ""
-    if str(tc.get("name") or "") != "run_command":
+    if str(tc.get("name") or "") not in ("run_command", "Bash", "bash"):
         return ""
-    args = tc.get("arguments") or tc.get("args") or {}
+    args = tc.get("arguments") or tc.get("args") or tc.get("input") or {}
     if isinstance(args, str):
         try:
             args = json.loads(args)
@@ -2431,6 +2509,181 @@ def _command_from_tool_call(tc: dict) -> str:
     if isinstance(args, dict):
         return str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
     return ""
+
+
+def _load_normalized_transcript_steps(tf_path: Path) -> list:
+    """Load and normalize steps from either Antigravity (`transcript.jsonl`) or Claude Code (`~/.claude/projects/*/*.jsonl`)."""
+    if not tf_path or not tf_path.exists():
+        return []
+    is_claude = ".claude/projects" in str(tf_path) or tf_path.name not in ("transcript.jsonl", "transcript_full.jsonl")
+    if not is_claude:
+        full_tf = tf_path.parent / "transcript_full.jsonl"
+        read_tf = full_tf if full_tf.exists() else tf_path
+        try:
+            raw_lines = read_tf.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            return []
+        all_steps = []
+        for ln in raw_lines:
+            if not ln.strip():
+                continue
+            try:
+                obj = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                all_steps.append(obj)
+        return all_steps
+
+    # Claude Code JSONL format (`type: "user" | "assistant"`, streaming blocks sharing `message.id`)
+    try:
+        with open(tf_path, "r", encoding="utf-8", errors="ignore") as f:
+            raw_objs = []
+            for ln in f:
+                if '"type":"user"' not in ln and '"type":"assistant"' not in ln and '"type": "user"' not in ln and '"type": "assistant"' not in ln:
+                    continue
+                try:
+                    obj = json.loads(ln)
+                    if isinstance(obj, dict) and obj.get("type") in ("user", "assistant"):
+                        raw_objs.append(obj)
+                except Exception:
+                    continue
+    except Exception:
+        return []
+
+    steps = []
+    last_ts = ""
+    i = 0
+    n = len(raw_objs)
+    while i < n:
+        obj = raw_objs[i]
+        t = obj.get("type")
+        ts = str(obj.get("timestamp") or "")
+        if t == "user":
+            msg = obj.get("message") or {}
+            cnt = msg.get("content")
+            if isinstance(cnt, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in cnt):
+                for b in cnt:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        rc = b.get("content")
+                        rc_str = (
+                            "\n".join(str(x.get("text") or x) if isinstance(x, dict) else str(x) for x in rc)
+                            if isinstance(rc, list)
+                            else str(rc or "")
+                        )
+                        steps.append({
+                            "type": "GENERIC",
+                            "created_at": last_ts or ts or "",
+                            "status": "ERROR" if b.get("is_error") else "DONE",
+                            "content": f"Completed At: {ts}\n{rc_str}" if ts else rc_str,
+                        })
+            else:
+                u_str = (
+                    cnt
+                    if isinstance(cnt, str)
+                    else ("\n".join(str(x.get("text") or "") for x in cnt if isinstance(x, dict)) if isinstance(cnt, list) else "")
+                )
+                if u_str and not u_str.lstrip().startswith(("<local-command-", "<command-name>", "<task-notification>")):
+                    steps.append({"type": "USER_INPUT", "created_at": ts or last_ts or "", "content": u_str})
+            if ts:
+                last_ts = ts
+            i += 1
+        elif t == "assistant":
+            msg = obj.get("message") or {}
+            mid = msg.get("id")
+            usage = msg.get("usage") or {}
+            it = int(usage.get("input_tokens") or 0) + int(usage.get("cache_creation_input_tokens") or 0)
+            ct = int(usage.get("cache_read_input_tokens") or 0)
+            ot = int(usage.get("output_tokens") or 0)
+            tcs = []
+            pending_generics = []
+            t_start = last_ts or ts or ""
+            t_end = ts or last_ts or ""
+            j = i
+            while j < n:
+                oj = raw_objs[j]
+                tj = oj.get("type")
+                tsj = str(oj.get("timestamp") or "")
+                if tj == "assistant":
+                    mj = oj.get("message") or {}
+                    if mid and mj.get("id") == mid:
+                        uj = mj.get("usage") or {}
+                        if uj:
+                            it = max(it, int(uj.get("input_tokens") or 0) + int(uj.get("cache_creation_input_tokens") or 0))
+                            ct = max(ct, int(uj.get("cache_read_input_tokens") or 0))
+                            ot = max(ot, int(uj.get("output_tokens") or 0))
+                        if tsj:
+                            t_end = tsj
+                        for b in (mj.get("content") or []):
+                            if isinstance(b, dict) and b.get("type") == "tool_use":
+                                b_name = str(b.get("name") or "")
+                                b_inp = b.get("input") or {}
+                                tcs.append({
+                                    "name": b_name,
+                                    "args": b_inp if isinstance(b_inp, dict) else {},
+                                })
+                        j += 1
+                        continue
+                    elif not mid and j == i:
+                        for b in (mj.get("content") or []):
+                            if isinstance(b, dict) and b.get("type") == "tool_use":
+                                b_name = str(b.get("name") or "")
+                                b_inp = b.get("input") or {}
+                                tcs.append({
+                                    "name": b_name,
+                                    "args": b_inp if isinstance(b_inp, dict) else {},
+                                })
+                        j += 1
+                        break
+                    else:
+                        break
+                elif tj == "user":
+                    mj = oj.get("message") or {}
+                    cj = mj.get("content")
+                    has_more_same_mid = False
+                    if mid and isinstance(cj, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in cj):
+                        for k_look in range(j + 1, min(n, j + 8)):
+                            if raw_objs[k_look].get("type") == "assistant" and (raw_objs[k_look].get("message") or {}).get("id") == mid:
+                                has_more_same_mid = True
+                                break
+                    if has_more_same_mid:
+                        for b in cj:
+                            if isinstance(b, dict) and b.get("type") == "tool_result":
+                                rc = b.get("content")
+                                rc_str = (
+                                    "\n".join(str(x.get("text") or x) if isinstance(x, dict) else str(x) for x in rc)
+                                    if isinstance(rc, list)
+                                    else str(rc or "")
+                                )
+                                pending_generics.append({
+                                    "type": "GENERIC",
+                                    "created_at": t_end,
+                                    "status": "ERROR" if b.get("is_error") else "DONE",
+                                    "content": f"Completed At: {tsj}\n{rc_str}" if tsj else rc_str,
+                                })
+                        j += 1
+                        continue
+                    break
+                else:
+                    j += 1
+            if it > 0 or ct > 0 or ot > 0 or tcs:
+                steps.append({
+                    "type": "PLANNER_RESPONSE",
+                    "created_at": t_start,
+                    "input_tokens": it,
+                    "cache_read_tokens": ct,
+                    "output_tokens": ot,
+                    "tool_calls": tcs,
+                })
+                for pg in pending_generics:
+                    pg["created_at"] = t_end
+                    steps.append(pg)
+            if t_end:
+                last_ts = t_end
+            i = j
+        else:
+            i += 1
+    return steps
 
 
 def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) -> list:
@@ -2445,88 +2698,161 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
                 if s.get("type") == "USER_INPUT":
                     c = str(s.get("content") or "")
                     if "You are a dispatched worker" in c or "--dispatch-id" in c or "ctx_" in c:
-                        cids = re.findall(r"--dispatch(?:-id)?\s+(ctx_[a-f0-9]+)", c)
+                        cids = re.findall(r"--dispatch(?:-id)?\s+(ctx_[a-f0-9]{12})\b", c)
                         if not cids and "You are a dispatched worker" in c:
-                            cids = re.findall(r"ctx_[a-f0-9]+", c)
+                            cids = re.findall(r"\bctx_[a-f0-9]{12}\b", c)
                         if cids:
                             dispatch_starts.append((idx_pos, set(cids)))
             if dispatch_starts:
                 for k, (start_pos, cids_set) in enumerate(dispatch_starts):
                     if scope_id in cids_set:
-                        end_pos = dispatch_starts[k + 1][0] if k + 1 < len(dispatch_starts) else len(steps)
+                        end_pos = len(steps)
+                        for m in range(k + 1, len(dispatch_starts)):
+                            if scope_id not in dispatch_starts[m][1]:
+                                end_pos = dispatch_starts[m][0]
+                                break
                         return steps[start_pos:end_pos]
                 return []
 
         elif scope_id.startswith("run_"):
-            # Leader transcript may contain multiple sequential orchestration runs (`run-create`)
+            # Leader transcript may contain multiple sequential orchestration runs (`run-create`) or resumed `--run <rid>` blocks
             run_creates = []
+            step_runs = {}
+            orch_steps = set()
+            release_steps = set()
             for idx_pos, s in enumerate(steps):
                 if s.get("type") != "PLANNER_RESPONSE":
                     continue
                 tcs = s.get("tool_calls") or []
-                has_rc = any(
-                    re.search(r"\borca\s+orchestration\s+run-create\b", _command_from_tool_call(tc))
-                    for tc in tcs if isinstance(tc, dict)
-                )
+                has_rc = False
+                for tc in tcs:
+                    if not isinstance(tc, dict):
+                        continue
+                    cmd = _command_from_tool_call(tc)
+                    if not cmd or "orca-monitor" in cmd:
+                        continue
+                    if re.search(r"\borca\s+orchestration\s+run-create\b", cmd):
+                        has_rc = True
+                        orch_steps.add(idx_pos)
+                    if re.search(
+                        r"\borca\s+orchestration\s+(?:task-create|worker-start|check|worker-read|gate-create|gate-resolve|task-update|worker-retain|worker-release|worker-stop|send|reply|run-show|task-list|worker-list)\b",
+                        cmd,
+                    ):
+                        orch_steps.add(idx_pos)
+                        for r_m in re.findall(r"--(?:run|id)\s+(run_[a-f0-9]{12})\b", cmd):
+                            step_runs.setdefault(idx_pos, set()).add(r_m)
+                    if re.search(r"\borca\s+orchestration\s+(?:worker-release|worker-stop)\b", cmd):
+                        release_steps.add(idx_pos)
                 if has_rc:
                     j = idx_pos + 1
-                    found_rids = []
+                    created_rids = []
+                    fallback_rids = []
                     while j < len(steps) and steps[j].get("type") == "GENERIC":
                         c_str = str(steps[j].get("content") or "")
-                        found_rids.extend(re.findall(r"\brun_[a-f0-9]{12}\b", c_str))
+                        created_rids.extend(
+                            re.findall(r'(?:Created\s+|RUN=|"run"\s*:\s*\{\s*"id"\s*:\s*")(run_[a-f0-9]{12})\b', c_str)
+                        )
+                        fallback_rids.extend(re.findall(r"\brun_[a-f0-9]{12}\b", c_str))
                         j += 1
-                    if found_rids:
-                        run_creates.append((idx_pos, found_rids[0]))
-            if run_creates:
-                for k, (rc_pos, rid) in enumerate(run_creates):
-                    if rid == scope_id:
-                        # Find the USER_INPUT that initiated this run (backward from rc_pos, after previous run)
-                        prev_rc_pos = run_creates[k - 1][0] if k > 0 else -1
-                        start_pos = 0 if k == 0 else rc_pos
-                        for back_pos in range(rc_pos - 1, prev_rc_pos, -1):
-                            if steps[back_pos].get("type") == "USER_INPUT":
-                                start_pos = back_pos
+                    chosen_rid = created_rids[-1] if created_rids else (fallback_rids[-1] if fallback_rids else None)
+                    if chosen_rid:
+                        run_creates.append((idx_pos, chosen_rid))
+                        step_runs.setdefault(idx_pos, set()).add(chosen_rid)
+
+            def _advance_past_turn(pos: int, limit_pos: int) -> int:
+                p = pos
+                while p + 1 < limit_pos and steps[p + 1].get("type") == "GENERIC":
+                    p += 1
+                if p + 1 < limit_pos and steps[p + 1].get("type") == "PLANNER_RESPONSE" and not (steps[p + 1].get("tool_calls") or []):
+                    p += 1
+                return p
+
+            def _is_short_confirm(content_str: str) -> bool:
+                m_req = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content_str, re.S)
+                req = (m_req.group(1) if m_req else content_str).strip()
+                return len(req) <= 45
+
+            def _find_run_start(rc_pos: int, prev_rc_pos: int, target_rid: str = None) -> int:
+                floor_pos = prev_rc_pos
+                for b_pos in range(rc_pos - 1, prev_rc_pos, -1):
+                    rset = step_runs.get(b_pos, set())
+                    if b_pos in release_steps or (rset and (not target_rid or target_rid not in rset)):
+                        floor_pos = _advance_past_turn(b_pos, rc_pos)
+                        break
+                u_positions = [p for p in range(floor_pos + 1, rc_pos) if steps[p].get("type") == "USER_INPUT"]
+                if not u_positions:
+                    for b_pos in range(rc_pos - 1, prev_rc_pos, -1):
+                        if steps[b_pos].get("type") == "USER_INPUT":
+                            return b_pos
+                    return 0 if prev_rc_pos < 0 else rc_pos
+                chosen = u_positions[-1]
+                idx_u = len(u_positions) - 1
+                while idx_u > 0 and _is_short_confirm(str(steps[u_positions[idx_u]].get("content") or "")):
+                    idx_u -= 1
+                    chosen = u_positions[idx_u]
+                return chosen
+
+            for k, (rc_pos, rid) in enumerate(run_creates):
+                if rid == scope_id:
+                    prev_rc_pos = run_creates[k - 1][0] if k > 0 else -1
+                    start_pos = _find_run_start(rc_pos, prev_rc_pos, scope_id)
+                    if k + 1 < len(run_creates):
+                        next_rc_pos, next_rid = run_creates[k + 1]
+                        end_pos = _find_run_start(next_rc_pos, rc_pos, next_rid)
+                    else:
+                        last_own = rc_pos
+                        for p_idx in range(rc_pos, len(steps)):
+                            rset = step_runs.get(p_idx, set())
+                            if rset and scope_id not in rset:
                                 break
-                        if k + 1 < len(run_creates):
-                            next_rc_pos = run_creates[k + 1][0]
-                            end_pos = next_rc_pos
-                            for back_pos in range(next_rc_pos - 1, rc_pos, -1):
-                                if steps[back_pos].get("type") == "USER_INPUT":
-                                    end_pos = back_pos
-                                    break
-                        else:
-                            end_pos = len(steps)
-                        if end_pos > start_pos:
-                            return steps[start_pos:end_pos]
-                return []
+                            if p_idx in orch_steps:
+                                last_own = p_idx
+                        last_own_end = _advance_past_turn(last_own, len(steps))
+                        end_pos = len(steps)
+                        for fwd_pos in range(last_own_end + 1, len(steps)):
+                            if steps[fwd_pos].get("type") in ("USER_INPUT", "SYSTEM_MESSAGE"):
+                                end_pos = fwd_pos
+                                break
+                    return steps[start_pos:end_pos] if end_pos > start_pos else []
+
+            # Fallback for resumed/non-creator sessions that coordinated `scope_id` via `--run <rid>` / `--id <rid>`
+            coord_pos = [p for p, rset in sorted(step_runs.items()) if scope_id in rset]
+            if coord_pos:
+                first_c, last_c = coord_pos[0], coord_pos[-1]
+                prev_other = -1
+                for p_idx in range(first_c - 1, -1, -1):
+                    rset = step_runs.get(p_idx, set())
+                    if (rset and scope_id not in rset) or any(rc_p == p_idx for rc_p, _ in run_creates):
+                        prev_other = _advance_past_turn(p_idx, first_c)
+                        break
+                start_pos = _find_run_start(first_c, prev_other, scope_id)
+                next_other = len(steps)
+                for p_idx in range(last_c + 1, len(steps)):
+                    rset = step_runs.get(p_idx, set())
+                    if (rset and scope_id not in rset) or any(rc_p == p_idx for rc_p, _ in run_creates):
+                        next_other = p_idx
+                        break
+                last_c_end = _advance_past_turn(last_c, next_other)
+                end_pos = next_other
+                for fwd_pos in range(last_c_end + 1, next_other):
+                    if steps[fwd_pos].get("type") in ("USER_INPUT", "SYSTEM_MESSAGE"):
+                        end_pos = fwd_pos
+                        break
+                return steps[start_pos:end_pos] if end_pos > start_pos else []
+            return []
     except Exception:
         pass
     return steps
 
 
 def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict:
-    full_tf = tf_path.parent / "transcript_full.jsonl"
-    read_tf = full_tf if full_tf.exists() else tf_path
-    try:
-        raw_lines = read_tf.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception:
-        return {}
-    all_steps = []
-    for ln in raw_lines:
-        if not ln.strip():
-            continue
-        try:
-            obj = json.loads(ln)
-        except ValueError:
-            continue  # dòng đang ghi dở (worker đang chạy) hoặc hỏng — bỏ qua thay vì bỏ cả transcript
-        if isinstance(obj, dict):
-            all_steps.append(obj)
+    all_steps = _load_normalized_transcript_steps(tf_path)
     if not all_steps:
         return {}
 
     steps = _slice_transcript_steps(all_steps, tf_path, scope_id)
     if not steps:
-        return {} if scope_id else {}
+        return {}
 
     measured_llm_secs = 0.0
     measured_out_tok = 0
@@ -2654,11 +2980,81 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
 
 
 def _index_cli_transcripts() -> dict:
-    """Scan local CLI session directories and index transcripts by dispatchId, taskId, termHandle, and runId."""
+    """Scan local CLI session directories (Antigravity & Claude Code) and index transcripts by dispatchId, taskId, termHandle, and runId."""
     by_dispatch = {}
     by_task = {}
     by_term = {}
     by_leader_run = {}
+
+    def _index_parsed_steps(tf: Path, parsed_steps: list, is_cli: int):
+        if not parsed_steps:
+            return
+        user_inputs = [
+            str(st.get("content") or "")
+            for st in parsed_steps
+            if st.get("type") == "USER_INPUT" and st.get("content")
+        ]
+        is_dispatched_worker = any("You are a dispatched worker" in u for u in user_inputs[:2])
+        if is_dispatched_worker:
+            blob = "\n".join(u for u in user_inputs if "ctx_" in u or "task_" in u or "term_" in u or "You are a dispatched worker" in u)
+            for cid_match in re.findall(r"\bctx_[a-f0-9]{12}\b", blob):
+                by_dispatch[cid_match] = tf
+            for tid_match in re.findall(r"\btask_[a-f0-9]{12}\b", blob):
+                by_task[tid_match] = tf
+            worker_terms = re.findall(r"--(?:from|terminal)\s+(term_[a-f0-9-]+)", blob)
+            if not worker_terms:
+                worker_terms = re.findall(r"Worker terminal(?: handle)?:\s*(term_[a-f0-9-]+)", blob, re.I)
+            for trm_match in worker_terms:
+                by_term[trm_match] = tf
+            return
+
+        creator_ts = {}
+        coord_ts = {}
+        first_ts = ""
+        for st in parsed_steps:
+            if st.get("created_at"):
+                first_ts = str(st.get("created_at"))
+                break
+        for idx_s, st in enumerate(parsed_steps):
+            if st.get("type") != "PLANNER_RESPONSE":
+                continue
+            step_ts = str(st.get("created_at") or first_ts or "9999")
+            tcs = st.get("tool_calls") or []
+            has_rc = False
+            for tc in tcs:
+                cmd_str = _command_from_tool_call(tc)
+                if not cmd_str or "orca-monitor" in cmd_str:
+                    continue
+                if re.search(r"\borca\s+orchestration\s+run-create\b", cmd_str):
+                    has_rc = True
+                if re.search(
+                    r"\borca\s+orchestration\s+(?:task-create|worker-start|check|worker-read|gate-create|gate-resolve|task-update|worker-retain|worker-release|worker-stop|send|reply|run-show|task-list|worker-list)\b",
+                    cmd_str,
+                ):
+                    for r_m in re.findall(r"--(?:run|id)\s+(run_[a-f0-9]{12})\b", cmd_str):
+                        coord_ts.setdefault(r_m, step_ts)
+            if has_rc:
+                j = idx_s + 1
+                created_rids = []
+                fallback_rids = []
+                while j < len(parsed_steps) and parsed_steps[j].get("type") == "GENERIC":
+                    g_content = str(parsed_steps[j].get("content") or "")
+                    created_rids.extend(
+                        re.findall(r'(?:Created\s+|RUN=|"run"\s*:\s*\{\s*"id"\s*:\s*")(run_[a-f0-9]{12})\b', g_content)
+                    )
+                    fallback_rids.extend(re.findall(r"\brun_[a-f0-9]{12}\b", g_content))
+                    j += 1
+                chosen_rid = created_rids[-1] if created_rids else (fallback_rids[-1] if fallback_rids else None)
+                if chosen_rid:
+                    creator_ts.setdefault(chosen_rid, step_ts)
+        all_matched_rids = set(creator_ts.keys()) | set(coord_ts.keys())
+        for rid_match in all_matched_rids:
+            score = 2 if rid_match in creator_ts else 1
+            ev_ts = creator_ts.get(rid_match) or coord_ts.get(rid_match) or first_ts or "9999"
+            cand = (tf, score, is_cli, ev_ts)
+            prev = by_leader_run.get(rid_match)
+            if not prev or (score, is_cli) > (prev[1], prev[2]) or ((score, is_cli) == (prev[1], prev[2]) and cand[3] < prev[3]):
+                by_leader_run[rid_match] = cand
 
     roots = [
         Path.home() / ".gemini" / "antigravity-cli" / "brain",
@@ -2677,87 +3073,31 @@ def _index_cli_transcripts() -> dict:
             src_tf = full_tf if full_tf.exists() else tf
             try:
                 with open(src_tf, "r", encoding="utf-8", errors="ignore") as f:
-                    first_line = f.readline()
-                    is_dispatched_worker = "You are a dispatched worker" in first_line
-                    rest_text = f.read()
+                    raw_text = f.read()
+            except Exception:
+                continue
+            if "You are a dispatched worker" not in raw_text and "orchestration" not in raw_text:
+                continue
+            try:
+                parsed_steps = [json.loads(sln) for sln in raw_text.splitlines() if sln.strip()]
+                parsed_steps = [st for st in parsed_steps if isinstance(st, dict)]
+                _index_parsed_steps(tf, parsed_steps, 1 if "antigravity-cli" in str(tf) else 0)
             except Exception:
                 continue
 
-            if is_dispatched_worker:
-                # Scan first_line plus any subsequent USER_INPUT lines (for 1 Role = 1 Worktree reused workers)
-                worker_inputs = [first_line]
-                if '"USER_INPUT"' in rest_text:
-                    for ln in rest_text.splitlines():
-                        if '"USER_INPUT"' in ln and ("ctx_" in ln or "task_" in ln):
-                            worker_inputs.append(ln)
-                blob = "\n".join(worker_inputs)
-                for cid_match in re.findall(r"ctx_[a-f0-9]+", blob):
-                    by_dispatch[cid_match] = tf
-                for tid_match in re.findall(r"task_[a-f0-9]+", blob):
-                    by_task[tid_match] = tf
-                # Only index the worker's own terminal handle (--from / --terminal), never Coordinator handle
-                worker_terms = re.findall(r"--(?:from|terminal)\s+(term_[a-f0-9-]+)", blob)
-                if not worker_terms:
-                    worker_terms = re.findall(r"Worker terminal(?: handle)?:\s*(term_[a-f0-9-]+)", blob, re.I)
-                for trm_match in worker_terms:
-                    by_term[trm_match] = tf
-            else:
-                combined = first_line + "\n" + rest_text
-                if "orchestration" in combined and ("worker-start" in combined or "run-create" in combined or "task-create" in combined):
-                    # Xác định transcript thực sự TẠO hoặc ĐIỀU PHỐI run qua tool_call `run_command`:
-                    # - Score 2 (creator): có `orca orchestration run-create` trong `run_command` và các step GENERIC kế tiếp trả về `run_<12hex>`
-                    # - Score 1 (coordinator): có `orca orchestration ... --run run_<12hex>` trong `run_command` (không tính `run-list` của trình quan sát/audit)
-                    creator_ts = {}
-                    coord_ts = {}
-                    first_ts = ""
-                    try:
-                        parsed_steps = []
-                        for sln in combined.splitlines():
-                            if not sln.strip():
-                                continue
-                            try:
-                                st = json.loads(sln)
-                            except ValueError:
-                                continue
-                            if isinstance(st, dict):
-                                parsed_steps.append(st)
-                                if not first_ts:
-                                    first_ts = str(st.get("created_at") or "")
-                        for idx_s, st in enumerate(parsed_steps):
-                            if st.get("type") != "PLANNER_RESPONSE":
-                                continue
-                            step_ts = str(st.get("created_at") or first_ts or "9999")
-                            tcs = st.get("tool_calls") or []
-                            has_rc = False
-                            for tc in tcs:
-                                cmd_str = _command_from_tool_call(tc)
-                                if not cmd_str:
-                                    continue
-                                if re.search(r"\borca\s+orchestration\s+run-create\b", cmd_str):
-                                    has_rc = True
-                                # Check explicit coordination commands targeting `--run run_<12hex>`
-                                if re.search(r"\borca\s+orchestration\s+(?:task-create|worker-start|check|gate-create|gate-resolve|worker-retain|worker-release|send|reply)\b", cmd_str):
-                                    for r_m in re.findall(r"--run\s+(run_[a-f0-9]{12})\b", cmd_str):
-                                        coord_ts.setdefault(r_m, step_ts)
-                            if has_rc:
-                                j = idx_s + 1
-                                while j < len(parsed_steps) and parsed_steps[j].get("type") == "GENERIC":
-                                    g_content = str(parsed_steps[j].get("content") or "")
-                                    for r_m in re.findall(r"\brun_[a-f0-9]{12}\b", g_content):
-                                        creator_ts.setdefault(r_m, step_ts)
-                                    j += 1
-                    except Exception:
-                        pass
-                    is_cli = 1 if "antigravity-cli" in str(tf) else 0
-                    all_matched_rids = set(creator_ts.keys()) | set(coord_ts.keys())
-                    for rid_match in all_matched_rids:
-                        score = 2 if rid_match in creator_ts else 1
-                        ev_ts = creator_ts.get(rid_match) or coord_ts.get(rid_match) or first_ts or "9999"
-                        cand = (tf, score, is_cli, ev_ts)
-                        prev = by_leader_run.get(rid_match)
-                        # Ưu tiên: creator (score=2) > CLI > thời điểm tạo/điều phối run SỚM nhất
-                        if not prev or (score, is_cli) > (prev[1], prev[2]) or ((score, is_cli) == (prev[1], prev[2]) and cand[3] < prev[3]):
-                            by_leader_run[rid_match] = cand
+    claude_dir = Path.home() / ".claude" / "projects"
+    if claude_dir.is_dir():
+        for claude_tf in claude_dir.glob("*/*.jsonl"):
+            try:
+                with open(claude_tf, "r", encoding="utf-8", errors="ignore") as f:
+                    raw_text = f.read()
+                if "You are a dispatched worker" not in raw_text and "orchestration" not in raw_text:
+                    continue
+                parsed_steps = _load_normalized_transcript_steps(claude_tf)
+                _index_parsed_steps(claude_tf, parsed_steps, 1)
+            except Exception:
+                continue
+
     return {
         "by_dispatch": by_dispatch,
         "by_task": by_task,
@@ -3170,6 +3510,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             reclaimable_dispatches = []
             total_spec_tokens = 0
             total_report_tokens = 0
+            counted_task_ids = set()
             worker_metrics_list = []
 
             from concurrent.futures import ThreadPoolExecutor
@@ -3275,7 +3616,6 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 spec_txt = str(t_obj_info.get("spec") or "")
                 res_raw = str(t_obj_info.get("result") or "")
                 spec_tok = estimate_tokens(spec_txt)
-                total_spec_tokens += spec_tok
 
                 rep_body = ""
                 files_mod_count = 0
@@ -3288,7 +3628,13 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     except Exception:
                         rep_body = res_raw
                 rep_tok = estimate_tokens(rep_body)
-                total_report_tokens += rep_tok
+                if t_id and t_id != "-" and t_id not in counted_task_ids:
+                    counted_task_ids.add(t_id)
+                    total_spec_tokens += spec_tok
+                    total_report_tokens += rep_tok
+                elif not t_id or t_id == "-":
+                    total_spec_tokens += spec_tok
+                    total_report_tokens += rep_tok
 
                 git_stats = _collect_git_diff_stats(wt_path, wt_name)
                 if files_mod_count == 0 and git_stats["files"] > 0:
@@ -3406,10 +3752,11 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     print(f"   ⏳ Queued in DAG ({pt.get('id')} - {pt_status}): \"{pt_title}\"")
 
             # Kiểm tra các Gate treo (pending) bất kể worker đang retained hay đã released,
-            # và chỉ tự chữa các Task bị kẹt 'blocked'/'ready' khi toàn bộ worker đã succeeded & released và không còn pending gate.
-            all_workers_settled_released = bool(workers) and all(
-                str(w.get("workerState") or w.get("state") or "") == "succeeded" and str(w.get("terminalState") or "") == "released"
-                for w in workers
+            # và chỉ tự chữa các Task bị kẹt 'blocked'/'ready' khi toàn bộ worker đã released (và ít nhất 1 succeeded) và không còn pending gate.
+            all_workers_settled_released = (
+                bool(workers)
+                and all(str(w.get("terminalState") or "") == "released" for w in workers)
+                and any(str(w.get("workerState") or w.get("state") or "") == "succeeded" for w in workers)
             )
             if active_run_id:
                 try:
@@ -3637,7 +3984,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
         if runtime_ok:
             # 4.2 Phân tích Mailbox
-            inbox_res = _safe_orca_run([orca_bin, "orchestration", "inbox", "--limit", "50", "--json"], capture_output=True, text=True, timeout=5)
+            inbox_res = _safe_orca_run([orca_bin, "orchestration", "inbox", "--limit", "500", "--json"], capture_output=True, text=True, timeout=5)
             hb_count = done_count = esc_count = handoff_count = done_tokens = 0
             run_msgs = []
             if inbox_res.returncode == 0:
@@ -3803,11 +4150,10 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
     if as_json:
         sys.stdout = orig_stdout
-        t_run = locals().get("target_run")
         out_payload = {
             "workspace": str(root),
             "baseDirectiveTokens": base_tokens,
-            "runId": t_run.get("id") if isinstance(t_run, dict) else None,
+            "runId": active_run_id,
             "summary": {
                 "criticalIssues": len(critical_issues),
                 "warnings": len(warning_issues),
@@ -3893,9 +4239,14 @@ def main():
     if not args or args[0] in ["status", "list", "show"] or (
         args[0].lower() not in ROLE_ALIASES and Path(args[0]).expanduser().is_dir()
     ):
-        for a in args:
-            if not a.startswith("-") and Path(a).expanduser().is_dir():
-                root = Path(a).expanduser().resolve()
+        scan_args = args[1:] if (args and args[0] in ("status", "list", "show")) else args
+        for a in scan_args:
+            if not a.startswith("-"):
+                cand = Path(a).expanduser()
+                if not cand.is_dir():
+                    print(f"❌ Đường dẫn không tồn tại: '{a}'.", file=sys.stderr)
+                    sys.exit(1)
+                root = cand.resolve()
                 config = load_config(root)
                 break
         cmd_status(root, config)

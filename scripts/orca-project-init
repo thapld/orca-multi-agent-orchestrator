@@ -10,12 +10,23 @@ ORCA_TEAM_BIN="$SCRIPT_DIR/orca-team"
 if [[ ! -x "$ORCA_TEAM_BIN" ]] && command -v orca-team >/dev/null 2>&1; then
   ORCA_TEAM_BIN="$(command -v orca-team)"
 fi
+TMP_ORCA_TEAM=""
+TMP_REA=""
+cleanup_init() {
+  [[ -n "$TMP_ORCA_TEAM" ]] && rm -f "$TMP_ORCA_TEAM" 2>/dev/null || true
+  [[ -n "$TMP_REA" ]] && rm -rf "$TMP_REA" 2>/dev/null || true
+  if [[ -t 2 ]]; then
+    printf '\033[?25h' >&2 2>/dev/null || true
+    stty echo 2>/dev/null || true
+  fi
+}
+trap cleanup_init EXIT INT TERM HUP
+
 if [[ ! -x "$ORCA_TEAM_BIN" ]] && command -v curl >/dev/null 2>&1; then
   TMP_ORCA_TEAM="/tmp/orca-team-$$"
   if curl -fsSL "https://raw.githubusercontent.com/thapld/orca-multi-agent-orchestrator/main/scripts/orca-team" -o "$TMP_ORCA_TEAM" 2>/dev/null; then
     chmod +x "$TMP_ORCA_TEAM"
     ORCA_TEAM_BIN="$TMP_ORCA_TEAM"
-    trap 'rm -f "$TMP_ORCA_TEAM"' EXIT
   fi
 fi
 
@@ -36,11 +47,15 @@ for arg in "$@"; do
       ACTION_UNINSTALL=true
       ;;
     -*)
-      echo "⚠️  Cảnh báo: Tùy chọn không nhận diện: $arg" >&2
+      echo "❌ Tùy chọn không hợp lệ: '$arg'. Chạy 'orca-project-init --help' để xem hướng dẫn." >&2
+      exit 1
       ;;
     *)
       if [[ -z "$PROJECT_DIR" ]]; then
         PROJECT_DIR="$arg"
+      else
+        echo "❌ Quá nhiều tham số đường dẫn: '$arg'. Chỉ truyền 1 đường dẫn thư mục dự án." >&2
+        exit 1
       fi
       ;;
   esac
@@ -65,7 +80,11 @@ if [[ "$ACTION_UNINSTALL" == true ]]; then
   TARGET_PATH=$(cd "$TARGET_DIR" 2>/dev/null && pwd || echo "$TARGET_DIR")
 
   if [[ -x "$ORCA_TEAM_BIN" ]]; then
-    exec python3 "$ORCA_TEAM_BIN" uninstall "$TARGET_PATH" -y
+    if [[ "$AUTO_YES" == true ]]; then
+      exec python3 "$ORCA_TEAM_BIN" uninstall "$TARGET_PATH" -y
+    else
+      exec python3 "$ORCA_TEAM_BIN" uninstall "$TARGET_PATH"
+    fi
   fi
 
   # Bảo vệ: Không bao giờ tự gỡ bỏ chính kho mã nguồn của framework
@@ -86,10 +105,17 @@ if [[ "$ACTION_UNINSTALL" == true ]]; then
       echo "  🗑️  Đã xóa symlink: $link_name"
     fi
   done
-  rm -f "$TARGET_PATH/.agents/GEMINI.md"
+  if [[ -f "$TARGET_PATH/.agents/GEMINI.md" ]] && grep -q "Orca Multi-Agent Orchestration Directive" "$TARGET_PATH/.agents/GEMINI.md" 2>/dev/null; then
+    rm -f "$TARGET_PATH/.agents/GEMINI.md"
+  fi
   rmdir "$TARGET_PATH/.agents" 2>/dev/null || true
   echo "🎉 Dự án đã được khôi phục về trạng thái ban đầu sạch sẽ!"
   exit 0
+fi
+
+if [[ ! -t 0 && "$AUTO_YES" != true ]]; then
+  echo "❌ Môi trường không tương tác (non-TTY). Hãy thêm cờ '--yes' (-y) để khởi tạo tự động." >&2
+  exit 1
 fi
 
 PROJECT_PATH=$(cd "$PROJECT_DIR" 2>/dev/null && pwd || echo "$PROJECT_DIR")
@@ -147,8 +173,10 @@ choose_agent() {
       echo "    $i) ${AVAILABLE_AGENTS[$i]}"
     done
     printf "   Nhập số [1-${#AVAILABLE_AGENTS[@]}] (Enter = $default_idx [${AVAILABLE_AGENTS[$default_idx]}]): "
-    read -r choice
-    choice="${choice:-$default_idx}"
+    read -r choice || true
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#AVAILABLE_AGENTS[@]} )); then
+      choice="$default_idx"
+    fi
     SELECTED_AGENT="${AVAILABLE_AGENTS[$choice]}"
   fi
 }
@@ -175,15 +203,24 @@ choose_model() {
     local tsv_out
     tsv_out=$(python3 "$ORCA_TEAM_BIN" models "$agent" --tsv --tier "$role_tier" --effort "$default_eff" 2>/dev/null || true)
     if [[ -n "$tsv_out" ]]; then
-      while IFS=$'\t' read -r rec_type col1 col2 col3 col4; do
+      while IFS= read -r raw_line; do
+        [[ -z "$raw_line" ]] && continue
+        local parts=("${(@ps:\t:)raw_line}")
+        local rec_type="${parts[1]:-}"
+        local col1="${parts[2]:-}"
+        local col2="${parts[3]:-}"
+        local col3="${parts[4]:-}"
+        local col4="${parts[5]:-}"
+        [[ "$col3" == "-" ]] && col3=""
+        [[ "$col4" == "-" ]] && col4=""
         if [[ "$rec_type" == "META" ]]; then
           source_label="${col1:-provider-cli}"
           [[ "$col2" =~ ^[0-9]+$ ]] && rec_model_idx="$col2"
         elif [[ "$rec_type" == "MODEL" && -n "$col1" ]]; then
           model_ids+=("$col1")
           model_labels+=("${col2:-$col1}")
-          model_baked_efforts+=("${col3:-}")
-          model_efforts_csv+=("${col4:-}")
+          model_baked_efforts+=("$col3")
+          model_efforts_csv+=("$col4")
         fi
       done <<< "$tsv_out"
     fi
@@ -220,7 +257,7 @@ choose_model() {
           echo "   $i) ${menu_items[$i]}"
         done
         printf "   Nhập số (Enter = $rec_model_idx): "
-        read -r chosen_idx
+        read -r chosen_idx || true
         chosen_idx="${chosen_idx:-$rec_model_idx}"
       fi
     fi
@@ -231,14 +268,14 @@ choose_model() {
       chosen_efforts_csv="${model_efforts_csv[$chosen_idx]}"
     elif [[ -n "$custom_idx" && "$chosen_idx" == "$custom_idx" ]]; then
       printf "   Nhập model ID tùy chỉnh: "
-      read -r custom_model
+      read -r custom_model || true
       SELECTED_MODEL="$custom_model"
     else
       SELECTED_MODEL=""
     fi
   elif [[ "$AUTO_YES" != true ]]; then
     printf "   ⚠️ Không tìm thấy danh sách model động từ CLI của '$agent'. Nhập model ID (Enter = mặc định): "
-    read -r custom_model
+    read -r custom_model || true
     SELECTED_MODEL="$custom_model"
   fi
 
@@ -353,7 +390,7 @@ fmt_worker_args() {
       [[ "$effort" =~ ^(low|medium|high)$ ]] && args="${args} --effort ${effort}"
       ;;
     claude)
-      if [[ "${model:l}" != "haiku" && "$effort" =~ ^(low|medium|high|xhigh|max)$ ]]; then
+      if [[ "${model:l}" != *haiku* && "$effort" =~ ^(low|medium|high|xhigh|max)$ ]]; then
         args="${args} --effort ${effort}"
       fi
       ;;
@@ -395,12 +432,15 @@ choose_count() {
       --title "👉 Chọn số lượng agent song song cho $role_title:" \
       --options "${count_options[@]}" \
       --default-idx "$def_i" \
-      --return-idx)
+      --return-idx) || exit $?
     SELECTED_COUNT="${chosen_i:-$default_count}"
   else
     printf "   Nhập số lượng agent song song cho $role_title [1-5] (Enter = $default_count): "
-    read -r count
+    read -r count || true
     SELECTED_COUNT="${count:-$default_count}"
+  fi
+  if ! [[ "$SELECTED_COUNT" =~ ^[1-5]$ ]]; then
+    SELECTED_COUNT="$default_count"
   fi
 }
 
@@ -431,7 +471,7 @@ choose_utilities() {
       --title "👉 Chọn gói tiện ích Orca cấp quyền cho nhóm này:" \
       --options "${util_bundles[@]}" \
       --default-idx "$def_idx" \
-      --return-idx)
+      --return-idx) || exit $?
     case "$bundle_idx" in
       2) SELECTED_UTILS=("git-worktrees" "orca-skills-registry") ;;
       3) SELECTED_UTILS=("git-worktrees" "browser-design-mode" "ssh-remote-execution" "orca-skills-registry") ;;
@@ -441,7 +481,7 @@ choose_utilities() {
   else
     echo "   Tiện ích Orca cấp quyền (1: Worktrees, 2: Browser/Design Mode, 3: SSH, 4: Computer Use, 5: Skills Registry)"
     printf "   Nhập các số cách nhau bằng dấu phẩy (Enter = $default_utils): "
-    read -r utils_input
+    read -r utils_input || true
     utils_input="${utils_input:-$default_utils}"
     SELECTED_UTILS=()
     for u in ${(s:,:)utils_input}; do
@@ -454,6 +494,9 @@ choose_utilities() {
         5) SELECTED_UTILS+=("orca-skills-registry") ;;
       esac
     done
+    if [[ ${#SELECTED_UTILS[@]} -eq 0 ]]; then
+      SELECTED_UTILS=("git-worktrees" "orca-skills-registry")
+    fi
   fi
   echo "   ➔ Tiện ích: ${(j:, :)SELECTED_UTILS}"
 }
@@ -491,7 +534,7 @@ ask_toggle() {
       --title "👉 Bạn có muốn kích hoạt vai trò mở rộng $feature_name?" \
       --options "${toggle_options[@]}" \
       --default-idx "$def_i" \
-      --return-idx)
+      --return-idx) || exit $?
     if [[ "$ans_idx" == "1" ]]; then
       TOGGLE_RESULT=true
     else
@@ -499,7 +542,7 @@ ask_toggle() {
     fi
   else
     printf "   Kích hoạt $feature_name? (Y/n, Enter = $default_val): "
-    read -r ans
+    read -r ans || true
     ans="${ans:-$default_val}"
     if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
       TOGGLE_RESULT=true
@@ -522,11 +565,11 @@ if [[ -f "$TARGET_RULE" && "$AUTO_YES" != true ]]; then
       --title "⚠️ Đã tồn tại cấu hình $TARGET_RULE. Bạn muốn làm gì?" \
       --options "Cấu hình lại và ghi đè" "Hủy bỏ và giữ nguyên cấu hình cũ" \
       --default-idx 0 \
-      --return-idx)
+      --return-idx) || exit $?
     [[ "$ow_choice" != "1" ]] && echo "Đã huỷ." && exit 0
   else
     printf "Bạn có muốn cấu hình lại và ghi đè? (y/N): "
-    read -r overwrite
+    read -r overwrite || true
     [[ "$overwrite" != "y" && "$overwrite" != "Y" ]] && echo "Đã huỷ." && exit 0
   fi
 fi
@@ -610,6 +653,12 @@ ISSUE_MODEL="$SELECTED_MODEL"
 ISSUE_EFFORT="$SELECTED_EFFORT"
 
 # ── 6. SPECIALIZED EXTENSIONS ──
+UI_AGENT=""; UI_MODEL=""; UI_EFFORT=""
+DEVOPS_AGENT=""; DEVOPS_MODEL=""; DEVOPS_EFFORT=""
+BENCH_AGENT=""; BENCH_MODEL=""; BENCH_EFFORT=""
+RE_AGENT=""; RE_MODEL=""; RE_EFFORT=""
+CRITIC_AGENT=""; CRITIC_MODEL=""; CRITIC_EFFORT=""
+
 echo ""
 echo "=================================================================="
 echo "PHẦN 6: CÁC VAI TRÒ MỞ RỘNG CHUYÊN BIỆT (Tùy chọn bật/tắt)"
@@ -693,10 +742,10 @@ elif [[ -x "$ORCA_TEAM_BIN" ]]; then
     --title "PHẦN 7: MÔI TRƯỜNG THỰC THI CHÍNH (Execution Host)" \
     --options "${host_menu[@]}" \
     --default-idx 0 \
-    --return-idx)
+    --return-idx) || exit $?
 else
   printf "Chọn [1: local, 2: ssh:orb, 3: custom] (Enter = 1): "
-  read -r host_choice_idx
+  read -r host_choice_idx || true
   host_choice_idx="${host_choice_idx:-1}"
 fi
 
@@ -705,7 +754,7 @@ if [[ "$host_choice_idx" == "2" ]]; then
   HOST_LABEL="SSH Target (ssh:orb)"
 elif [[ "$host_choice_idx" == "3" ]]; then
   printf "   Nhập tên SSH host target trong Orca (ví dụ: ssh:remote-server): "
-  read -r ssh_target_input
+  read -r ssh_target_input || true
   EXEC_HOST="${ssh_target_input:-ssh:orb}"
   HOST_LABEL="SSH Target ($EXEC_HOST)"
 else
@@ -750,11 +799,11 @@ elif [[ -x "$ORCA_TEAM_BIN" ]]; then
     --title "👉 Xác nhận tạo cấu hình cho project?" \
     --options "Xác nhận tạo cấu hình cho project" "Hủy bỏ" \
     --default-idx 0 \
-    --return-idx)
+    --return-idx) || exit $?
   [[ "$confirm_choice" != "1" ]] && echo "Đã huỷ." && exit 0
 else
   printf "Xác nhận tạo cấu hình cho project? (Y/n): "
-  read -r confirm
+  read -r confirm || true
   [[ "$confirm" == "n" || "$confirm" == "N" ]] && echo "Đã huỷ." && exit 0
 fi
 
@@ -767,10 +816,10 @@ if [[ "$ENABLE_RE" == true ]]; then
   rea_skill_claude="$HOME/.claude/skills/reverse-engineer-anything"
   if [[ ! -f "$rea_skill_gemini/SKILL.md" && ! -f "$rea_skill_agents/SKILL.md" ]]; then
     echo "   🔧 [REA] Đang tải và cài đặt skill 'reverse-engineer-anything' từ https://github.com/morluto/rea.git..."
-    tmp_rea="/tmp/orca-rea-skill-$$"
-    if git clone --depth 1 https://github.com/morluto/rea.git "$tmp_rea" >/dev/null 2>&1; then
+    TMP_REA="/tmp/orca-rea-skill-$$"
+    if git clone --depth 1 https://github.com/morluto/rea.git "$TMP_REA" >/dev/null 2>&1; then
       src_skill=""
-      for cand in "$tmp_rea/skills/reverse-engineer-anything" "$tmp_rea/skill/reverse-engineer-anything" "$tmp_rea"; do
+      for cand in "$TMP_REA/skills/reverse-engineer-anything" "$TMP_REA/skill/reverse-engineer-anything" "$TMP_REA"; do
         if [[ -f "$cand/SKILL.md" ]]; then
           src_skill="$cand"
           break
@@ -781,7 +830,8 @@ if [[ "$ENABLE_RE" == true ]]; then
         cp -R "$src_skill" "$rea_skill_gemini"
         echo "   ✅ [REA] Đã cài đặt skill vào $rea_skill_gemini"
       fi
-      rm -rf "$tmp_rea"
+      rm -rf "$TMP_REA"
+      TMP_REA=""
     fi
   fi
   if [[ -f "$rea_skill_gemini/SKILL.md" ]]; then
@@ -909,11 +959,6 @@ fi
 
 ROUTING_LINE="${ROUTING_LINE} | Kiểm toán bảo mật & rò rỉ ➔ **\`sec-worker\`** | Kiểm thử nghiệm thu ➔ **\`qa-worker\`**"
 
-if [[ "$ENABLE_UI" == true ]]; then
-  ROUTING_LINE="${ROUTING_LINE} | Giao diện CSS/DOM ➔ **\`ui-worker\`**"
-  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | $(fmt_md_cell "$UI_AGENT" "$UI_MODEL") | On-demand | Design Mode (Click-to-code), responsive & a11y |"$'\n'
-fi
-
 if [[ "$ENABLE_BENCH" == true ]]; then
   ROUTING_LINE="${ROUTING_LINE} | Đo tải RPS/EPS & tối ưu hiệu năng ➔ **\`bench-worker\`**"
   EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **Bench & Perf Specialist** | $(fmt_md_cell "$BENCH_AGENT" "$BENCH_MODEL") | On-demand | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |"$'\n'
@@ -922,6 +967,11 @@ fi
 if [[ "$ENABLE_RE" == true ]]; then
   ROUTING_LINE="${ROUTING_LINE} | Dịch ngược Binary/ASAR/Protocol (\`rea\`) ➔ **\`re-worker\`**"
   EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **Reverse Eng (REA)** | $(fmt_md_cell "$RE_AGENT" "$RE_MODEL") | On-demand | Binary/Package/ASAR/Protocol decompile (\`rea\` skill) |"$'\n'
+fi
+
+if [[ "$ENABLE_UI" == true ]]; then
+  ROUTING_LINE="${ROUTING_LINE} | Giao diện CSS/DOM ➔ **\`ui-worker\`**"
+  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | $(fmt_md_cell "$UI_AGENT" "$UI_MODEL") | On-demand | Design Mode (Click-to-code), responsive & a11y |"$'\n'
 fi
 
 if [[ "$ENABLE_CRITIC" == true ]]; then
@@ -1013,7 +1063,7 @@ ${EXTRA_TABLE_ROWS}
 ## ⚡ QUY TRÌNH 4 BƯỚC & HIẾN PHÁP KỸ SƯ TRƯỞNG (CHỐNG ĐỘC ĐOÁN, VƯỢT RÀO & BÁO SẠCH GIẢ)
 
 ### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ (CẤM GỘP VIỆC — TỰ ĐỘNG TIÊM SỔ TAY WORKER)
-- Tạo Run mới và **tách Task riêng cho từng vai trò**. Dùng \`\$(orca-team spec <role> '...')\` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (\`[ROLE: PRINCIPAL ...]\`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế, không tự gõ lại hiến pháp nội bộ của Worker):
+- Tạo Run mới và **tách Task riêng cho từng vai trò**. Dùng \`\$(orca-team spec <role> '...')\` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (\`[ROLE: PRINCIPAL ...]\`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **KHÔNG** thêm \`--json\` vào \`task-create\` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng \`orca orchestration task-list --brief\`):
   \`\`\`bash
   orca orchestration run-create --objective "[Mô tả tổng thể]"
 

@@ -4,7 +4,7 @@
 
 set -e
 
-if [[ "$1" == "-h" || "$1" == "--help" || "$1" == "help" || $# -lt 1 ]]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" || $# -lt 1 ]]; then
   echo "🐋 [Orca Hotfix] Mở hoặc tái sử dụng worktree xử lý GitHub Issue độc lập"
   echo "Sử dụng:"
   echo "  orca-hotfix <issue-number> [role|agent]"
@@ -29,6 +29,9 @@ if [[ -x "$ORCA_TEAM_BIN" ]]; then
   if [[ -z "$CONFIG_AGENT" || "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
     CONFIG_AGENT=$("$ORCA_TEAM_BIN" get issue 2>/dev/null || true)
   fi
+  if [[ -z "$CONFIG_AGENT" || "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
+    CONFIG_AGENT=$("$ORCA_TEAM_BIN" get coord 2>/dev/null || true)
+  fi
   [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
 fi
 if [[ "$ROLE_OR_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$ ]]; then
@@ -41,7 +44,12 @@ WORKTREE_NAME="hotfix-issue-$ISSUE_NUM"
 ISSUE_PROMPT="[ROLE: PRINCIPAL ISSUE RESOLVER & BUGFIX ENGINEER] Nhiệm vụ: Xử lý triệt để GitHub Issue #${ISSUE_NUM}. Chuẩn mực bắt buộc: (1) Đọc kỹ mô tả Issue và tìm đúng nguyên nhân gốc rễ (Root Cause Analysis), (2) BẮT BUỘC viết Reproduction Test tái hiện đúng lỗi (chạy test xác nhận FAIL trước khi sửa), (3) Sửa mã nguồn tối thiểu, chuẩn kiến trúc cho đến khi Reproduction Test chuyển sang PASS, (4) Chạy toàn bộ regression test suite đảm bảo EXIT_CODE=0 và không làm vỡ tính năng cũ. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ để lách lỗi; CẤM refactor lan man ngoài phạm vi Issue. BẰNG CHỨNG BẮT BUỘC: Commit sạch với thông điệp 'fix(#${ISSUE_NUM}): <mô tả>' và xuất đầy đủ Commit Hash + log chạy test."
 
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+if [[ -n "$GIT_COMMON_DIR" && "${GIT_COMMON_DIR:t}" == ".git" ]]; then
+  REPO_ROOT="${GIT_COMMON_DIR:h}"
+else
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+fi
 
 # Kiểm tra xem worktree định danh hotfix-issue-<ISSUE_NUM> đã tồn tại trong repo chưa (tránh đẻ worktree trùng lặp -2, -3)
 EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\/${WORKTREE_NAME}\) .*/\1/p; s/^\([^ ]*\).*\[${WORKTREE_NAME}\].*/\1/p" | head -n 1)
@@ -49,8 +57,12 @@ EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\/${WORKTRE
 if [[ -n "$EXISTING_WT_PATH" ]]; then
   echo "♻️  [Orca Hotfix] Tái sử dụng worktree định danh hiện có: $WORKTREE_NAME ($EXISTING_WT_PATH)..."
   DISPATCH_SCRIPT="${0:A:h}/orca-dispatch-task.sh"
-  if [[ -x "$DISPATCH_SCRIPT" ]]; then
+  [[ ! -x "$DISPATCH_SCRIPT" ]] && DISPATCH_SCRIPT="$(command -v orca-dispatch 2>/dev/null || true)"
+  if [[ -n "$DISPATCH_SCRIPT" && -x "$DISPATCH_SCRIPT" ]]; then
     exec "$DISPATCH_SCRIPT" "$WORKTREE_NAME" "${2:-issue}" "$ISSUE_PROMPT"
+  else
+    echo "❌ Không tìm thấy 'orca-dispatch-task.sh' (hoặc 'orca-dispatch') để tái sử dụng worktree '$WORKTREE_NAME'." >&2
+    exit 1
   fi
 fi
 
@@ -59,7 +71,7 @@ echo "🐋 [Orca Hotfix] Đang khởi tạo worktree song song cho Issue #$ISSUE
 SETUP_POLICY="skip"
 [[ -f "$REPO_ROOT/package.json" ]] && SETUP_POLICY="run"
 
-RECEIPT=$($ORCA_BIN worktree create \
+RECEIPT=$("$ORCA_BIN" worktree create \
   --repo "path:$REPO_ROOT" \
   --name "$WORKTREE_NAME" \
   --issue "$ISSUE_NUM" \

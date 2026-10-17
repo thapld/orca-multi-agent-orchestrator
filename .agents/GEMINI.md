@@ -23,9 +23,9 @@
 | **PR Reviewer** | `antigravity` (gemini-4-argon-high) | On-demand | PR checkout (`--pr`), line-by-line diff audit |
 | **Issue Resolver** | `antigravity` (gemini-4-argon-high) | On-demand | Issue checkout (`--issue`), reproduction test & fix |
 | **DevOps Specialist** | `antigravity` (gemini-3.8-flash-high) | On-demand | Docker/K8s rollout, DB migrations, SSH worktrees |
-| **UI/UX Specialist** | `antigravity` (gemini-3.8-flash-medium) | On-demand | Design Mode (Click-to-code), responsive & a11y |
 | **Bench & Perf Specialist** | `antigravity` (gemini-3.8-flash-high) | On-demand | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |
 | **Reverse Eng (REA)** | `antigravity` (gemini-4-argon-high) | On-demand | Binary/Package/ASAR/Protocol decompile (`rea` skill) |
+| **UI/UX Specialist** | `antigravity` (gemini-3.8-flash-medium) | On-demand | Design Mode (Click-to-code), responsive & a11y |
 | **Research & Critic** | `antigravity` (gemini-4-argon-high) | On-demand | Deep research, Devil's Advocate critique, root-cause consensus |
 
 - **Execution Host:** `local` (Local Machine) | **Orca CLI:** `/usr/local/bin/orca`
@@ -35,7 +35,7 @@
 ## ⚡ QUY TRÌNH 4 BƯỚC & HIẾN PHÁP KỸ SƯ TRƯỞNG (CHỐNG VƯỢT RÀO & BÁO SẠCH GIẢ)
 
 ### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ (CẤM GỘP VIỆC — TỰ ĐỘNG TIÊM SỔ TAY WORKER)
-- Tạo Run mới và **tách Task riêng cho từng vai trò**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế, không tự gõ lại hiến pháp nội bộ của Worker):
+- Tạo Run mới và **tách Task riêng cho từng vai trò**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **KHÔNG** thêm `--json` vào `task-create` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng `orca orchestration task-list --brief`):
   ```bash
   orca orchestration run-create --objective "[Mô tả tổng thể]"
 
