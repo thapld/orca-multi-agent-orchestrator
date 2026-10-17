@@ -4,7 +4,7 @@
 
 set -e
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" || $# -lt 2 ]]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
   echo "🐋 [Orca Dispatch] Điều phối và giao việc cho worker trong child worktree độc lập"
   echo "Sử dụng:"
   echo "  orca-dispatch <task-title> [role|agent] \"<spec-description>\""
@@ -17,13 +17,38 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" || $# -lt 2
   exit 0
 fi
 
+if [[ $# -lt 2 ]]; then
+  echo "❌ Thiếu tham số. Sử dụng: orca-dispatch <task-title> [role|agent] \"<spec-description>\"" >&2
+  exit 1
+fi
+if [[ $# -gt 3 ]]; then
+  echo "❌ Thừa tham số ($# tham số). Hãy bọc mô tả nhiệm vụ (<spec-description>) trong dấu ngoặc kép \"...\"." >&2
+  exit 1
+fi
+
+KNOWN_AGENTS_RE='^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$'
+KNOWN_ROLES_RE='^(coord|coordinator|leader|orchestrator|dev|developer|coder|doc|docs|fix|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|reviewer|issue|issueresolver|hotfix)$'
+
 TASK_TITLE="$1"
 if [[ $# -eq 2 ]]; then
+  if [[ "${2:l}" =~ $KNOWN_ROLES_RE || "${2:l}" =~ $KNOWN_AGENTS_RE ]]; then
+    echo "❌ Thiếu mô tả nhiệm vụ (<spec-description>) cho role/agent '$2'. Sử dụng: orca-dispatch \"$TASK_TITLE\" $2 \"<spec-description>\"" >&2
+    exit 1
+  fi
   SPEC="$2"
   REQ_AGENT="dev"
 else
-  REQ_AGENT="$2"
+  REQ_AGENT="${2:l}"
   SPEC="$3"
+fi
+
+if [[ -z "${TASK_TITLE//[[:space:]]/}" ]]; then
+  echo "❌ Tên task (<task-title>) không được để trống." >&2
+  exit 1
+fi
+if [[ -z "${SPEC//[[:space:]]/}" ]]; then
+  echo "❌ Mô tả nhiệm vụ (<spec-description>) không được để trống." >&2
+  exit 1
 fi
 
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
@@ -33,8 +58,6 @@ fi
 
 # Tự động lấy agent của dev/qa/sec/devops/bench/re/critic từ orca-team
 ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
-KNOWN_AGENTS_RE='^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$'
-KNOWN_ROLES_RE='^(coord|coordinator|leader|orchestrator|dev|developer|coder|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|reviewer|issue|issueresolver|hotfix)$'
 
 if [[ "$REQ_AGENT" =~ $KNOWN_AGENTS_RE ]]; then
   if [[ "$TASK_TITLE" =~ ^review-pr-[0-9]+$ ]]; then
@@ -46,10 +69,10 @@ if [[ "$REQ_AGENT" =~ $KNOWN_AGENTS_RE ]]; then
   else
     ROLE_QUERY="dev"
   fi
-elif [[ "${REQ_AGENT:l}" =~ $KNOWN_ROLES_RE ]]; then
-  ROLE_QUERY="${REQ_AGENT:l}"
+elif [[ "$REQ_AGENT" =~ $KNOWN_ROLES_RE ]]; then
+  ROLE_QUERY="$REQ_AGENT"
 else
-  echo "❌ Role hoặc agent không hợp lệ: '$REQ_AGENT'. Hãy dùng role hợp lệ (dev, devops, critic, sec, qa, bench, re, ui, pr, issue) hoặc tên agent CLI." >&2
+  echo "❌ Role hoặc agent không hợp lệ: '$2'. Hãy dùng role hợp lệ (dev, devops, critic, sec, qa, bench, re, ui, pr, issue) hoặc tên agent CLI." >&2
   exit 1
 fi
 EFF_ROLE_QUERY="$ROLE_QUERY"
@@ -147,7 +170,7 @@ if [[ "$SPEC" != "[ROLE:"* ]]; then
       SPEC="[ROLE: PRINCIPAL QA/SDET] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) và 100% Acceptance Criteria. CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test; CẤM TUYỆT ĐỐI sửa business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót không quét pod DB/Kafka! GIAO TIẾP & BÁO CÁO COORDINATOR (BẮT BUỘC): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận nhánh/môi trường từ Coordinator và chạy git merge --no-edit main && git merge --no-edit dev-worker trước khi test, (2) Chạy lệnh test thật VÀ kiểm toán trực tiếp TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, (3) Nếu vướng môi trường phải hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json; nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs hay DB ➔ BẮT BUỘC trình ngay lên Coordinator bằng orca orchestration send --from <worker_handle> --type escalation --subject 'QA Runtime/Test Failure' --body '<Trích xuất log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt QA_VERDICT: FAIL!"
       ;;
     ui|ux|frontend|uispecialist|design)
-      SPEC="[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: CSS/DOM chuẩn xác, Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend core/DB schema. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Build/typecheck EXIT_CODE=0, không lỗi Console, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready' --body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit kèm Commit Hash."
+      SPEC="[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: CSS/DOM chuẩn xác, Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend core/DB schema. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Đồng bộ nhánh mới nhất (git merge --no-edit main), Build/typecheck EXIT_CODE=0, không lỗi Console, git commit kèm Commit Hash vào nhánh ui-worker, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready' --body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator."
       ;;
     bench|benchmark|perf|performance|benchspecialist)
       SPEC="[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và chạy git merge --no-edit main && git merge --no-edit dev-worker để đo trên code mới nhất, (2) Xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM; nếu phát hiện nghẽn cổ chai, gửi ngay orca orchestration send --from <worker_handle> --type escalation --subject 'Perf Bottleneck Found' --body '<file:line/query gây nghẽn trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND."
@@ -219,7 +242,7 @@ if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
     /^branch /   { br = substr($0, 8) }
     /^$/ {
       n = length(target)
-      if ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target)) { print wt; exit }
+      if ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target)) { print wt; wt = ""; br = ""; exit }
       wt = ""; br = ""
     }
     END {

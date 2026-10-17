@@ -91,7 +91,7 @@ Tình huống: Issue #42 đang được agent sửa dở dang thì bị Project 
 
 ```mermaid
 flowchart TD
-    ReassignEvent["Phát hiện Issue #42 được gán cho người khác (@developer_b)"] --> StopAgent["1. DỪNG AGENT NGAY LẬP TỨC\norca orchestration worker-stop\n(Tiết kiệm token & tránh conflict)"]
+    ReassignEvent["Phát hiện Issue #42 được gán cho người khác (@developer_b)"] --> StopAgent["1. DỪNG AGENT NGAY LẬP TỨC\norca orchestration worker-stop --dispatch <id>\n(Tiết kiệm token & tránh conflict)"]
     
     StopAgent --> AssessState{"Tiến độ hiện tại thế nào?"}
     
@@ -103,7 +103,7 @@ flowchart TD
     
     PostComment --> DirectRelease
     
-    DirectRelease --> Cleanup["3. GIẢI PHÓNG WORKTREE TRONG ORCA\n• orca orchestration worker-release\n• orca worktree rm --worktree active"]
+    DirectRelease --> Cleanup["3. GIẢI PHÓNG WORKTREE TRONG ORCA\n• orca orchestration worker-release --dispatch <id>\n• orca worktree rm --worktree active"]
     
     Cleanup --> ResumeMain["Leader quay lại tập trung 100% cho luồng Feature chính"]
 ```
@@ -116,7 +116,7 @@ Sử dụng agent chuyên biệt để checkout PR vào worktree riêng, chạy 
 
 ```mermaid
 flowchart LR
-    PROpen["Pull Request #123 được tạo"] --> CheckoutPR["orca worktree create --name review-pr-123 --pr 123 --agent $PR_AGENT"]
+    PROpen["Pull Request #123 được tạo"] --> CheckoutPR["orca worktree create --name review-pr-123 --pr 123 --no-parent --agent $PR_AGENT"]
     CheckoutPR --> RunCI["Chạy test suite nội bộ trong worktree PR"]
     RunCI --> DiffAudit["Soi diff chi tiết từng dòng qua Orca Annotate AI Diff"]
     DiffAudit --> Verdict{"Kết quả thẩm định"}
@@ -290,7 +290,7 @@ Khi phát hiện worker bị dừng, Leader phân tích chính xác bản chất
 
 3. **Toàn Bộ Nhà Cung Cấp Đồng Loạt Cạn Hạn Ngạch:**
    * Bảo toàn 100% mã nguồn trên Git Worktree con.
-   * Dừng an toàn mọi worker: `orca orchestration worker-stop`.
+   * Dừng an toàn mọi worker: `orca orchestration worker-stop --dispatch <id>`.
    * Báo cáo Human Gate lên giao diện chat để người dùng nạp thêm quota hoặc can thiệp.
 
 

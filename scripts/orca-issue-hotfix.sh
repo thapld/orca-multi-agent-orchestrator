@@ -4,7 +4,7 @@
 
 set -e
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" || $# -lt 1 ]]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
   echo "🐋 [Orca Hotfix] Mở hoặc tái sử dụng worktree xử lý GitHub Issue độc lập"
   echo "Sử dụng:"
   echo "  orca-hotfix <issue-number> [role|agent]"
@@ -15,23 +15,37 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" || $# -lt 1
   exit 0
 fi
 
+if [[ $# -lt 1 ]]; then
+  echo "❌ Thiếu số Issue. Sử dụng: orca-hotfix <issue-number> [role|agent]" >&2
+  exit 1
+fi
+if [[ $# -gt 2 ]]; then
+  echo "❌ Thừa tham số ($# tham số). Sử dụng: orca-hotfix <issue-number> [role|agent]" >&2
+  exit 1
+fi
+
 ISSUE_NUM="$1"
-if ! [[ "$ISSUE_NUM" =~ ^[0-9]+$ ]]; then
-  echo "❌ Số Issue phải là số nguyên dương (ví dụ: 42). Giá trị nhận được: '$ISSUE_NUM'"
+if ! [[ "$ISSUE_NUM" =~ ^[1-9][0-9]*$ ]]; then
+  echo "❌ Số Issue phải là số nguyên dương (ví dụ: 42). Giá trị nhận được: '$ISSUE_NUM'" >&2
   exit 1
 fi
 
 ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
 ROLE_OR_AGENT="${2:-issue}"
+ROLE_OR_AGENT="${ROLE_OR_AGENT:l}"
 KNOWN_AGENTS_RE='^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$'
-KNOWN_ROLES_RE='^(coord|coordinator|leader|orchestrator|dev|developer|coder|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|reviewer|issue|issueresolver|hotfix)$'
-if ! [[ "$ROLE_OR_AGENT" =~ $KNOWN_AGENTS_RE || "${ROLE_OR_AGENT:l}" =~ $KNOWN_ROLES_RE ]]; then
-  echo "❌ Role hoặc agent không hợp lệ: '$ROLE_OR_AGENT'. Hãy dùng role hợp lệ hoặc tên agent CLI." >&2
+KNOWN_ROLES_RE='^(coord|coordinator|leader|orchestrator|dev|developer|coder|doc|docs|fix|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|reviewer|issue|issueresolver|hotfix)$'
+if ! [[ "$ROLE_OR_AGENT" =~ $KNOWN_AGENTS_RE || "$ROLE_OR_AGENT" =~ $KNOWN_ROLES_RE ]]; then
+  echo "❌ Role hoặc agent không hợp lệ: '${2:-issue}'. Hãy dùng role hợp lệ hoặc tên agent CLI." >&2
   exit 1
 fi
 CONFIG_AGENT=""
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   CONFIG_AGENT=$("$ORCA_TEAM_BIN" get "$ROLE_OR_AGENT" 2>/dev/null || true)
+  if [[ "$CONFIG_AGENT" == "none" ]] && ! [[ "$ROLE_OR_AGENT" =~ $KNOWN_AGENTS_RE ]] && ! [[ "$ROLE_OR_AGENT" =~ ^(pr|prreviewer|reviewer|issue|issueresolver|hotfix)$ ]]; then
+    echo "❌ Vai trò '$ROLE_OR_AGENT' hiện đang tắt (disabled) trong orca-team.json. Hãy bật bằng: orca-team set $ROLE_OR_AGENT --enable" >&2
+    exit 1
+  fi
   if [[ -z "$CONFIG_AGENT" || "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
     CONFIG_AGENT=$("$ORCA_TEAM_BIN" get issue 2>/dev/null || true)
   fi
@@ -71,7 +85,7 @@ EXISTING_WT_PATH=$(git worktree list --porcelain 2>/dev/null | awk -v target="$W
   /^branch /   { br = substr($0, 8) }
   /^$/ {
     n = length(target)
-    if ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target)) { print wt; exit }
+    if ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target)) { print wt; wt = ""; br = ""; exit }
     wt = ""; br = ""
   }
   END {

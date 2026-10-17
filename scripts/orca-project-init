@@ -33,18 +33,62 @@ fi
 ACTION_UNINSTALL=false
 AUTO_YES=false
 SHOW_HELP=false
+FORCE_SELF=false
+PRESET_MODE=""
 PROJECT_DIR=""
 
-for arg in "$@"; do
+while [[ $# -gt 0 ]]; do
+  arg="$1"
   case "$arg" in
     -h|--help|help)
       SHOW_HELP=true
+      shift
       ;;
     -y|--yes|--force|-f)
       AUTO_YES=true
+      shift
+      ;;
+    --force-self)
+      FORCE_SELF=true
+      shift
       ;;
     -u|--uninstall|uninstall|--clean)
       ACTION_UNINSTALL=true
+      shift
+      ;;
+    --preset)
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo "❌ Thiếu giá trị cho cờ '--preset' (hỗ trợ: high, cost, balanced, minimal, full)." >&2
+        exit 1
+      fi
+      PRESET_MODE="${2:l}"
+      AUTO_YES=true
+      shift 2
+      ;;
+    --preset=*)
+      PRESET_MODE="${${arg#--preset=}:l}"
+      if [[ -z "$PRESET_MODE" || "$PRESET_MODE" == -* ]]; then
+        echo "❌ Thiếu giá trị cho cờ '--preset=' (hỗ trợ: high, cost, balanced, minimal, full)." >&2
+        exit 1
+      fi
+      AUTO_YES=true
+      shift
+      ;;
+    --path|-C)
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo "❌ Thiếu giá trị đường dẫn cho cờ '$arg'." >&2
+        exit 1
+      fi
+      PROJECT_DIR="$2"
+      shift 2
+      ;;
+    --path=*)
+      PROJECT_DIR="${arg#--path=}"
+      if [[ -z "$PROJECT_DIR" || "$PROJECT_DIR" == -* ]]; then
+        echo "❌ Thiếu giá trị đường dẫn cho cờ '--path='." >&2
+        exit 1
+      fi
+      shift
       ;;
     -*)
       echo "❌ Tùy chọn không hợp lệ: '$arg'. Chạy 'orca-project-init --help' để xem hướng dẫn." >&2
@@ -57,9 +101,15 @@ for arg in "$@"; do
         echo "❌ Quá nhiều tham số đường dẫn: '$arg'. Chỉ truyền 1 đường dẫn thư mục dự án." >&2
         exit 1
       fi
+      shift
       ;;
   esac
 done
+
+if [[ -n "$PRESET_MODE" ]] && ! [[ "$PRESET_MODE" =~ ^(high|cost|balanced|minimal|full)$ ]]; then
+  echo "❌ Preset không hợp lệ: '$PRESET_MODE'. Hỗ trợ: high, cost, balanced, minimal, full." >&2
+  exit 1
+fi
 
 PROJECT_DIR="${PROJECT_DIR:-.}"
 
@@ -69,9 +119,11 @@ if [[ "$SHOW_HELP" == true ]]; then
   echo "  orca-project-init [options] [/path/to/project]"
   echo ""
   echo "Tùy chọn:"
-  echo "  -y, --yes         Khởi tạo tự động với cấu hình khuyến nghị (không hỏi tương tác)"
-  echo "  -u, --uninstall   Gỡ bỏ cấu hình Orchestrator khỏi dự án"
-  echo "  -h, --help        Hiển thị hướng dẫn sử dụng"
+  echo "  -y, --yes               Khởi tạo tự động với cấu hình khuyến nghị (không hỏi tương tác)"
+  echo "  --preset <mode>         Chọn cấu hình preset nhanh: high, balanced, cost, minimal, full"
+  echo "  --path, -C <dir>        Chỉ định thư mục dự án đích"
+  echo "  -u, --uninstall         Gỡ bỏ cấu hình Orchestrator khỏi dự án"
+  echo "  -h, --help              Hiển thị hướng dẫn sử dụng"
   exit 0
 fi
 
@@ -102,6 +154,11 @@ if [[ "$ACTION_UNINSTALL" == true ]]; then
       echo "   Để gỡ bỏ các CLI khỏi máy: hãy chạy './uninstall.sh'."
       exit 1
     fi
+  fi
+
+  if [[ ! -f "$TARGET_PATH/orca-team.json" && ! -f "$TARGET_PATH/.agents/GEMINI.md" ]]; then
+    echo "ℹ️  Dự án '$TARGET_PATH' chưa được cấu hình Orca Orchestrator."
+    exit 0
   fi
 
   if [[ "$AUTO_YES" != true ]]; then
@@ -153,6 +210,13 @@ if [[ ! -t 0 && "$AUTO_YES" != true ]]; then
 fi
 
 PROJECT_PATH=$(cd "$PROJECT_DIR" && pwd)
+if [[ "$FORCE_SELF" != true && -d "$PROJECT_PATH/templates" && -f "$PROJECT_PATH/package.json" ]]; then
+  if grep -q '"name": *"orca-multi-agent-orchestrator"' "$PROJECT_PATH/package.json" 2>/dev/null; then
+    echo "🚫 Đây là thư mục gốc của bộ công cụ 'orca-multi-agent-orchestrator'." >&2
+    echo "   Không ghi đè cấu hình gốc của framework (truyền '--force-self' nếu bạn thực sự muốn tái tạo)." >&2
+    exit 1
+  fi
+fi
 AGENTS_DIR="$PROJECT_PATH/.agents"
 TARGET_RULE="$AGENTS_DIR/GEMINI.md"
 TARGET_CONFIG="$PROJECT_PATH/orca-team.json"
@@ -545,6 +609,17 @@ ask_toggle() {
   local feature_name="$1"
   local default_val="${2:-y}"
   if [[ "$AUTO_YES" == true ]]; then
+    if [[ "$PRESET_MODE" =~ ^(cost|minimal)$ ]]; then
+      default_val="n"
+    elif [[ "$PRESET_MODE" == "balanced" ]]; then
+      if [[ "$feature_name" == *"DevOps"* || "$feature_name" == *"Critic"* ]]; then
+        default_val="y"
+      else
+        default_val="n"
+      fi
+    elif [[ "$PRESET_MODE" =~ ^(high|full)$ ]]; then
+      default_val="y"
+    fi
     if [[ "$default_val" == "n" || "$default_val" == "N" ]]; then
       TOGGLE_RESULT=false
     else
@@ -1231,7 +1306,7 @@ if [[ -f "$GITIGNORE_FILE" ]]; then
     echo "   🛡️  Đã thêm cấu hình Orchestrator (.agents/, GEMINI.md, orca-team.json...) vào .gitignore."
   fi
 else
-  printf "%s\n" "$ORCA_IGNORE_BLOCK" > "$GITIGNORE_FILE"
+  printf "%s\n" "${ORCA_IGNORE_BLOCK#$'\n'}" > "$GITIGNORE_FILE"
   echo "   🛡️  Đã tạo .gitignore và thêm cấu hình Orchestrator."
 fi
 

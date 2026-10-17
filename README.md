@@ -118,14 +118,14 @@ Trong quá trình làm việc, nếu bạn muốn đổi sang model mạnh hơn 
 # 1. Xem đội hình và model hiện tại:
 orca-team status
 
-# 2. Đổi agent & model cho Developer (ví dụ sang Claude 3.5 Sonnet với reasoning high):
-orca-team set dev --agent claude --model claude-3-5-sonnet --effort high --concurrency 3
+# 2. Đổi agent & model cho Developer (ví dụ sang Claude Sonnet 4.6 với reasoning high):
+orca-team set dev --agent claude --model claude-sonnet-4-6 --effort high --concurrency 3
 
 # 3. Đổi agent cho QA & Tester:
 orca-team set qa --agent antigravity
 
 # 4. Đổi agent cho Security Auditor:
-orca-team set sec --agent codex --model gpt-4o
+orca-team set sec --agent codex --model gpt-5.3-codex --effort high
 
 # 5. Bật/tắt các vai trò mở rộng chuyên biệt (UI, DevOps, Bench, Reverse Eng, Critic):
 orca-team set ui --enable --agent claude

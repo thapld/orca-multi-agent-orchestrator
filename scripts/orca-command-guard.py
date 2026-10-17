@@ -140,11 +140,6 @@ def _looks_like_agent(args_str: str) -> bool:
     if not toks:
         return False
     exe = os.path.basename(toks[0]).lower()
-    low_all = args_str.lower()
-    if ".app/contents/macos/" in low_all:
-        app_name = low_all.split(".app/contents/macos/", 1)[0].rsplit("/", 1)[-1]
-        if any(m in app_name for m in ("orca", "antigravity", "electron", "claude", "cursor")):
-            return True
     if exe in INTERPRETERS or exe.startswith("python"):
         non_flag_args = [t for t in toks[1:5] if not t.startswith("-")]
         for raw_arg in non_flag_args[:2]:
@@ -166,19 +161,24 @@ def _looks_like_agent(args_str: str) -> bool:
             ):
                 return True
         return False
+    low_all = args_str.lower()
+    if ".app/contents/macos/" in low_all:
+        app_name = low_all.split(".app/contents/macos/", 1)[0].rsplit("/", 1)[-1]
+        if any(m in app_name for m in ("orca", "antigravity", "electron", "claude", "cursor")):
+            return True
     if exe.startswith("language_server"):
         return True
     return exe in AGENT_EXEC_NAMES
 
 
 _INTERP_INLINE_RE = re.compile(
-    r"(?:^|[\s;&|(])(?:\S*/)?(?P<interp>python3?(?:\.\d+)?|node|ruby|perl|bash|zsh|sh)"
-    r"(?P<opts>(?:\s+--?[a-zA-Z0-9_=.-]+)*)\s+(?P<flag>-(?:[a-zA-Z0-9]*[ce]|p)|--eval)(?:\s+|=)?\""
+    r"(?:^|[\s;&|(])(?:\S*/)?(?P<interp>python3?(?:\.\d+)?|node|bun|deno|ruby|perl|bash|zsh|sh|dash|ksh)"
+    r"(?P<opts>(?:\s+(?:-(?:W|X|r|C|I)\s+\S+|--?[a-zA-Z0-9_=./-]+))*)\s+(?P<flag>-(?:[a-zA-Z0-9]*[ce]|p)|--eval)(?:\s+|=)?\""
 )
 _UNQUOTED_HEREDOC_RE = re.compile(
     r"(?:^|[\s;&|(])(?:"
-    r"(?:\S*/)?(?:python3?(?:\.\d+)?|node|ruby|perl|bash|zsh|sh)\b[^\n<]*<<-?\s*(?P<delim>[A-Za-z_][A-Za-z0-9_-]*)[^\n]*\n|"
-    r"(?:\S*/)?(?:cat|tee)\b[^\n<|;&]*<<-?\s*(?P<delim2>[A-Za-z_][A-Za-z0-9_-]*)[^\n]*\|\s*(?:\S*/)?(?:python3?(?:\.\d+)?|node|ruby|perl|bash|zsh|sh)\b[^\n]*\n"
+    r"(?:\S*/)?(?:python3?(?:\.\d+)?|node|bun|deno|ruby|perl|bash|zsh|sh|dash|ksh)\b[^\n<]*<<-?\s*(?P<delim>[A-Za-z_][A-Za-z0-9_-]*)[^\n]*\n|"
+    r"(?:\S*/)?(?:cat|tee)\b[^\n<|;&]*<<-?\s*(?P<delim2>[A-Za-z_][A-Za-z0-9_-]*)[^\n]*\|\s*(?:\S*/)?(?:python3?(?:\.\d+)?|node|bun|deno|ruby|perl|bash|zsh|sh|dash|ksh)\b[^\n]*\n"
     r")"
 )
 _SAFE_TEXT_PATH_RE = re.compile(
@@ -191,9 +191,60 @@ _SAFE_TEXT_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _PROSE_FLAG_PREFIX_RE = re.compile(
-    r"(?:--(?:spec|body|question|objective|task-title|display-name|comment|resolution|result|subject|message|notes|title)|-m)(?:\s+|=)"
+    r"(?:--(?:spec|body|question|objective|task-title|display-name|comment|resolution|result|subject|message|notes|title|prompt|summary|description|reason)|-m)(?:\s+|=)"
 )
 _WHILE_TRUE_RE = re.compile(r"\bwhile\s*(?:\(\s*)?(?:True|1)(?:\s*\))?\s*:")
+
+
+def _find_single_quote_end(s: str, quote_idx: int) -> int:
+    """Find the closing "'" for s[quote_idx] == "'".
+    Standard single quotes ('...') have no backslash escapes; ANSI-C $'...' strings support \\ and \\'."""
+    if quote_idx > 0 and s[quote_idx - 1] == "$":
+        i = quote_idx + 1
+        n = len(s)
+        while i < n:
+            if s[i] == "\\":
+                i += 2
+                continue
+            if s[i] == "'":
+                return i
+            i += 1
+        return -1
+    return s.find("'", quote_idx + 1)
+
+
+def _match_shell_case_open(s: str, i: int) -> int:
+    """Return length of `case <word> in` if s[i:] opens a genuine shell `case` statement at command position
+    with a matching `esac` later in `s`, else 0."""
+    if i > 0 and (s[i - 1].isalnum() or s[i - 1] == "_"):
+        return 0
+    p = i - 1
+    while p >= 0 and s[p] in " \t":
+        p -= 1
+    if p >= 0 and s[p] not in "\n;(&|{":
+        if not re.search(r"(?:^|[\s;(&|{])(?:then|do|else|elif|if|while|until)$", s[: p + 1]):
+            return 0
+    m_case = re.match(r"case\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\S+)\s+in(?=$|[\s;)&|])", s[i:])
+    if not m_case:
+        return 0
+    if not re.search(r"(?:^|[\s;(&|{])esac(?=$|[\s;)&|\"'])", s[i + m_case.end() :]):
+        return 0
+    return m_case.end()
+
+
+def _match_shell_case_close(s: str, i: int) -> bool:
+    """Return True if s[i:] is a genuine shell `esac` token at command position."""
+    if i > 0 and (s[i - 1].isalnum() or s[i - 1] == "_"):
+        return False
+    if not re.match(r"esac(?=$|[\s;)&|\"'])", s[i:]):
+        return False
+    p = i - 1
+    while p >= 0 and s[p] in " \t":
+        p -= 1
+    if p >= 0 and s[p] not in "\n;(&|{":
+        if not re.search(r"(?:^|[\s;(&|{])in$", s[: p + 1]):
+            return False
+    return True
 
 
 def _find_double_quote_end(s: str, quote_idx: int) -> int:
@@ -219,7 +270,7 @@ def _find_double_quote_end(s: str, quote_idx: int) -> int:
                 continue
         else:  # top in ("cmd_sub", "case")
             if ch == "'":
-                end_sq = s.find("'", i + 1)
+                end_sq = _find_single_quote_end(s, i)
                 if end_sq == -1:
                     return -1
                 i = end_sq + 1
@@ -235,14 +286,14 @@ def _find_double_quote_end(s: str, quote_idx: int) -> int:
             elif ch == ")":
                 if top == "cmd_sub":
                     stack.pop()
-            elif ch == "c" and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] == "_")):
-                m_case = re.match(r"case\s+\S+\s+in(?![A-Za-z0-9_])", s[i:])
-                if m_case:
+            elif ch == "c":
+                case_len = _match_shell_case_open(s, i)
+                if case_len > 0:
                     stack.append("case")
-                    i += m_case.end()
+                    i += case_len
                     continue
-            elif top == "case" and ch == "e" and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] == "_")):
-                if re.match(r"esac(?![A-Za-z0-9_])", s[i:]):
+            elif top == "case" and ch == "e":
+                if _match_shell_case_close(s, i):
                     stack.pop()
                     i += 4
                     continue
@@ -277,7 +328,7 @@ def _strip_quoted_heredocs(cmd: str) -> str:
 
 
 def _blank_single_quotes(cmd: str) -> str:
-    """Blank out single-quoted literals and top-level comments while respecting double quotes and backslash escapes."""
+    """Blank out single-quoted literals (including $'...' ANSI-C strings) and top-level comments while respecting double quotes."""
     out: list[str] = []
     i = 0
     n = len(cmd)
@@ -294,14 +345,15 @@ def _blank_single_quotes(cmd: str) -> str:
             i = nl
             continue
         if ch == "'":
-            out.append("'")
-            i += 1
-            while i < n and cmd[i] != "'":
-                out.append(" ")
-                i += 1
-            if i < n:
+            end_sq = _find_single_quote_end(cmd, i)
+            if end_sq == -1:
                 out.append("'")
-                i += 1
+                out.append(" " * (n - i - 1))
+                break
+            out.append("'")
+            out.append(" " * (end_sq - i - 1))
+            out.append("'")
+            i = end_sq + 1
             continue
         if ch == '"':
             end_dq = _find_double_quote_end(cmd, i)
@@ -322,17 +374,10 @@ def _strip_single_quotes_and_quoted_heredocs(cmd: str) -> str:
     return _blank_single_quotes(_strip_quoted_heredocs(cmd))
 
 
-def _is_safe_orca_spec_substitution(dq_body: str) -> bool:
-    """Return True if dq_body has no unescaped shell expansion, or is purely a single `$(orca-team spec ...)` call
-    without unescaped backticks, extra command substitutions, or chained commands."""
-    if not dq_body:
-        return True
-    stripped = dq_body.strip()
-    if not re.search(r"(?<!\\)(?:\\\\)*(?:`|\$\()", stripped):
-        return True
-    if not re.match(r"^\$\(\s*(?:\S*/)?orca-team\s+spec\b", stripped) or not stripped.endswith(")"):
+def _is_safe_orca_spec_inner(inner: str) -> bool:
+    """Verify the interior of $(orca-team spec ...) has no unescaped backticks, nested $(), or command chaining."""
+    if not re.match(r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt)\b", inner):
         return False
-    inner = stripped[2:-1]
     i = 0
     n = len(inner)
     while i < n:
@@ -341,7 +386,7 @@ def _is_safe_orca_spec_substitution(dq_body: str) -> bool:
             i += 2
             continue
         if ch == "'":
-            end_sq = inner.find("'", i + 1)
+            end_sq = _find_single_quote_end(inner, i)
             if end_sq == -1:
                 return False
             i = end_sq + 1
@@ -350,7 +395,6 @@ def _is_safe_orca_spec_substitution(dq_body: str) -> bool:
             end_dq = _find_double_quote_end(inner, i)
             if end_dq == -1:
                 return False
-            # Inside inner "...", neither unescaped ` nor $( is safe in a static spec string
             sub_dq = inner[i + 1 : end_dq]
             j = 0
             while j < len(sub_dq):
@@ -363,32 +407,184 @@ def _is_safe_orca_spec_substitution(dq_body: str) -> bool:
                 j += 1
             i = end_dq + 1
             continue
-        # Outside quotes inside $(orca-team spec ...): forbid backticks, nested $(), subshells, or command chaining
         if ch in "`;&|\n()" or (ch == "$" and i + 1 < n and inner[i + 1] == "("):
             return False
         i += 1
     return True
 
 
+def _is_safe_orca_spec_substitution(dq_body: str) -> bool:
+    """Return True if dq_body has no unescaped shell expansion, or only contains safe `$(orca-team spec ...)`
+    substitutions (optionally surrounded by static prefix/suffix text) without unescaped backticks."""
+    if not dq_body:
+        return True
+    stripped = dq_body.strip()
+    if not re.search(r"(?<!\\)(?:\\\\)*(?:`|\$\()", stripped):
+        return True
+    i = 0
+    n = len(stripped)
+    while i < n:
+        ch = stripped[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "`":
+            return False
+        if ch == "$" and i + 1 < n and stripped[i + 1] == "(":
+            # Find matching ')' for this $(...) using _find_double_quote_end on a synthetic wrapper
+            synth = '"' + stripped[i:] + '"'
+            end_synth = _find_double_quote_end(synth, 0)
+            if end_synth == -1:
+                return False
+            # Scan inside stripped[i+2:] to find where this specific $(...) closes
+            k = i + 2
+            depth = 1
+            while k < n and depth > 0:
+                ck = stripped[k]
+                if ck == "\\":
+                    k += 2
+                    continue
+                if ck == "'":
+                    end_sq = _find_single_quote_end(stripped, k)
+                    if end_sq == -1:
+                        return False
+                    k = end_sq + 1
+                    continue
+                if ck == '"':
+                    end_dq = _find_double_quote_end(stripped, k)
+                    if end_dq == -1:
+                        return False
+                    k = end_dq + 1
+                    continue
+                if ck == "(":
+                    depth += 1
+                elif ck == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            if depth != 0:
+                return False
+            inner = stripped[i + 2 : k]
+            if not _is_safe_orca_spec_inner(inner):
+                return False
+            i = k + 1
+            continue
+        i += 1
+    return True
+
+
+def _strip_non_piped_cat_tee_heredocs(cmd: str) -> str:
+    """Scan top-level shell lines in order:
+    - Any heredoc (`python3 - << 'EOF'`, `cat << 'EOF'`, etc.) advances `i` past its closing delimiter line
+      so interior lines of `python3 - << 'EOF'` are never mistaken for top-level `cat << 'EOF'` commands.
+    - If a top-level command opening a QUOTED heredoc is `cat` or `tee` and is NOT piped (`|`) into another
+      command, strip the heredoc body while preserving any chained command (`;`, `&&`, `||`) on the header line."""
+    lines = cmd.splitlines(keepends=True)
+    out_lines: list[str] = []
+    i = 0
+    n = len(lines)
+    heredoc_open_re = re.compile(
+        r"<<-?\s*(?:(['\"])([A-Za-z_][A-Za-z0-9_-]*)\1|\\([A-Za-z_][A-Za-z0-9_-]*)|([A-Za-z_][A-Za-z0-9_-]*))"
+    )
+    while i < n:
+        line = lines[i]
+        if line.lstrip().startswith("#"):
+            out_lines.append(line)
+            i += 1
+            continue
+        # Strip any unquoted # comment from line before checking for <<
+        code_part = line
+        m_hd = heredoc_open_re.search(code_part)
+        if not m_hd:
+            out_lines.append(line)
+            i += 1
+            continue
+        # Ensure << is not inside a top-level # comment on the same line
+        pre_hd = code_part[: m_hd.start()]
+        if re.search(r"(?:^|[\s;(&|])#", pre_hd):
+            out_lines.append(line)
+            i += 1
+            continue
+        delim = m_hd.group(2) or m_hd.group(3) or m_hd.group(4)
+        is_quoted_delim = bool(m_hd.group(2) or m_hd.group(3))
+        end_idx = -1
+        for j in range(i + 1, n):
+            if lines[j].strip() == delim:
+                end_idx = j
+                break
+        if end_idx == -1:
+            out_lines.append(line)
+            i += 1
+            continue
+
+        # Check if the command opening this quoted heredoc is cat or tee
+        last_cmd_match = re.search(
+            r"(?:^|[;&|()])\s*(?:(?:sudo|env|command)\s+)*(?:(?:/usr)?/bin/)?(?:cat|tee)\b[^;&|()]*$",
+            pre_hd,
+        )
+        if is_quoted_delim and last_cmd_match:
+            after_hd = code_part[m_hd.end() :]
+            # Scan after_hd outside quotes to check for single pipe '|' vs chained ';', '&&', '||'
+            k = 0
+            na = len(after_hd)
+            is_piped = False
+            chain_pos = -1
+            while k < na:
+                ca = after_hd[k]
+                if ca == "\\":
+                    k += 2
+                    continue
+                if ca == "'":
+                    esq = _find_single_quote_end(after_hd, k)
+                    k = (esq + 1) if esq != -1 else na
+                    continue
+                if ca == '"':
+                    edq = _find_double_quote_end(after_hd, k)
+                    k = (edq + 1) if edq != -1 else na
+                    continue
+                if ca == "#" and (k == 0 or after_hd[k - 1] in " \t;(&|"):
+                    break
+                if ca == ";":
+                    chain_pos = k
+                    break
+                if ca == "&" and k + 1 < na and after_hd[k + 1] == "&":
+                    chain_pos = k
+                    break
+                if ca == "|":
+                    if k + 1 < na and after_hd[k + 1] == "|":
+                        chain_pos = k
+                        break
+                    is_piped = True
+                    break
+                k += 1
+
+            if not is_piped:
+                prefix_before_cat = pre_hd[: last_cmd_match.start()]
+                sep_char = last_cmd_match.group(0)[0] if last_cmd_match.group(0) and last_cmd_match.group(0)[0] in ";&|(" else ""
+                chained_suffix = after_hd[chain_pos:].rstrip("\r\n") if chain_pos != -1 else ""
+                replacement_line = (prefix_before_cat + sep_char + " " + chained_suffix).strip()
+                if replacement_line:
+                    out_lines.append(replacement_line + "\n")
+                i = end_idx + 1
+                continue
+
+        # Non-cat/tee heredoc (or piped cat/tee heredoc): keep entire heredoc block and advance past closing delim
+        out_lines.extend(lines[i : end_idx + 1])
+        i = end_idx + 1
+    return "".join(out_lines)
+
+
 def _strip_non_exec_prose_flags(cmd: str) -> str:
     """Strip non-executable prose flag values (--spec, --body, --question, -m, etc.),
-    top-level shell comments, and non-piped cat/tee quoted heredocs (`cat << 'EOF' > file`),
-    preserving any chained commands (`&&`, `;`, `||`) on the heredoc header line."""
-    cleaned = re.sub(
-        r"\b(?:cat|tee)\b[^\n<;|&]*<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"](?:[^\n|;&]|>&|&>)*((?:;|&&|\|\|)[^\n]*)?\n(?:.*?\n)?[ \t]*\1[ \t]*(?=\n|$)",
-        r"\2",
-        cmd,
-        flags=re.DOTALL,
-    )
-    cleaned = re.sub(
-        r"\b(?:cat|tee)\b[^\n<;|&]*<<-?\s*\\([A-Za-z_][A-Za-z0-9_-]*)(?:[^\n|;&]|>&|&>)*((?:;|&&|\|\|)[^\n]*)?\n(?:.*?\n)?[ \t]*\1[ \t]*(?=\n|$)",
-        r"\2",
-        cleaned,
-        flags=re.DOTALL,
-    )
+    direct `orca-team spec <role> '...'` task literals, top-level shell comments, and non-piped cat/tee quoted heredocs."""
+    cleaned = _strip_non_piped_cat_tee_heredocs(cmd)
     out: list[str] = []
     i = 0
     n = len(cleaned)
+    orca_spec_direct_re = re.compile(
+        r"(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt)(?:\s+(?:--role|-r)\s+\S+|\s+[a-zA-Z0-9_-]+)?(?:\s+(?:--task|-t))?\s+"
+    )
     while i < n:
         ch = cleaned[i]
         if ch == "\\":
@@ -402,7 +598,7 @@ def _strip_non_exec_prose_flags(cmd: str) -> str:
             i = nl
             continue
         if ch == "'":
-            end_sq = cleaned.find("'", i + 1)
+            end_sq = _find_single_quote_end(cleaned, i)
             if end_sq == -1:
                 out.append(cleaned[i:])
                 break
@@ -419,15 +615,23 @@ def _strip_non_exec_prose_flags(cmd: str) -> str:
             i = end_dq + 1
             continue
 
-        if i == 0 or cleaned[i - 1].isspace():
-            m = _PROSE_FLAG_PREFIX_RE.match(cleaned, i)
+        if i == 0 or cleaned[i - 1].isspace() or cleaned[i - 1] in ";(&|":
+            m = _PROSE_FLAG_PREFIX_RE.match(cleaned, i) or orca_spec_direct_re.match(cleaned, i)
             if m:
                 val_start = m.end()
-                if val_start < n and cleaned[val_start] == "'":
-                    # Consume single-quoted literal (and any adjacent '\'' continuations)
+                if val_start < n and (
+                    cleaned[val_start] == "'"
+                    or (cleaned[val_start] == "$" and val_start + 1 < n and cleaned[val_start + 1] == "'")
+                ):
+                    # Consume single-quoted or $'...' literal (and any adjacent '\'' continuations)
                     cur = val_start
-                    while cur < n and cleaned[cur] == "'":
-                        end_sq = cleaned.find("'", cur + 1)
+                    while cur < n:
+                        if cleaned[cur] == "$" and cur + 1 < n and cleaned[cur + 1] == "'":
+                            end_sq = _find_single_quote_end(cleaned, cur + 1)
+                        elif cleaned[cur] == "'":
+                            end_sq = _find_single_quote_end(cleaned, cur)
+                        else:
+                            break
                         if end_sq == -1:
                             cur = n
                             break
@@ -479,7 +683,7 @@ def _double_quoted_arg_has_backtick(cmd: str, start: int) -> bool:
                 continue
         else:  # top in ("cmd_sub", "case")
             if ch == "'":
-                end_sq = body.find("'", i + 1)
+                end_sq = _find_single_quote_end(body, i)
                 if end_sq == -1:
                     break
                 i = end_sq + 1
@@ -497,14 +701,14 @@ def _double_quoted_arg_has_backtick(cmd: str, start: int) -> bool:
             elif ch == ")":
                 if top == "cmd_sub":
                     stack.pop()
-            elif ch == "c" and (i == 0 or not (body[i - 1].isalnum() or body[i - 1] == "_")):
-                m_case = re.match(r"case\s+\S+\s+in(?![A-Za-z0-9_])", body[i:])
-                if m_case:
+            elif ch == "c":
+                case_len = _match_shell_case_open(body, i)
+                if case_len > 0:
                     stack.append("case")
-                    i += m_case.end()
+                    i += case_len
                     continue
-            elif top == "case" and ch == "e" and (i == 0 or not (body[i - 1].isalnum() or body[i - 1] == "_")):
-                if re.match(r"esac(?![A-Za-z0-9_])", body[i:]):
+            elif top == "case" and ch == "e":
+                if _match_shell_case_close(body, i):
                     stack.pop()
                     i += 4
                     continue
@@ -530,18 +734,22 @@ def _inline_script_backtick_risk(cmd: str) -> bool:
         body = body[: end.start()] if end else body
         if re.search(r"(?<!\\)(?:\\\\)*`", body):
             return True
-    # 2. Check single-quoted shell -c wrappers (e.g. `docker exec c sh -c 'python3 -c "x = `key`"'`)
+    # 2. Check single-quoted shell -c wrappers (including concatenated '\'' or '"'"' segments)
     for m in re.finditer(
-        r"(?:^|[\s;&|(])(?:\S*/)?(?:bash|zsh|sh)(?:\s+--?[a-zA-Z0-9_=.-]+)*\s+-[a-zA-Z0-9]*c(?:\s+|=)?'([^']*)'",
+        r"(?:^|[\s;&|(])(?:\S*/)?(?:bash|zsh|sh|dash|ksh)(?:\s+--?[a-zA-Z0-9_=.-]+)*\s+-[a-zA-Z0-9]*c(?:\s+|=)?((?:'[^']*'(?:\\'|\"'\"')?)+)",
         pre_sanitized,
     ):
-        if _inline_script_backtick_risk(m.group(1)):
+        raw_sq = m.group(1)
+        unquoted_sq = re.sub(r"'\\''|'\"'\"'", "'", raw_sq)
+        if len(unquoted_sq) >= 2 and unquoted_sq[0] == "'" and unquoted_sq[-1] == "'":
+            unquoted_sq = unquoted_sq[1:-1]
+        if _inline_script_backtick_risk(unquoted_sq):
             return True
 
     sanitized = _blank_single_quotes(pre_sanitized)
     for m in _INTERP_INLINE_RE.finditer(sanitized):
         interp, flag = m.group("interp"), m.group("flag")
-        if (interp in ("bash", "zsh", "sh") or interp.startswith("python")) and not flag.endswith("c"):
+        if (interp in ("bash", "zsh", "sh", "dash", "ksh") or interp.startswith("python")) and not flag.endswith("c"):
             continue  # -e = errexit cho shell, không phải inline script
         if _double_quoted_arg_has_backtick(sanitized, m.end() - 1):
             return True
@@ -575,22 +783,40 @@ def _strip_non_shell_quoted_heredocs(cmd: str) -> str:
 def _is_raw_binary_cat_risk(cmd: str) -> bool:
     """Detect unbounded `cat` of compiled container/system binaries while allowing text/script/config files."""
     sanitized = _strip_non_exec_prose_flags(cmd)
+    # 1a. List-form Python subprocess calls (`check_output(['docker', 'exec', 'c', 'cat', '/app/bin'])`)
     for m in re.finditer(
-        r"(?:check_output|subprocess\.(?:run|Popen))\([^)]*['\"]cat['\"]([^)\]]*)",
+        r"(?:check_output|subprocess\.(?:run|Popen))\([^)]*['\"](?:(?:/usr)?/bin/)?cat['\"]([^)\]]*)",
         sanitized,
     ):
         for path_m in re.finditer(r"['\"](/(?:app|usr|bin|sbin|opt)/[^'\"]+)['\"]", m.group(1)):
             if not _SAFE_TEXT_PATH_RE.search(path_m.group(1)):
                 return True
+    # 1b. String-form Python subprocess/popen calls (`check_output("docker exec c cat /app/bin", shell=True)`)
+    for m in re.finditer(
+        r"(?:check_output|getoutput|getstatusoutput|os\.popen|subprocess\.(?:run|Popen))\(\s*(['\"])(.*?)\1",
+        sanitized,
+        re.DOTALL,
+    ):
+        inner_cmd = m.group(2)
+        for cat_m in re.finditer(
+            r"\b(?:(?:/usr)?/bin/)?cat(?:\s+--?[a-zA-Z0-9_-]*)*\s+([^\n|>&;]+)",
+            inner_cmd,
+        ):
+            for raw_arg in cat_m.group(1).split():
+                arg = raw_arg.strip("'\"")
+                if re.match(r"^/(?:app|bin|sbin|opt|usr/bin|usr/sbin|usr/local/bin|usr/local/sbin)/", arg):
+                    if not _SAFE_TEXT_PATH_RE.search(arg):
+                        return True
+    # 2. Direct shell `docker exec ... cat /app/binary` (with optional quotes around path args)
     shell_sanitized = _strip_non_shell_quoted_heredocs(sanitized)
     for m in re.finditer(
         r"(?:^|[;&|()\n]|\b(?:sudo|env|time|nohup|command)\s+|-[a-zA-Z]*c\s+['\"])\s*"
-        r"docker\s+exec\s+[^\n|>&;]+?\bcat(?:\s+--?[a-zA-Z0-9_-]*)*((?:\s+[^\s|>&;\"')]+)+)"
+        r"docker\s+exec\s+[^\n|>&;]+?\b['\"]?(?:(?:/usr)?/bin/)?cat['\"]?(?:\s+--?[a-zA-Z0-9_-]*)*((?:\s+(?:['\"][^'\n\"|>&;]+['\"]|[^\s|>&;\"')]+))+)"
         r"(?:\s+2>(?:/dev/null|&1))*\s*(?:[\"')](?!\s*[,:])|\s*(?:;|&&|\|\|)|\s*$)",
         shell_sanitized,
         re.MULTILINE,
     ):
-        for raw_arg in m.group(1).split():
+        for raw_arg in re.findall(r"['\"][^'\n\"|>&;]+['\"]|[^\s|>&;\"')]+", m.group(1)):
             arg = raw_arg.strip("'\"")
             if re.match(r"^/(?:app|bin|sbin|opt|usr/bin|usr/sbin|usr/local/bin|usr/local/sbin)/", arg):
                 if not _SAFE_TEXT_PATH_RE.search(arg):
@@ -602,7 +828,7 @@ def _is_unbounded_find_loop_risk(cmd: str) -> bool:
     """Detect unbounded `while True:` / `while 1:` + `.find(` loops in inline/heredoc/piped Python scripts."""
     sanitized = _strip_non_exec_prose_flags(cmd)
     if not _WHILE_TRUE_RE.search(sanitized) or not re.search(
-        r"(?:\bpython3?(?:\.\d+)?(?:\s+--?[a-zA-Z0-9_=.-]+)*(?:\s+-[a-zA-Z0-9]*c\b|[^\n|;&]*<<)|\bpython3?(?:\.\d+)?\b[^\n|;&]*<<|\|\s*(?:\S*/)?python3?(?:\.\d+)?\b)",
+        r"(?:\bpython3?(?:\.\d+)?(?:\s+(?:-(?:W|X)\s+\S+|--?[a-zA-Z0-9_=.-]+))*(?:\s+-[a-zA-Z0-9]*c\b|[^\n|;&]*<<)|\bpython3?(?:\.\d+)?\b[^\n|;&]*<<|\|\s*(?:\S*/)?python3?(?:\.\d+)?\b)",
         sanitized,
     ):
         return False
@@ -633,15 +859,16 @@ def _is_unbounded_find_loop_risk(cmd: str) -> bool:
                             break
                     bounded_lines.append(ln)
         loop_body = "".join(bounded_lines)
-        # Also stop at chained shell commands outside Python (`&&`, `||`)
-        loop_body = re.split(r"\s+(?:&&|\|\|)\s+", loop_body, maxsplit=1)[0]
+        # Also stop at chained shell commands outside Python (`&&`, `||`, or `"` / `'` followed by `;`, `&&`, `||`)
+        loop_body = re.split(r"(?:\s+(?:&&|\|\|)\s+|['\"]\s*(?:;|&&|\|\|))", loop_body, maxsplit=1)[0]
         if ".find(" not in loop_body:
             continue
         if re.search(r"\bfor\s+[^:\n]+\s+in\s+range\s*\(", loop_body):
             continue
-        # Strip EOF-only sentinel breaks (`if idx == -1: break`, `if pos < 0: break`, `if idx >= len(data): break`)
+        # Strip EOF-only sentinel breaks (`if idx == -1: break`, `if pos < 0: break`, `if idx >= len(data): break`),
+        # without stripping compound bounded breaks like `if count >= 50 or idx == -1: break`
         cleaned_loop = re.sub(
-            r"if\s+[^:\n]+?(?:==\s*-1|<\s*0|is\s+None|>=\s*len\s*\([^)]*\))\s*:\s*break\b",
+            r"if\s+(?:(?!(?:\bor\b|\band\b))[^:\n])+?(?:==\s*-1|<=\s*-1|<\s*0|-1\s*==|is\s+None|>=\s*len\s*\([^)]*\))\s*:(?:[ \t]*#[^\n]*)?\s*break\b",
             "",
             loop_body,
         )
@@ -737,7 +964,10 @@ def _run_stream_filter() -> None:
                     utf8_carry = b""
                     total_wrapped += len(wrapped_tail)
                     if head_remaining > 0:
-                        emit = wrapped_tail[:head_remaining]
+                        split_at = _align_utf8_split(wrapped_tail, head_remaining)
+                        if split_at <= 0:
+                            split_at = head_remaining
+                        emit = wrapped_tail[:split_at]
                         stdout_fd.write(emit)
                         stdout_fd.flush()
                         head_emitted += len(emit)
@@ -1290,6 +1520,33 @@ def main() -> None:
 
     try:
         payload = _read_json_stdin_nonblocking()
+        is_claude_or_gemini_hook = (
+            isinstance(payload, dict)
+            and "tool_input" in payload
+            and "toolCall" not in payload
+            and "tool_call" not in payload
+        )
+        if is_claude_or_gemini_hook:
+            allow_out = "{}\n"
+
+        def _deny_json(reason_msg: str) -> str:
+            if is_claude_or_gemini_hook:
+                return (
+                    json.dumps(
+                        {
+                            "decision": "block",
+                            "reason": reason_msg,
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": reason_msg,
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            return json.dumps({"decision": "deny", "reason": reason_msg}) + "\n"
+
         tc = payload.get("toolCall") or payload.get("tool_call") or {}
         args = tc.get("args") or payload.get("tool_input") or {}
         cmd = str(args.get("CommandLine") or args.get("command") or "")
@@ -1309,7 +1566,7 @@ def main() -> None:
                 "(expanding `key` to an empty string b\"\" and causing infinite find() loops / 90MB stdout floods). "
                 "Fix: wrap the inline script in single quotes ('...'), escape the backticks (\\`), or write a script file to /tmp."
             )
-            sys.stdout.write(json.dumps({"decision": "deny", "reason": reason}) + "\n")
+            sys.stdout.write(_deny_json(reason))
             sys.stdout.flush()
             return
 
@@ -1320,7 +1577,7 @@ def main() -> None:
                 "Dumping multi-megabyte compiled binaries into stdout or check_output() hangs the Worker CLI. "
                 "Fix: use bounded queries (`strings /app/binary | grep -i ... | head -n 40`) or escalate to Coordinator to dispatch `re-worker`."
             )
-            sys.stdout.write(json.dumps({"decision": "deny", "reason": reason}) + "\n")
+            sys.stdout.write(_deny_json(reason))
             sys.stdout.flush()
             return
 
@@ -1331,7 +1588,7 @@ def main() -> None:
                 "If the target pattern is short or empty, 'while True: ... data.find()' loops millions of times and floods stdout. "
                 "Fix: replace 'while True:' with a bounded loop 'for _ in range(50):' so matches are safely capped at 50."
             )
-            sys.stdout.write(json.dumps({"decision": "deny", "reason": reason}) + "\n")
+            sys.stdout.write(_deny_json(reason))
             sys.stdout.flush()
             return
 

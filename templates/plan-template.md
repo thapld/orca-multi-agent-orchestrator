@@ -21,11 +21,23 @@
 
 ```mermaid
 graph LR
-    DevBackend["Task 1: Backend API (Dev A)"] --> QA["Task 3: Integration QA (QA Tester)"]
-    DevFrontend["Task 2: Frontend UI (Dev B)"] --> QA
-    QA --> Sec["Task 4: Security Audit"]
-    Sec --> Release["Task 5: Final Review & Merge"]
+    Critic["Task 0: Critic Investigation (critic-worker)"] --> DevBackend["Task 1: Backend API (dev-worker)"]
+    Critic --> DevOps["Task 2: Infra / Migration (devops-worker)"]
+    DevBackend --> QA["Task 4: Integration QA (qa-worker)"]
+    DevFrontend["Task 3: Frontend UI (ui-worker)"] --> QA
+    DevOps --> QA
+    QA --> Sec["Task 5: Security Audit (sec-worker)"]
+    QA --> Bench["Task 6: Perf Benchmark (bench-worker)"]
+    Sec --> Release["Human Gate & Merge"]
+    Bench --> Release
 ```
+
+### Task 0: Research & Adversarial Critic (Khi chạm Trigger Anti-Autocracy)
+* **Worker đảm nhiệm:** Research & Adversarial Critic (`critic-worker` — Read-Only 100%)
+* **Worktree định danh:** `critic-worker` (tái sử dụng `path:.../critic-worker` & gom nhóm Terminal Tab)
+* **Nhiệm vụ cụ thể:**
+  - Lập giả thuyết độc lập từ bằng chứng thô trước khi đọc giả thuyết của Leader...
+  - Tranh biện hai chiều qua `orca orchestration ask` / `reply` (tối đa 3 vòng) và chốt `CRITIC_VERDICT: CONSENSUS_REACHED` hoặc `HYPOTHESIS_CHALLENGED`...
 
 ### Task 1: Backend Service & API Logic
 * **Worker đảm nhiệm:** Full-Stack Dev (`antigravity` / `claude`)
@@ -33,35 +45,49 @@ graph LR
 * **Nhiệm vụ cụ thể:**
   - Viết logic xử lý nghiệp vụ...
   - Viết Unit test với độ bao phủ > 90%...
-* **Acceptance Criteria:** Unit tests pass 100%, 0 lint error.
+* **Acceptance Criteria:** Unit tests pass 100%, 0 lint error, gửi `handoff` kèm Commit Hash.
 
-### Task 2: Frontend Component & State Management
-* **Worker đảm nhiệm:** UI/UX Specialist (`antigravity` / `claude`)
+### Task 2: Infrastructure, Docker/K8s & DB Migration (Nếu có)
+* **Worker đảm nhiệm:** DevOps / SRE Specialist (`devops-worker`)
+* **Worktree định danh:** `devops-worker` (tái sử dụng `path:.../devops-worker` & gom nhóm Terminal Tab)
+* **Nhiệm vụ cụ thể:**
+  - Cập nhật Dockerfile multi-stage / K8s probes / DB migration idempotent...
+  - Quét 100% Runtime Logs trên toàn bộ container/pod sau chu kỳ chạy thật...
+* **Acceptance Criteria:** Build & rollout sạch, Runtime Logs không có ERROR/Exception/FATAL.
+
+### Task 3: Frontend Component & State Management (Nếu có)
+* **Worker đảm nhiệm:** UI/UX Specialist (`ui-worker`)
 * **Worktree định danh:** `ui-worker` (tái sử dụng `path:.../ui-worker` & gom nhóm Terminal Tab)
 * **Nhiệm vụ cụ thể:**
-  - Tạo Component giao diện...
+  - Tạo Component giao diện chuẩn Responsive & a11y...
   - Sử dụng Orca Design Mode để căn chỉnh CSS chuẩn mockup...
-* **Acceptance Criteria:** Render mượt mà, không lỗi console.
+* **Acceptance Criteria:** Render mượt mà, không lỗi console, gửi `handoff` kèm Commit Hash.
 
-### Task 3: Integration & E2E Testing
-* **Worker đảm nhiệm:** QA Tester (`antigravity` / `kimi`)
+### Task 4: Integration & E2E Testing
+* **Worker đảm nhiệm:** QA Tester (`qa-worker`)
 * **Worktree định danh:** `qa-worker` (tái sử dụng `path:.../qa-worker` & gom nhóm Terminal Tab)
-* **Phụ thuộc (Depends on):** Task 1, Task 2
+* **Phụ thuộc (Depends on):** Task 1, Task 2, Task 3
 * **Nhiệm vụ cụ thể:**
-  - Viết kịch bản test tích hợp kết nối Frontend & Backend...
-  - Kiểm tra các ca biên: timeout, dữ liệu sai định dạng, spam request...
-* **Acceptance Criteria:** Toàn bộ integration test suite pass.
+  - Viết kịch bản test tích hợp kết nối Frontend & Backend & kiểm toán Runtime Logs...
+  - Kiểm tra các ca biên: timeout, dữ liệu sai định dạng, race condition...
+* **Acceptance Criteria:** Toàn bộ integration test suite pass (`QA_VERDICT: PASS`).
 
-### Task 4: Security Audit & Code Review
-* **Worker đảm nhiệm:** Security Auditor (`antigravity` / `claude`)
+### Task 5: Security Audit & Code Review
+* **Worker đảm nhiệm:** Security Auditor (`sec-worker`)
 * **Worktree định danh:** `sec-worker` (tái sử dụng `path:.../sec-worker` & gom nhóm Terminal Tab)
 * **Nhiệm vụ cụ thể:**
-  - Rà soát OWASP Top 10, Auth/RBAC, rò rỉ secret...
-* **Acceptance Criteria:** 0 cảnh báo mức High / Critical.
+  - Rà soát OWASP Top 10, Auth/RBAC, Concurrency, Memory/Secret Leaks...
+* **Acceptance Criteria:** 0 cảnh báo mức High / Critical (`SECURITY_VERDICT: PASS`).
+
+### Task 6: Performance Benchmark & Reverse Engineering (Tùy chọn theo bài toán)
+* **Worker đảm nhiệm:** Benchmark Specialist (`bench-worker`) / Reverse Engineer (`re-worker`)
+* **Nhiệm vụ cụ thể:**
+  - `bench-worker`: Đo Throughput (RPS/EPS), Latency (p50/p95/p99), chốt `PERF_VERDICT: PASS`.
+  - `re-worker`: Dịch ngược binary/artifact hộp đen bằng `morluto/rea`, xuất Clean-Room Spec (`RE_VERDICT: EVIDENCE_COMPLETE`).
 
 ---
 
 ## 3. Cổng Duyệt Của Người Dùng (Human-in-the-Loop Sign-off)
 
-- [ ] Người dùng đã xem và phê duyệt bản kế hoạch này: **[Chờ duyệt / Đã duyệt]**
-*(Chỉ khi người dùng duyệt, Lead mới bắt đầu gọi lệnh `worker-start` để triển khai)*
+- [ ] Người dùng đã xem và phê duyệt qua `orca orchestration gate-create`: **[Chờ duyệt / Đã duyệt]**
+*(Chỉ khi người dùng phản hồi `"yes"`, Lead mới đóng Gate, merge vào nhánh chính và gọi `worker-release`)*
