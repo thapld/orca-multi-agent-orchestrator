@@ -12,6 +12,7 @@ Usage:
   orca-team get <role> [--field agent|model|effort|concurrency|goal]
   orca-team spec <role> "<task-description>"
   orca-team worktree-arg <role> [--slot-only] [--no-reserve] [--release] [--json]
+  orca-team release-workers [--run <RUN_ID>] [--worktree <SLOT>] [--quiet] [--json]
   orca-team link [all|clean|status]
   orca-team watchdog [--unblock]
   orca-team monitor [--fix] [--verbose]
@@ -400,17 +401,498 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_o
     return rendered
 
 
+def release_settled_worker_terminals(
+    root: Path,
+    run_id: str = "",
+    after_dispatch_ids: list = None,
+    target_worktree_name: str = "",
+    ignore_reserved_slot: str = "",
+    sweep_idle_worktrees: bool = True,
+) -> dict:
+    """
+    Giải phóng triệt để các Worker Dispatches đã hoàn tất (succeeded/failed/stopped/abandoned)
+    qua `orca orchestration worker-release` (để lưu trữ terminal archive trong SQLite),
+    đồng thời đóng dứt điểm các Terminal Tabs cũ (`state=done`, `user_takeover`, `stopped`, hoặc `Terminal 1`)
+    trên các worker worktrees đang rảnh qua `orca terminal close --terminal <handle> --json`.
+    Tuyệt đối bảo vệ:
+    - Worktree chính (`main_root`) và mọi `coordinator_handle` của các Leader.
+    - Mọi worker đang chạy (`working`/`ready`/`starting`/`running`/`stopping`/`active`).
+    - Mọi worker đang `retained` thuộc một Run khác vẫn còn đang chạy dở (Multi-Leader safety).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import subprocess
+    import time
+
+    base_dir = (root or find_project_root() or Path.cwd()).resolve()
+    main_root = base_dir
+    repo_wt_paths = {}
+    try:
+        wt_res = subprocess.run(
+            ["git", "-C", str(base_dir), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=4,
+        )
+        if wt_res.returncode == 0 and wt_res.stdout:
+            cur_wt = ""
+            cur_br = ""
+            first_seen = False
+            for ln in wt_res.stdout.splitlines() + [""]:
+                if ln.startswith("worktree "):
+                    cur_wt = ln[9:].strip()
+                    if not first_seen and cur_wt:
+                        first_seen = True
+                        try:
+                            main_root = Path(cur_wt).resolve()
+                        except Exception:
+                            main_root = Path(cur_wt)
+                elif ln.startswith("branch "):
+                    cur_br = ln[7:].strip()
+                elif not ln.strip() and cur_wt:
+                    try:
+                        wt_p = Path(cur_wt).resolve()
+                    except Exception:
+                        wt_p = Path(cur_wt)
+                    if wt_p != main_root and wt_p.is_dir():
+                        repo_wt_paths[wt_p.name] = str(wt_p)
+                        if cur_br.startswith("refs/heads/"):
+                            br_short = cur_br[len("refs/heads/"):]
+                            if br_short:
+                                repo_wt_paths.setdefault(br_short, str(wt_p))
+                    cur_wt = ""
+                    cur_br = ""
+    except Exception:
+        pass
+
+    main_root_str = str(main_root)
+    repo_path_set = set(repo_wt_paths.values())
+    env = _build_discovery_env()
+    orca_bin = _find_cli_binary(["orca"], env) or "/usr/local/bin/orca"
+    if not os.path.exists(orca_bin):
+        return {
+            "mainRoot": main_root_str,
+            "releasedDispatches": [],
+            "closedTerminals": [],
+            "busySlots": [],
+        }
+
+    # 1. Lấy danh sách toàn bộ Terminal đang mở trong Orca
+    open_by_handle = {}
+    try:
+        tl_proc = subprocess.run(
+            [orca_bin, "terminal", "list", "--json"],
+            capture_output=True, text=True, env=env, timeout=4,
+        )
+        if tl_proc.returncode == 0 and tl_proc.stdout.strip():
+            tl_data = json.loads(tl_proc.stdout)
+            tl_res = tl_data.get("result") if isinstance(tl_data, dict) else {}
+            for t_obj in (tl_res.get("terminals") if isinstance(tl_res, dict) else None) or []:
+                if isinstance(t_obj, dict) and t_obj.get("handle"):
+                    open_by_handle[str(t_obj["handle"])] = t_obj
+    except Exception:
+        pass
+
+    # Fast-path cho pre-dispatch cleanup trên 1 slot đơn lẻ: nếu slot đó không có terminal nào đang mở thì thoát ngay (0ms)
+    if target_worktree_name:
+        target_wt_path = repo_wt_paths.get(target_worktree_name, "")
+        has_open_in_slot = False
+        for t_obj in open_by_handle.values():
+            raw_tp = str(t_obj.get("worktreePath") or "").strip()
+            if not raw_tp:
+                continue
+            try:
+                norm_tp = str(Path(raw_tp).resolve())
+            except Exception:
+                norm_tp = raw_tp
+            if Path(norm_tp).name == target_worktree_name and (norm_tp == target_wt_path or norm_tp in repo_path_set):
+                has_open_in_slot = True
+                break
+        if not has_open_in_slot:
+            return {
+                "mainRoot": main_root_str,
+                "targetSlot": target_worktree_name,
+                "releasedDispatches": [],
+                "closedTerminals": [],
+                "busySlots": [],
+            }
+
+    # 2. Kiểm tra trạng thái bận/rảnh qua `orca worktree ps --json` và slot-reservations
+    busy_slots = set()
+    protected_handles = set()
+    try:
+        ps_proc = subprocess.run(
+            [orca_bin, "worktree", "ps", "--json"],
+            capture_output=True, text=True, env=env, timeout=4,
+        )
+        if ps_proc.returncode == 0 and ps_proc.stdout.strip():
+            ps_data = json.loads(ps_proc.stdout)
+            ps_res = ps_data.get("result") if isinstance(ps_data, dict) else {}
+            for wt_obj in (ps_res.get("worktrees") if isinstance(ps_res, dict) else None) or []:
+                if not isinstance(wt_obj, dict):
+                    continue
+                raw_p = str(wt_obj.get("path") or "").strip()
+                norm_p = ""
+                if raw_p:
+                    try:
+                        norm_p = str(Path(raw_p).resolve())
+                    except Exception:
+                        norm_p = raw_p
+                parent_id = str(wt_obj.get("parentWorktreeId") or "").strip()
+                parent_p = parent_id.split("::", 1)[1] if "::" in parent_id else parent_id
+                if parent_p:
+                    try:
+                        parent_p = str(Path(parent_p).resolve())
+                    except Exception:
+                        pass
+                belongs = (
+                    norm_p == main_root_str
+                    or (norm_p and norm_p in repo_path_set)
+                    or (raw_p and raw_p in repo_path_set)
+                    or (parent_p and parent_p == main_root_str)
+                )
+                if not belongs:
+                    continue
+                s_name = Path(norm_p or raw_p).name if (norm_p or raw_p) else str(wt_obj.get("displayName") or "").strip()
+                if norm_p and norm_p != main_root_str and Path(norm_p).is_dir():
+                    repo_wt_paths.setdefault(s_name, norm_p)
+                    repo_path_set.add(norm_p)
+                if norm_p == main_root_str or wt_obj.get("isMainWorktree"):
+                    continue
+                wt_st = str(wt_obj.get("status") or "").strip().lower()
+                agents_list = wt_obj.get("agents") if isinstance(wt_obj.get("agents"), list) else []
+                has_busy_ag = False
+                for ag_item in agents_list:
+                    if not isinstance(ag_item, dict):
+                        continue
+                    ag_st = str(ag_item.get("state") or "").strip().lower()
+                    if ag_st and ag_st not in ("done", "exited", "stopped", "failed", "cancelled", "canceled", "idle", "settled", "released"):
+                        has_busy_ag = True
+                if wt_st in ("working", "running", "busy", "starting") or has_busy_ag:
+                    busy_slots.add(s_name)
+    except Exception:
+        pass
+
+    res_path = main_root / ".orca-cache" / "slot-reservations.json"
+    now = time.time()
+    if res_path.is_file():
+        try:
+            raw_res = json.loads(res_path.read_text(encoding="utf-8", errors="ignore"))
+            if isinstance(raw_res, dict):
+                for s_key, r_ts in raw_res.items():
+                    if s_key == ignore_reserved_slot:
+                        continue
+                    if isinstance(r_ts, (int, float)) and (now - float(r_ts)) < 45.0:
+                        busy_slots.add(str(s_key))
+        except Exception:
+            pass
+
+    if target_worktree_name and target_worktree_name in busy_slots:
+        return {
+            "mainRoot": main_root_str,
+            "targetSlot": target_worktree_name,
+            "releasedDispatches": [],
+            "closedTerminals": [],
+            "busySlots": sorted(busy_slots),
+            "skippedBusy": True,
+        }
+
+    # Bảo vệ toàn bộ terminal thuộc main_root (Leader/User shells)
+    repo_worker_terminals = {}
+    for h_id, t_obj in open_by_handle.items():
+        raw_tp = str(t_obj.get("worktreePath") or "").strip()
+        if not raw_tp:
+            continue
+        try:
+            norm_tp = str(Path(raw_tp).resolve())
+        except Exception:
+            norm_tp = raw_tp
+        if norm_tp == main_root_str:
+            protected_handles.add(h_id)
+        elif norm_tp in repo_path_set or raw_tp in repo_path_set:
+            s_name = Path(norm_tp).name
+            repo_worker_terminals.setdefault(s_name, []).append(t_obj)
+
+    # 3. Duyệt danh sách Runs & Workers để xác định các dispatches cần release và các handles cần bảo vệ
+    runs_list = []
+    try:
+        rl_proc = subprocess.run(
+            [orca_bin, "orchestration", "run-list", "--json"],
+            capture_output=True, text=True, env=env, timeout=4,
+        )
+        if rl_proc.returncode == 0 and rl_proc.stdout.strip():
+            rl_data = json.loads(rl_proc.stdout)
+            runs_list = (rl_data.get("result") or {}).get("runs") or []
+    except Exception:
+        runs_list = []
+
+    run_ids_to_inspect = []
+    seen_rids = set()
+    if run_id and run_id.strip():
+        run_ids_to_inspect.append(run_id.strip())
+        seen_rids.add(run_id.strip())
+    for r_obj in runs_list:
+        if not isinstance(r_obj, dict):
+            continue
+        ch = str(r_obj.get("coordinator_handle") or "").strip()
+        if ch:
+            protected_handles.add(ch)
+        rid = str(r_obj.get("id") or "").strip()
+        if rid and rid not in seen_rids and len(run_ids_to_inspect) < 15:
+            run_ids_to_inspect.append(rid)
+            seen_rids.add(rid)
+
+    def _fetch_run_workers(rid_val: str):
+        try:
+            wp = subprocess.run(
+                [orca_bin, "orchestration", "worker-list", "--run", rid_val, "--json"],
+                capture_output=True, text=True, env=env, timeout=4,
+            )
+            if wp.returncode == 0 and wp.stdout.strip():
+                w_arr = (json.loads(wp.stdout).get("result") or {}).get("workers") or []
+                return rid_val, w_arr
+        except Exception:
+            pass
+        return rid_val, []
+
+    workers_by_run = {}
+    if run_ids_to_inspect:
+        with ThreadPoolExecutor(max_workers=min(6, len(run_ids_to_inspect))) as pool:
+            for rid_k, w_arr in pool.map(_fetch_run_workers, run_ids_to_inspect):
+                workers_by_run[rid_k] = w_arr
+
+    run_has_active = {}
+    repo_runs = set()
+    all_settled_records = []
+
+    for rid_k, w_arr in workers_by_run.items():
+        for w in w_arr:
+            if not isinstance(w, dict):
+                continue
+            res_obj = w.get("resource") if isinstance(w.get("resource"), dict) else {}
+            ws_id = str(res_obj.get("worktreeId") or w.get("worktreeId") or "").strip()
+            wt_part = ws_id.split("::", 1)[1] if "::" in ws_id else ws_id
+            norm_wt_part = ""
+            if wt_part:
+                try:
+                    norm_wt_part = str(Path(wt_part).resolve())
+                except Exception:
+                    norm_wt_part = wt_part
+            belongs_to_repo = (
+                (norm_wt_part and norm_wt_part in repo_path_set)
+                or (wt_part and wt_part in repo_path_set)
+                or (norm_wt_part and norm_wt_part.startswith(f"/Users/{os.environ.get('USER', 'macbook')}/orca/workspaces/{main_root.name}/"))
+                or (rid_k == run_id)
+            )
+            if not belongs_to_repo:
+                continue
+            repo_runs.add(rid_k)
+            s_name = Path(norm_wt_part or wt_part).name if (norm_wt_part or wt_part) else ""
+            wstate = str(w.get("workerState") or w.get("state") or "").strip().lower()
+            dstate = str(w.get("dispatchStatus") or "").strip().lower()
+            tstate = str(w.get("terminalState") or res_obj.get("terminalState") or "").strip().lower()
+            handle = str(w.get("agentTerminalHandle") or res_obj.get("terminalHandle") or "").strip()
+            did = str(w.get("dispatchId") or "").strip()
+            is_settled = (
+                wstate in ("succeeded", "failed", "stopped", "abandoned", "circuit_broken", "timed_out", "completed", "cancelled", "canceled")
+                or dstate in ("succeeded", "failed", "stopped", "completed", "cancelled", "canceled", "circuit_broken")
+            )
+            if not is_settled or tstate == "active":
+                run_has_active[rid_k] = True
+                if handle:
+                    protected_handles.add(handle)
+                if s_name:
+                    busy_slots.add(s_name)
+            else:
+                all_settled_records.append({
+                    "runId": rid_k,
+                    "dispatchId": did,
+                    "slot": s_name,
+                    "workerState": wstate,
+                    "terminalState": tstate,
+                    "handle": handle,
+                })
+
+    after_set = {str(x).strip() for x in (after_dispatch_ids or []) if str(x).strip()}
+    owner_runs_of_after = {rec["runId"] for rec in all_settled_records if rec["dispatchId"] in after_set}
+
+    # Nếu không truyền run_id và không truyền target_worktree_name / after_dispatch_ids:
+    # tự động chọn Run gần nhất thuộc repo mà đã settled toàn bộ
+    effective_run_id = run_id.strip() if run_id else ""
+    if not effective_run_id and not target_worktree_name and not after_set:
+        for rid_cand in run_ids_to_inspect:
+            if rid_cand in repo_runs and not run_has_active.get(rid_cand):
+                effective_run_id = rid_cand
+                break
+
+    # Bảo vệ các worker đang `retained` của một Run khác vẫn đang chạy dở (Multi-Leader Step 3 protection)
+    active_run_retained_slots = set()
+    for rec in all_settled_records:
+        r_k = rec["runId"]
+        if run_has_active.get(r_k) and r_k != effective_run_id and rec["dispatchId"] not in after_set:
+            if not target_worktree_name or rec["slot"] != target_worktree_name:
+                if rec["handle"]:
+                    protected_handles.add(rec["handle"])
+                if rec["slot"]:
+                    active_run_retained_slots.add(rec["slot"])
+
+    # Nếu được gọi tự động sau `worker-release --dispatch <id>` mà Run chứa <id> vẫn còn worker khác đang chạy:
+    # chỉ giải phóng/đóng đúng <id> đó, không quét rộng các worker khác trong Run đang chạy
+    if after_set and any(run_has_active.get(orid) for orid in owner_runs_of_after):
+        sweep_idle_worktrees = False
+
+    dispatches_to_release = []
+    seen_dids = set()
+    targeted_handles = set()
+
+    for rec in all_settled_records:
+        did = rec["dispatchId"]
+        if not did or did in seen_dids:
+            continue
+        slot_k = rec["slot"]
+        r_k = rec["runId"]
+        h_k = rec["handle"]
+        t_st = rec["terminalState"]
+
+        if target_worktree_name:
+            if slot_k != target_worktree_name:
+                continue
+            should_target = (t_st != "released") or (h_k and h_k in open_by_handle)
+        elif after_set:
+            in_finished_owner_run = (r_k in owner_runs_of_after and not run_has_active.get(r_k))
+            in_other_finished_open = (not run_has_active.get(r_k) and sweep_idle_worktrees and h_k and h_k in open_by_handle)
+            should_target = (did in after_set) or in_finished_owner_run or in_other_finished_open
+        else:
+            in_target_run = bool(effective_run_id and r_k == effective_run_id)
+            in_finished_open = (not run_has_active.get(r_k) and h_k and h_k in open_by_handle)
+            should_target = in_target_run or in_finished_open
+
+        if not should_target:
+            continue
+
+        seen_dids.add(did)
+        if h_k and h_k not in protected_handles:
+            targeted_handles.add(h_k)
+        if t_st != "released":
+            dispatches_to_release.append(did)
+
+    released_results = []
+    if dispatches_to_release:
+        def _release_one(d_id: str):
+            try:
+                rp = subprocess.run(
+                    [orca_bin, "orchestration", "worker-release", "--dispatch", d_id, "--json"],
+                    capture_output=True, text=True, env=env, timeout=8,
+                )
+                if rp.returncode == 0 and rp.stdout.strip():
+                    st_val = ((json.loads(rp.stdout).get("result") or {}).get("state") or "released")
+                    return {"dispatchId": d_id, "state": st_val}
+            except Exception:
+                pass
+            return {"dispatchId": d_id, "state": "error"}
+
+        with ThreadPoolExecutor(max_workers=min(6, len(dispatches_to_release))) as pool:
+            for res_item in pool.map(_release_one, dispatches_to_release):
+                released_results.append(res_item)
+
+    # 4. Kiểm tra lại danh sách terminal đang mở và đóng dứt điểm các tab worker cũ còn sót
+    still_open_by_handle = {}
+    try:
+        tl2_proc = subprocess.run(
+            [orca_bin, "terminal", "list", "--json"],
+            capture_output=True, text=True, env=env, timeout=4,
+        )
+        if tl2_proc.returncode == 0 and tl2_proc.stdout.strip():
+            tl2_data = json.loads(tl2_proc.stdout)
+            tl2_res = tl2_data.get("result") if isinstance(tl2_data, dict) else {}
+            for t_obj in (tl2_res.get("terminals") if isinstance(tl2_res, dict) else None) or []:
+                if isinstance(t_obj, dict) and t_obj.get("handle"):
+                    still_open_by_handle[str(t_obj["handle"])] = t_obj
+    except Exception:
+        still_open_by_handle = open_by_handle
+
+    handles_to_close = []
+    seen_close_handles = set()
+
+    # 4a. Đóng các terminal của dispatches đã settled nhưng `worker-release` không tự đóng được (do user_takeover / stopped)
+    for h_id in targeted_handles:
+        if h_id in still_open_by_handle and h_id not in protected_handles and h_id not in seen_close_handles:
+            t_meta = still_open_by_handle[h_id]
+            s_name = Path(str(t_meta.get("worktreePath") or "")).name
+            # Chỉ đóng nếu worktree không có agent đang active hoặc nếu chính handle này là của dispatch cũ đã settled
+            handles_to_close.append((h_id, s_name, str(t_meta.get("title") or "")))
+            seen_close_handles.add(h_id)
+
+    # 4b. Quét dọn các tab mồ côi (`Terminal 1` hoặc `worker-task_*` cũ) trên các worker worktrees đang hoàn toàn rảnh
+    worker_slot_pattern = re.compile(r"^(?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix)-worker(?:-\d+)?$")
+    for h_id, t_meta in still_open_by_handle.items():
+        if h_id in protected_handles or h_id in seen_close_handles:
+            continue
+        raw_tp = str(t_meta.get("worktreePath") or "").strip()
+        if not raw_tp:
+            continue
+        try:
+            norm_tp = str(Path(raw_tp).resolve())
+        except Exception:
+            norm_tp = raw_tp
+        if norm_tp == main_root_str:
+            continue
+        if norm_tp not in repo_path_set and raw_tp not in repo_path_set:
+            continue
+        s_name = Path(norm_tp).name
+        if target_worktree_name:
+            if s_name != target_worktree_name or s_name in busy_slots:
+                continue
+        else:
+            if not sweep_idle_worktrees:
+                continue
+            if not worker_slot_pattern.match(s_name):
+                continue
+            if s_name in busy_slots or s_name in active_run_retained_slots:
+                continue
+        handles_to_close.append((h_id, s_name, str(t_meta.get("title") or "")))
+        seen_close_handles.add(h_id)
+
+    closed_terminals = []
+    if handles_to_close:
+        def _close_one(item_tuple):
+            h_id, s_name, t_title = item_tuple
+            try:
+                cp = subprocess.run(
+                    [orca_bin, "terminal", "close", "--terminal", h_id, "--json"],
+                    capture_output=True, text=True, env=env, timeout=6,
+                )
+                if cp.returncode == 0:
+                    return {"handle": h_id, "worktree": s_name, "title": t_title, "closed": True}
+            except Exception:
+                pass
+            return {"handle": h_id, "worktree": s_name, "title": t_title, "closed": False}
+
+        with ThreadPoolExecutor(max_workers=min(6, len(handles_to_close))) as pool:
+            for c_item in pool.map(_close_one, handles_to_close):
+                if c_item.get("closed"):
+                    closed_terminals.append(c_item)
+
+    return {
+        "mainRoot": main_root_str,
+        "runId": effective_run_id or None,
+        "targetSlot": target_worktree_name or None,
+        "releasedDispatches": released_results,
+        "closedTerminals": closed_terminals,
+        "busySlots": sorted(busy_slots),
+    }
+
+
 def resolve_elastic_worktree_slot(
     root: Path,
     role_input: str,
     reserve: bool = True,
     release_only: bool = False,
+    check_exact_slot: str = "",
+    clean_idle_tabs: bool = True,
     reservation_ttl_secs: float = 45.0,
 ) -> dict:
     """
     Cấp phát Worktree Slot tự động co giãn (Elastic Auto-Scale):
     - Nếu slot hiện có (<role>-worker, <role>-worker-2...) đang rảnh (done / settled / released):
-      tái sử dụng worktree đó (--worktree path:<abs_path>) để Orca mở & gom nhóm Terminal Tab mới bên trong.
+      tự động đóng các tab worker cũ đã hoàn tất trên slot đó rồi tái sử dụng (--worktree path:<abs_path>).
     - Nếu slot hiện có đang bận (working / live ở bất kỳ Leader/Run nào hoặc vừa được đặt chỗ trong 45s):
       tự động nhảy sang slot kế tiếp (<role>-worker-2, <role>-worker-3...) — tái sử dụng nếu đã có trên đĩa và đang rảnh,
       hoặc tạo mới (--worktree new-child --name <slot>) nếu chưa tồn tại.
@@ -487,6 +969,7 @@ def resolve_elastic_worktree_slot(
     busy_slots = set()
     latest_done_epoch = {}
     chosen_slot = slot_hint if min_slot >= 2 else base_wt
+    requested_slot_busy = False
 
     lock_fd = None
     try:
@@ -643,13 +1126,19 @@ def resolve_elastic_worktree_slot(
                 cleaned_reservations[s_key] = r_ts
                 busy_slots.add(s_key)
 
+        if check_exact_slot:
+            requested_slot_busy = check_exact_slot in busy_slots
+
         for k in range(min_slot, min_slot + 32):
             cand_slot = base_wt if k == 1 else f"{base_wt}-{k}"
             if cand_slot not in busy_slots:
                 chosen_slot = cand_slot
                 break
 
-        if reserve:
+        if check_exact_slot and not requested_slot_busy:
+            chosen_slot = check_exact_slot
+
+        if reserve and (not check_exact_slot or not requested_slot_busy):
             cleaned_reservations[chosen_slot] = now
         try:
             res_path.write_text(json.dumps(cleaned_reservations, indent=2), encoding="utf-8")
@@ -677,6 +1166,25 @@ def resolve_elastic_worktree_slot(
         has_commit = True
 
     existing_path = existing_wt_paths.get(chosen_slot)
+    # Khi tái sử dụng một worktree đã tồn tại và đang rảnh để chạy task mới:
+    # tự động đóng các tab worker cũ (state=done) trên worktree đó để tránh chồng chất nhiều tab cũ
+    if (
+        clean_idle_tabs
+        and reserve
+        and existing_path
+        and Path(existing_path).is_dir()
+        and (not check_exact_slot or not requested_slot_busy)
+    ):
+        try:
+            release_settled_worker_terminals(
+                main_root,
+                target_worktree_name=chosen_slot,
+                ignore_reserved_slot=chosen_slot,
+                sweep_idle_worktrees=False,
+            )
+        except Exception:
+            pass
+
     if not has_commit:
         wt_args = ["--worktree", "current"]
         existing_path = None
@@ -691,6 +1199,8 @@ def resolve_elastic_worktree_slot(
         "role": canonical,
         "baseWorktree": base_wt,
         "slot": chosen_slot,
+        "requestedSlot": check_exact_slot or None,
+        "slotBusy": requested_slot_busy if check_exact_slot else False,
         "exists": bool(existing_path),
         "path": existing_path,
         "args": wt_args,
@@ -702,15 +1212,16 @@ def resolve_elastic_worktree_slot(
 
 def cmd_worktree_arg(root: Path, args: list):
     """
-    CLI: orca-team worktree-arg <role> [--slot-only] [--no-reserve] [--release] [--json]
+    CLI: orca-team worktree-arg <role> [--slot-only] [--no-reserve] [--release] [--check-slot <slot>] [--json]
     Trả về chuỗi đối số --worktree cho `orca orchestration worker-start`:
-    - Khi slot hiện có đang rảnh: `--worktree path:/abs/path/to/<role>-worker`
+    - Khi slot hiện có đang rảnh: tự động đóng tab worker cũ (done) và trả về `--worktree path:/abs/path/to/<role>-worker`
     - Khi slot hiện có đang bận: tự động đẻ/chọn slot kế tiếp (`--worktree new-child --name <role>-worker-2 [--setup skip]` hoặc `path:...`)
     """
     role_arg = "dev"
     slot_only = False
     reserve = True
     release_only = False
+    check_exact_slot = ""
     as_json = False
     target_root = root
 
@@ -718,7 +1229,7 @@ def cmd_worktree_arg(root: Path, args: list):
     while idx < len(args):
         tok = args[idx]
         if tok in ("-h", "--help", "help"):
-            print("Sử dụng: orca-team worktree-arg <role> [--slot-only] [--no-reserve] [--release] [--json]")
+            print("Sử dụng: orca-team worktree-arg <role> [--slot-only] [--no-reserve] [--release] [--check-slot <slot>] [--json]")
             print("Ví dụ:   orca orchestration worker-start --task <ID> $(orca-team worktree-arg dev) --agent antigravity --json")
             return
         elif tok in ("--slot-only", "--slot", "--name-only"):
@@ -729,6 +1240,12 @@ def cmd_worktree_arg(root: Path, args: list):
             idx += 1
         elif tok in ("--release", "--unreserve"):
             release_only = True
+            idx += 1
+        elif tok == "--check-slot" and idx + 1 < len(args):
+            check_exact_slot = args[idx + 1].strip()
+            idx += 2
+        elif tok.startswith("--check-slot="):
+            check_exact_slot = tok.split("=", 1)[1].strip()
             idx += 1
         elif tok == "--json":
             as_json = True
@@ -751,9 +1268,10 @@ def cmd_worktree_arg(root: Path, args: list):
 
     info = resolve_elastic_worktree_slot(
         target_root,
-        role_arg,
+        check_exact_slot or role_arg,
         reserve=reserve,
         release_only=release_only,
+        check_exact_slot=check_exact_slot,
     )
     if as_json:
         print(json.dumps(info, ensure_ascii=False, indent=2))
@@ -761,6 +1279,90 @@ def cmd_worktree_arg(root: Path, args: list):
         print(info["slot"])
     else:
         print(info["argString"])
+
+
+def cmd_release_workers(root: Path, args: list):
+    """
+    CLI: orca-team release-workers [--run <RUN_ID>] [--after-dispatch <ID,...>] [--worktree <SLOT>] [--quiet] [--json]
+    Giải phóng toàn bộ Worker Dispatches đã hoàn tất của Run và đóng dứt điểm các Terminal Tabs cũ (`state=done`)
+    trên các worker worktrees đang rảnh.
+    """
+    run_id = ""
+    after_ids = []
+    target_wt = ""
+    quiet = False
+    as_json = False
+    target_root = root
+
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        if tok in ("-h", "--help", "help"):
+            print("Sử dụng: orca-team release-workers [--run <RUN_ID>] [--worktree <SLOT>] [--quiet] [--json]")
+            print("Giải phóng toàn bộ worker dispatches đã hoàn tất và đóng dứt điểm các tab worker cũ trên các worktree đang rảnh.")
+            return
+        elif tok == "--run" and idx + 1 < len(args):
+            run_id = args[idx + 1].strip()
+            idx += 2
+        elif tok.startswith("--run="):
+            run_id = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok == "--after-dispatch" and idx + 1 < len(args):
+            after_ids.extend([x.strip() for x in args[idx + 1].split(",") if x.strip()])
+            idx += 2
+        elif tok.startswith("--after-dispatch="):
+            after_ids.extend([x.strip() for x in tok.split("=", 1)[1].split(",") if x.strip()])
+            idx += 1
+        elif tok in ("--worktree", "--slot") and idx + 1 < len(args):
+            target_wt = args[idx + 1].strip()
+            idx += 2
+        elif tok.startswith("--worktree=") or tok.startswith("--slot="):
+            target_wt = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--quiet", "-q"):
+            quiet = True
+            idx += 1
+        elif tok == "--json":
+            as_json = True
+            idx += 1
+        elif tok in ("--path", "-C") and idx + 1 < len(args):
+            cand = Path(args[idx + 1]).expanduser()
+            if cand.is_dir():
+                target_root = cand.resolve()
+            idx += 2
+        elif tok.startswith("--path="):
+            p_val = tok.split("=", 1)[1].strip()
+            if p_val and Path(p_val).expanduser().is_dir():
+                target_root = Path(p_val).expanduser().resolve()
+            idx += 1
+        elif tok.startswith("run_") and not run_id:
+            run_id = tok.strip()
+            idx += 1
+        elif tok.startswith("ctx_"):
+            after_ids.append(tok.strip())
+            idx += 1
+        else:
+            idx += 1
+
+    res = release_settled_worker_terminals(
+        target_root,
+        run_id=run_id,
+        after_dispatch_ids=after_ids or None,
+        target_worktree_name=target_wt,
+        sweep_idle_worktrees=True,
+    )
+    if quiet:
+        return
+    if as_json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return
+    rel_cnt = len(res.get("releasedDispatches") or [])
+    cls_cnt = len(res.get("closedTerminals") or [])
+    rid_lbl = f" (Run {res['runId']})" if res.get("runId") else ""
+    print(f"✅ Đã giải phóng {rel_cnt} worker dispatch(es) và đóng dứt điểm {cls_cnt} tab terminal cũ{rid_lbl}.")
+    for c_item in res.get("closedTerminals") or []:
+        print(f"   • Đã đóng tab: {c_item.get('worktree')} / {c_item.get('title')} ({c_item.get('handle')})")
+
 
 
 def cmd_spec(args: list, explicit_root: Path = None):
@@ -1622,7 +2224,7 @@ def sync_gemini_directive(root: Path, config: dict):
         '     orca orchestration gate-resolve --id <GATE_ID> --resolution "yes"\n'
         '     orca orchestration task-update --id <FINAL_TASK_ID> --status completed\n'
         '     ```\n'
-        f'  2. Thực hiện `git merge` đầy đủ tất cả các nhánh worker có thay đổi ({merge_branches_hint}) vào nhánh chính, sau đó chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention{goal_final_hint}\n'
+        f'  2. Thực hiện `git merge` đầy đủ tất cả các nhánh worker có thay đổi ({merge_branches_hint}) vào nhánh chính, sau đó chạy `orca-team release-workers --run "$RUN_ID"` (hoặc `orca orchestration worker-release --dispatch <DISPATCH_ID> --json`) để giải phóng toàn bộ retention qua các đợt (waves){goal_final_hint}\n'
     )
     content = re.sub(
         r"### BƯỚC 4:[^\n]*\n[\s\S]*$",
@@ -5396,6 +5998,34 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                             + ", ".join(str(g.get("id")) for g in pending_gates[:5])
                             + " (trả lời bằng 'orca orchestration gate-resolve --id <GATE_ID> --resolution <...>')."
                         )
+                    all_workers_settled = (
+                        bool(worker_metrics_list)
+                        and all(wm.get("state") in ("succeeded", "failed", "stopped", "abandoned", "circuit_broken") for wm in worker_metrics_list)
+                    )
+                    any_worker_released = any(wm.get("term_state") == "released" for wm in worker_metrics_list)
+                    unreleased_settled = [wm for wm in worker_metrics_list if wm.get("term_state") != "released"]
+                    if all_workers_settled and not pending_gates and unreleased_settled and any_worker_released and not auto_fix:
+                        warning_issues.append(
+                            f"Run {active_run_id} đã kết thúc nhưng còn {len(unreleased_settled)} tab worker ở các đợt trước chưa đóng "
+                            f"(chạy 'orca-team release-workers --run {active_run_id}' hoặc 'orca-monitor --fix')."
+                        )
+                    if auto_fix and not pending_gates:
+                        try:
+                            rel_info = release_settled_worker_terminals(
+                                root,
+                                run_id=active_run_id if all_workers_settled else "",
+                                sweep_idle_worktrees=True,
+                            )
+                            rel_d = len(rel_info.get("releasedDispatches") or [])
+                            cls_t = len(rel_info.get("closedTerminals") or [])
+                            if rel_d or cls_t:
+                                actions_taken.append(
+                                    f"Giải phóng {rel_d} worker dispatch(es) và đóng dứt điểm {cls_t} tab terminal worker cũ."
+                                )
+                                if all_workers_settled:
+                                    all_workers_settled_released = True
+                        except Exception:
+                            pass
                     if all_workers_settled_released and not pending_gates:
                         stuck_tasks = [
                             t for t in run_tasks.values()
@@ -5856,6 +6486,7 @@ KNOWN_SUBCOMMANDS = {
     "agents", "list-agents",
     "spec", "role-spec", "prompt",
     "worktree-arg", "wt-arg", "slot-arg",
+    "release-workers", "cleanup-tabs", "gc-workers",
     "-h", "--help", "help",
 }
 
@@ -5918,6 +6549,10 @@ def main():
         if cmd0 in ("worktree-arg", "wt-arg", "slot-arg"):
             root = explicit_root if explicit_root is not None else find_project_root()
             cmd_worktree_arg(root, args[1:])
+            return
+        if cmd0 in ("release-workers", "cleanup-tabs", "gc-workers"):
+            root = explicit_root if explicit_root is not None else find_project_root()
+            cmd_release_workers(root, args[1:])
             return
         if cmd0 in ("models", "list-models", "discover-models"):
             cmd_models(args[1:])

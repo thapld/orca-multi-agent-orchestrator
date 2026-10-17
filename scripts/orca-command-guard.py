@@ -1882,6 +1882,142 @@ def _read_json_stdin_nonblocking() -> dict:
     return {}
 
 
+def _resolve_orca_team_bin_and_cwd(payload: dict, args: dict) -> tuple[str, str]:
+    cwd = str(
+        args.get("Cwd")
+        or args.get("cwd")
+        or (payload.get("cwd") if isinstance(payload, dict) else "")
+        or os.getcwd()
+    ).strip()
+    if not cwd or not os.path.isdir(cwd):
+        cwd = os.getcwd()
+    candidates = [
+        os.path.expanduser("~/.local/bin/orca-team"),
+        str(Path(__file__).resolve().parent / "orca-team"),
+        "/usr/local/bin/orca-team",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c, cwd
+    return "", cwd
+
+
+def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict) -> str:
+    """
+    When a Leader runs `orca orchestration worker-start` with a hardcoded `--worktree`
+    (instead of `$(orca-team worktree-arg <role>)`):
+    - If the target worker slot is BUSY (`working`/`live` or reserved), block the command and instruct
+      the Leader to use `$(orca-team worktree-arg <role>)` so it auto-scales to `<role>-worker-2`!
+    - If the target worker slot is IDLE, reserve it and close any lingering `done` tabs on it before starting.
+    """
+    if "worker-start" not in cmd or not re.search(r"\borca\s+orchestration\s+worker-start\b", cmd):
+        return ""
+    if re.search(r"\borca-team\b[^\n;|&]*\b(?:worktree-arg|wt-arg|slot-arg)\b", cmd):
+        return ""
+
+    slot_candidates: list[str] = []
+    for m_wt in re.finditer(
+        r"--worktree(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|([^\s;|&\"']+))",
+        cmd,
+    ):
+        raw_wt = (m_wt.group(1) or m_wt.group(2) or m_wt.group(3) or "").strip()
+        if not raw_wt or raw_wt in ("current", "new-child", "new-top-level") or "$" in raw_wt:
+            continue
+        wt_clean = raw_wt[5:] if raw_wt.startswith("path:") else raw_wt
+        slot_name = os.path.basename(wt_clean.rstrip("/"))
+        if re.match(r"^(?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix)-worker(?:-\d+)?$", slot_name):
+            slot_candidates.append(slot_name)
+
+    for m_nm in re.finditer(
+        r"--name(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|([^\s;|&\"']+))",
+        cmd,
+    ):
+        raw_nm = (m_nm.group(1) or m_nm.group(2) or m_nm.group(3) or "").strip()
+        if raw_nm and "$" not in raw_nm and re.match(
+            r"^(?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix)-worker(?:-\d+)?$",
+            raw_nm,
+        ):
+            if raw_nm not in slot_candidates:
+                slot_candidates.append(raw_nm)
+
+    if not slot_candidates:
+        return ""
+
+    orca_team_bin, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
+    if not orca_team_bin:
+        return ""
+
+    for slot_name in slot_candidates:
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    orca_team_bin,
+                    "--path",
+                    cwd,
+                    "worktree-arg",
+                    slot_name,
+                    "--check-slot",
+                    slot_name,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                info = json.loads(proc.stdout)
+                if isinstance(info, dict) and info.get("slotBusy"):
+                    role_prefix = slot_name.split("-worker", 1)[0]
+                    next_slot = info.get("slot") or f"{role_prefix}-worker-2"
+                    next_args = info.get("argString") or f"$(orca-team worktree-arg {role_prefix})"
+                    return (
+                        f"[ORCA ELASTIC WORKTREE GUARD] Worktree '{slot_name}' đang BẬN chạy một tác vụ khác! "
+                        f"CẤM truyền cứng '--worktree' khi gọi worker-start vì sẽ khiến 2 agent ghi đè worktree của nhau. "
+                        f"Cách sửa: Thay tham số '--worktree ...' bằng $({f'orca-team worktree-arg {role_prefix}'}) "
+                        f"(hoặc dùng: {next_args}) để tự động điều phối sang '{next_slot}'."
+                    )
+        except Exception:
+            pass
+    return ""
+
+
+def _trigger_post_worker_release_sweep(cmd: str, payload: dict, args: dict) -> None:
+    """
+    When a Leader runs `orca orchestration worker-release --dispatch <id>`, spawn a lightweight
+    detached background sweep after 3 seconds so that:
+    1) Any `user_takeover` or `stopped` worker tab that `worker-release` left open is closed via `orca terminal close`.
+    2) If the Run has finished all workers (Step 4 teardown), any forgotten earlier-wave `retained` tabs
+       in that Run and idle worker worktrees are automatically archived and closed.
+    """
+    if "worker-release" not in cmd or not re.search(r"\borca\s+orchestration\s+worker-release\b", cmd):
+        return
+    dids = sorted(set(re.findall(r"\b(ctx_[a-f0-9]{8,24})\b", cmd)))
+    if not dids:
+        return
+    orca_team_bin, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
+    if not orca_team_bin:
+        return
+    try:
+        did_csv = ",".join(dids)
+        py_code = (
+            "import subprocess, sys, time; "
+            "time.sleep(3.0); "
+            "subprocess.run([sys.executable, sys.argv[1], '--path', sys.argv[2], "
+            "'release-workers', '--after-dispatch', sys.argv[3], '--quiet'], "
+            "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25)"
+        )
+        subprocess.Popen(
+            [sys.executable, "-c", py_code, orca_team_bin, cwd, did_csv],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
 def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "--stream":
         _run_stream_filter()
@@ -1970,6 +2106,16 @@ def main() -> None:
             sys.stdout.write(_deny_json(reason))
             sys.stdout.flush()
             return
+
+        # Guard 4: Elastic Worktree Collision Guard & Pre-Dispatch Tab Cleanup on hardcoded `worker-start`
+        collision_reason = _check_hardcoded_worker_start_collision(cmd[:200000], payload, args)
+        if collision_reason:
+            sys.stdout.write(_deny_json(collision_reason))
+            sys.stdout.flush()
+            return
+
+        # Trigger automatic post-release tab sweep when Leader runs `orca orchestration worker-release`
+        _trigger_post_worker_release_sweep(cmd[:200000], payload, args)
 
         sys.stdout.write(allow_out)
         sys.stdout.flush()

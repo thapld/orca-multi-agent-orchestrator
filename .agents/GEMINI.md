@@ -116,4 +116,4 @@
      orca orchestration gate-resolve --id <GATE_ID> --resolution "yes"
      orca orchestration task-update --id <FINAL_TASK_ID> --status completed
      ```
-  2. Thực hiện `git merge` đầy đủ tất cả các nhánh worker có thay đổi (`dev-worker*`, `devops-worker*`, `ui-worker*`) vào nhánh chính, sau đó chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention, đóng các terminal worker và xuất thẻ `<!-- GOAL_COMPLETE -->` ở câu trả lời cuối cùng để đóng Goal.
+  2. Thực hiện `git merge` đầy đủ tất cả các nhánh worker có thay đổi (`dev-worker*`, `devops-worker*`, `ui-worker*`) vào nhánh chính, sau đó chạy `orca-team release-workers --run "$RUN_ID"` (hoặc `orca orchestration worker-release --dispatch <DISPATCH_ID> --json`) để giải phóng toàn bộ retention qua các đợt (waves), đóng các terminal worker và xuất thẻ `<!-- GOAL_COMPLETE -->` ở câu trả lời cuối cùng để đóng Goal.

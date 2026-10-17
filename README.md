@@ -140,10 +140,11 @@ orca-team set critic --enable --agent antigravity --model gemini-4-argon-high
 orca-team set dev
 orca-team set critic
 
-# 7. Sinh bản Hiến pháp Vai trò cấp Principal & Cấp phát Worktree Slot tự động:
+# 7. Sinh bản Hiến pháp Vai trò cấp Principal, Cấp phát Worktree Slot tự động & Dọn tab Worker:
 orca-team spec critic "Kiểm chứng chéo giả thuyết lỗi và phản biện thiết kế của Leader"
 orca-team spec dev "Triển khai API..."
-orca-team worktree-arg dev   # Trả về --worktree path:... nếu rảnh, hoặc --worktree new-child --name dev-worker-2 nếu bận
+orca-team worktree-arg dev       # Trả về --worktree path:... (và tự đóng tab cũ) nếu rảnh, hoặc --worktree new-child --name dev-worker-2 nếu bận
+orca-team release-workers        # Lưu trữ archive & đóng triệt để toàn bộ tab terminal cũ (done/retained/user_takeover) của các worker đã xong việc
 
 # 8. Quản lý Discovery Links cho nhiều AI CLI (Claude / Antigravity / Codex):
 orca-team link all      # Kích hoạt CLAUDE.md và AGENTS.md để mở bất kỳ AI CLI nào làm Leader
@@ -157,7 +158,7 @@ orca-team watchdog --unblock # Tự động gửi 'y' mở khóa toàn bộ work
 # 10. Giám sát & Bóc tách nguyên nhân tiêu tốn Token (Token Monitor & Forensic Debugger):
 orca-monitor                 # hoặc: orca-team monitor
 orca-team monitor --verbose  # Xem chi tiết từng thông điệp và buffer màn hình
-orca-team monitor --fix      # Tự động sửa các bẫy token (gitignore, symlink, status hooks)
+orca-team monitor --fix      # Tự động sửa các bẫy token & đóng các tab terminal worker cũ còn sót lại
 ```
 
 > **Ghi chú:** Khi chạy `orca-team set`, công cụ sẽ **tự động cập nhật `orca-team.json` đồng thời đồng bộ lại bảng Topology, danh sách phân vai và lệnh khởi tạo ở Bước 1 & Bước 2 trong `.agents/GEMINI.md`**, giúp Leader agent lập tức nhận biết cấu hình mới mà không cần khởi động lại.

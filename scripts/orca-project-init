@@ -1260,7 +1260,7 @@ ${C_GATE_LINE}
      orca orchestration gate-resolve --id <GATE_ID> --resolution "yes"
      orca orchestration task-update --id <FINAL_TASK_ID> --status completed
      \`\`\`
-  2. Thực hiện \`git merge\` toàn bộ các nhánh worktree đã tham gia vào nhánh chính, sau đó chạy \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\` để giải phóng retention và đóng các terminal worker; cuối cùng báo cáo tổng kết và xuất thẻ \`<!-- GOAL_COMPLETE -->\` ở câu trả lời cuối cùng để đóng Goal (\`goalMode: true\` trên \`coordinator\`).
+  2. Thực hiện \`git merge\` toàn bộ các nhánh worktree đã tham gia vào nhánh chính, sau đó chạy \`orca-team release-workers --run "\$RUN_ID"\` (hoặc \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\`) để giải phóng toàn bộ retention qua các đợt (waves) và đóng các terminal worker; cuối cùng báo cáo tổng kết và xuất thẻ \`<!-- GOAL_COMPLETE -->\` ở câu trả lời cuối cùng để đóng Goal (\`goalMode: true\` trên \`coordinator\`).
 RULE
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   python3 "$ORCA_TEAM_BIN" --path "$PROJECT_PATH" sync >/dev/null 2>&1 || true
