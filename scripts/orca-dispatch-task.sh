@@ -27,7 +27,7 @@ if [[ $# -gt 3 ]]; then
 fi
 
 KNOWN_AGENTS_RE='^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$'
-KNOWN_ROLES_RE='^(coord|coordinator|leader|orchestrator|dev|developer|coder|doc|docs|fix|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|reviewer|issue|issueresolver|hotfix)$'
+KNOWN_ROLES_RE='^(coord|coordinator|leader|lead|architect|orchestrator|dev|developer|developers|coder|fullstack|backend|doc|docs|fix|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|reviewer|issue|issueresolver|hotfix)$'
 
 TASK_TITLE="$1"
 if [[ $# -eq 2 ]]; then
@@ -93,18 +93,18 @@ fi
 EFF_ROLE_QUERY="$ROLE_QUERY"
 CONFIG_AGENT=""
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
-  CONFIG_AGENT=$("$ORCA_TEAM_BIN" get "$ROLE_QUERY" 2>/dev/null || true)
-  if [[ "$CONFIG_AGENT" == "none" ]] && ! [[ "$REQ_AGENT" =~ $KNOWN_AGENTS_RE ]] && ! [[ "$ROLE_QUERY" =~ ^(pr|prreviewer|reviewer|issue|issueresolver|hotfix)$ ]]; then
+  CONFIG_AGENT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$ROLE_QUERY" 2>/dev/null || true)
+  if [[ "$CONFIG_AGENT" == "none" ]] && ! [[ "$REQ_AGENT" =~ $KNOWN_AGENTS_RE ]] && ! [[ "$ROLE_QUERY" =~ ^(pr|prreviewer|reviewer|issue|issueresolver|hotfix|fix)$ ]]; then
     echo "❌ Vai trò '$ROLE_QUERY' hiện đang tắt (disabled) trong orca-team.json. Hãy bật bằng: orca-team set $ROLE_QUERY --enable" >&2
     exit 1
   fi
   if [[ -z "$CONFIG_AGENT" || "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
     EFF_ROLE_QUERY="dev"
-    CONFIG_AGENT=$("$ORCA_TEAM_BIN" get dev 2>/dev/null || true)
+    CONFIG_AGENT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get dev 2>/dev/null || true)
   fi
   if [[ -z "$CONFIG_AGENT" || "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
     EFF_ROLE_QUERY="coord"
-    CONFIG_AGENT=$("$ORCA_TEAM_BIN" get coord 2>/dev/null || true)
+    CONFIG_AGENT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get coord 2>/dev/null || true)
   fi
 fi
 [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
@@ -121,8 +121,8 @@ TIMEOUT_MS="${TIMEOUT_MS:-300000}"
 # Lấy model và reasoning effort nếu đã được cấu hình trong orca-team (chỉ áp dụng khi AGENT khớp với CONFIG_AGENT của role)
 MODEL_ARGS=()
 if [[ -x "$ORCA_TEAM_BIN" && "$AGENT" == "$CONFIG_AGENT" ]]; then
-  DEV_MODEL=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field model 2>/dev/null || true)
-  DEV_EFFORT=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field effort 2>/dev/null || true)
+  DEV_MODEL=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$EFF_ROLE_QUERY" --field model 2>/dev/null || true)
+  DEV_EFFORT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$EFF_ROLE_QUERY" --field effort 2>/dev/null || true)
   if [[ "$AGENT" =~ ^(antigravity|claude|codex|cursor|muse|codebuddy|omp)$ ]] && [[ -n "$DEV_MODEL" && "$DEV_MODEL" != "null" && "$DEV_MODEL" != "(default)" ]]; then
     MODEL_ARGS+=(--model "$DEV_MODEL")
     if [[ -n "$DEV_EFFORT" && "$DEV_EFFORT" != "null" && "$DEV_EFFORT" != "none" && "$DEV_EFFORT" != "None" && "$DEV_EFFORT" != "-" && "$AGENT" != "omp" ]]; then
@@ -174,7 +174,7 @@ else
     re|reverse|rea|respecialist) ROLE_WORKTREE="re-worker" ;;
     critic|research|researcher|challenger|advocate|criticspecialist) ROLE_WORKTREE="critic-worker" ;;
     pr|prreviewer|reviewer) ROLE_WORKTREE="pr-worker" ;;
-    issue|issueresolver|hotfix) ROLE_WORKTREE="issue-worker" ;;
+    issue|issueresolver|hotfix|fix) ROLE_WORKTREE="issue-worker" ;;
     *) ROLE_WORKTREE="dev-worker" ;;
   esac
 fi
@@ -184,16 +184,17 @@ ROLE_CONCURRENCY=1
 DEV_CONCURRENCY=1
 ROLE_GOAL_MODE="true"
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
-  RAW_CONC=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field concurrency 2>/dev/null || true)
+  RAW_CONC=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$ROLE_QUERY" --field concurrency 2>/dev/null || true)
   [[ "$RAW_CONC" =~ ^[0-9]+$ ]] && ROLE_CONCURRENCY="$RAW_CONC"
-  RAW_DEV_CONC=$("$ORCA_TEAM_BIN" get dev --field concurrency 2>/dev/null || true)
+  RAW_DEV_CONC=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get dev --field concurrency 2>/dev/null || true)
   [[ "$RAW_DEV_CONC" =~ ^[0-9]+$ ]] && DEV_CONCURRENCY="$RAW_DEV_CONC"
-  RAW_GOAL=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field goal 2>/dev/null || true)
+  RAW_GOAL=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$ROLE_QUERY" --field goal 2>/dev/null || true)
   [[ "$RAW_GOAL" == "false" ]] && ROLE_GOAL_MODE="false"
 fi
 
 if [[ "$EXPLICIT_SLOT" == false && "$ROLE_CONCURRENCY" -ge 2 ]]; then
   ACTIVE_WORKERS_JSON=$("$ORCA_BIN" orchestration worker-list --json 2>/dev/null || true)
+  git worktree prune >/dev/null 2>&1 || true
   REPO_WT_PATHS=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree / { print substr($0, 10) }' || true)
   CHOSEN_SLOT=$(python3 -c '
 import sys, json, os
@@ -254,14 +255,11 @@ fi
 
 GOAL_MODE_CLAUSE=" CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); khi chạy Jest bắt buộc kèm --forceExit chống treo open handles; khi lệnh chạy ngầm (task-XX) CẤM gọi manage_task(status) lặp lại mỗi vài giây gây phình turns (hãy chờ thông báo hoàn tất hoặc đợi tối thiểu 30-60s); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ + gửi bản tin báo cáo + gửi worker_done về Coordinator mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal."
 
-# Tự động tiêm Hiến pháp Vai trò Cấp Principal (Chống vượt rào, Chống báo sạch giả & Chế độ /goal) nếu SPEC chưa có
-if [[ "$SPEC" != "[ROLE:"* && -x "$ORCA_TEAM_BIN" ]]; then
-  INJECTED_SPEC=$("$ORCA_TEAM_BIN" spec "$ROLE_QUERY" -- "$SPEC" 2>/dev/null || true)
+# Tự động tiêm Hiến pháp Vai trò Cấp Principal (Chống vượt rào, Chống báo sạch giả & Chế độ /goal)
+if [[ -x "$ORCA_TEAM_BIN" ]]; then
+  INJECTED_SPEC=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" spec "$ROLE_QUERY" -- "$SPEC" 2>/dev/null || true)
   if [[ -n "$INJECTED_SPEC" ]]; then
     SPEC="$INJECTED_SPEC"
-    SPEC="${SPEC//\(dev-worker \/ dev-worker-N\)/(${ROLE_WORKTREE})}"
-    SPEC="${SPEC//<branch_name>/${ROLE_WORKTREE}}"
-    [[ "$ROLE_WORKTREE" == ui-worker-* ]] && SPEC="${SPEC//vào nhánh ui-worker/vào nhánh ${ROLE_WORKTREE}}"
   fi
 fi
 if [[ "$SPEC" != "[ROLE:"* ]]; then
@@ -297,7 +295,7 @@ if [[ "$SPEC" != "[ROLE:"* ]]; then
     pr|prreviewer|reviewer)
       SPEC="[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Đồng bộ commit mới nhất của PR, đọc từng dòng diff (git diff), kiểm tra kiến trúc, OWASP Top 10, Race Conditions, Memory Leaks và BẮT BUỘC chạy test suite + linter thực tế (CẤM duyệt suông bằng mắt). CẤM VƯỢT RÀO: Read-Only (không tự sửa code PR khi chưa được yêu cầu). BẰNG CHỨNG BẮT BUỘC: Báo cáo file:line, EXIT_CODE test và chốt PR_VERDICT: APPROVE hoặc REQUEST_CHANGES."
       ;;
-    issue|issueresolver|hotfix)
+    issue|issueresolver|hotfix|fix)
       SPEC="[ROLE: PRINCIPAL ISSUE RESOLVER] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: (1) Tìm Root Cause, (2) Viết Reproduction Test xác nhận FAIL trước khi sửa, (3) Sửa code tối thiểu tới khi Reproduction Test PASS, (4) Chạy regression test đạt EXIT_CODE=0. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ. BẰNG CHỨNG BẮT BUỘC: Commit sạch kèm Commit Hash + log chạy test."
       ;;
     *)
@@ -305,7 +303,14 @@ if [[ "$SPEC" != "[ROLE:"* ]]; then
       ;;
   esac
 fi
-if [[ "$ROLE_GOAL_MODE" != "false" && "$SPEC" != *"CHẾ ĐỘ /goal"* && "$SPEC" != *" /goal" ]]; then
+SPEC="${SPEC//\(dev-worker \/ dev-worker-N\)/(${ROLE_WORKTREE})}"
+SPEC="${SPEC//<branch_name>/${ROLE_WORKTREE}}"
+[[ "$ROLE_WORKTREE" == ui-worker-* ]] && SPEC="${SPEC//vào nhánh ui-worker/vào nhánh ${ROLE_WORKTREE}}"
+while [[ "$SPEC" == *" /goal" || "$SPEC" == *"/goal/goal" ]]; do
+  SPEC="${SPEC%/goal}"
+  SPEC="${SPEC%[[:space:]]}"
+done
+if [[ "$ROLE_GOAL_MODE" != "false" && "$SPEC" != *"CHẾ ĐỘ /goal"* ]]; then
   if [[ "$SPEC" == *[.!?] ]]; then
     SPEC="${SPEC}${GOAL_MODE_CLAUSE}"
   else
@@ -347,6 +352,7 @@ fi
 
 if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
   WORKTREE_NAME="$ROLE_WORKTREE"
+  git worktree prune >/dev/null 2>&1 || true
   EXISTING_WT_PATH=$(git worktree list --porcelain 2>/dev/null | awk -v target="$ROLE_WORKTREE" '
     /^worktree / { wt = substr($0, 10) }
     /^branch /   { br = substr($0, 8) }
@@ -360,7 +366,7 @@ if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
       if (wt != "" && ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target))) { print wt }
     }
   ')
-  if [[ -n "$EXISTING_WT_PATH" ]]; then
+  if [[ -n "$EXISTING_WT_PATH" && -d "$EXISTING_WT_PATH" ]]; then
     echo "🚀 Tái sử dụng worktree định danh '$ROLE_WORKTREE' ($EXISTING_WT_PATH) — Mở & gom nhóm Terminal Tab mới..."
     START_RECEIPT=$("$ORCA_BIN" orchestration worker-start \
       --task "$TASK_ID" \
@@ -370,12 +376,6 @@ if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
       --timeout-ms "$TIMEOUT_MS" \
       --json 2>&1) || true
   else
-    GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-    if [[ -n "$GIT_COMMON_DIR" && "${GIT_COMMON_DIR:t}" == ".git" ]]; then
-      REPO_ROOT="${GIT_COMMON_DIR:h}"
-    else
-      REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-    fi
     SETUP_POLICY="skip"
     [[ -f "$REPO_ROOT/package.json" ]] && SETUP_POLICY="run"
     echo "🚀 Khởi tạo worktree định danh lần đầu cho role: '$ROLE_WORKTREE'..."

@@ -204,7 +204,7 @@ ROLE_SPEC_TEMPLATES = {
         "Chuẩn: CSS/DOM chuẩn xác, Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. "
         "CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend core/DB schema. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Đồng bộ nhánh mới nhất (git merge --no-edit main), Build/typecheck EXIT_CODE=0, không lỗi Console, "
         "kiểm tra snapshot/screenshot Mobile/Desktop, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready' "
-        "--body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit kèm Commit Hash."
+        "--body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit kèm Commit Hash vào nhánh ui-worker."
     ),
     "prReviewer": (
         "[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: {task}. "
@@ -280,19 +280,16 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_o
     goal_on = goal_override if goal_override is not None else _is_goal_mode_enabled(role_cfg, config)
 
     if raw_task.startswith("[ROLE:"):
+        base_task = re.sub(r"\s*CHẾ ĐỘ /goal[\s\S]*$", "", raw_task).strip()
+        base_task = re.sub(r"(?:(?:^|\s+)/goal(?:/goal)*)+[.\s]*$", "", base_task, flags=re.IGNORECASE).strip()
         if goal_on:
-            if "CHẾ ĐỘ /goal" in raw_task:
-                return re.sub(r"(?:\s+/goal(?:/goal)?)+[.\s]*$", ".", raw_task, flags=re.IGNORECASE)
-            base_task = re.sub(r"(?:^|\s+)/goal(?:/goal)?\s*$", "", raw_task, flags=re.IGNORECASE).strip()
             if not base_task.endswith((".", "!", "?")):
                 base_task += "."
             return base_task + GOAL_MODE_CLAUSE
-        else:
-            raw_task = re.sub(r"\s*CHẾ ĐỘ /goal[\s\S]*$", "", raw_task)
-            raw_task = re.sub(r"(?:^|\s+)/goal(?:/goal)?[.\s]*$", "", raw_task, flags=re.IGNORECASE)
-        return raw_task
+        return base_task
 
-    clean_task = re.sub(r"(?:^|\s+)/goal\s*$", "", raw_task, flags=re.IGNORECASE).strip().rstrip(".")
+    clean_task = re.sub(r"\s*CHẾ ĐỘ /goal[\s\S]*$", "", raw_task).strip()
+    clean_task = re.sub(r"(?:(?:^|\s+)/goal(?:/goal)*)+[.\s]*$", "", clean_task, flags=re.IGNORECASE).strip().rstrip(".")
     if not clean_task:
         clean_task = "[Xem chi tiết nhiệm vụ]"
     tpl = ROLE_SPEC_TEMPLATES.get(canonical, ROLE_SPEC_TEMPLATES["developer"])
@@ -361,6 +358,10 @@ def cmd_spec(args: list, explicit_root: Path = None):
                 after_dd = True
                 idx += 1
                 continue
+            if tok in ("-h", "--help"):
+                print("Sử dụng: orca-team spec <role> \"<mô-tả-nhiệm-vụ>\" [--goal|--no-goal]")
+                print("Các role hỗ trợ: dev, devops, critic, sec, qa, bench, re, ui, pr, issue")
+                return
             if tok == "--goal":
                 goal_override = True
                 idx += 1
@@ -421,7 +422,7 @@ def cmd_spec(args: list, explicit_root: Path = None):
         role_arg = explicit_role
         task_parts = [explicit_task] if explicit_task is not None else clean_args
     elif not clean_args:
-        role_arg = "dev"
+        role_arg = ""
         task_parts = [explicit_task] if explicit_task is not None else []
     else:
         first_tok = clean_args[0].strip().lower()
@@ -2068,7 +2069,7 @@ def interactive_select(
                 start_idx = current_idx - eff_max + 1
 
             # Xóa các dòng menu cũ và vẽ lại vị trí con trỏ mới
-            sys.stderr.write(f"\033[{last_rendered_lines}A")
+            sys.stderr.write(f"\033[{last_rendered_lines}A\r\033[0J")
             last_rendered_lines = render_menu(start_idx, current_idx)
 
     finally:
@@ -2242,6 +2243,8 @@ def cmd_set(root: Path, config: dict, args: list):
         print(f"❌ Không tìm thấy orca-team.json trong '{root}'.", file=sys.stderr)
         sys.exit(1)
 
+    _ensure_critic_defaults(config)
+
     if not args:
         print("❌ Thiếu vai trò cần cấu hình. Dùng: orca-team set <role> [options]", file=sys.stderr)
         print("👉 Các role hợp lệ: coord, dev, qa, sec, pr, issue, ui, devops, bench, re, critic, all", file=sys.stderr)
@@ -2384,7 +2387,6 @@ def cmd_set(root: Path, config: dict, args: list):
         if new_goal_mode is None and not sync_only:
             print("❌ Với vai trò 'all', hãy truyền '--goal' hoặc '--no-goal' (ví dụ: orca-team set all --goal).", file=sys.stderr)
             sys.exit(1)
-        _ensure_critic_defaults(config)
         if new_goal_mode is not None:
             config["goalMode"] = new_goal_mode
             config.setdefault("coordinator", {})["goalMode"] = new_goal_mode
@@ -2756,9 +2758,14 @@ def cmd_uninstall_project(root: Path, args: list):
         except Exception:
             pass
 
-    if not (root / "orca-team.json").is_file():
-        print(f"❌ '{root}' không phải project Orca Orchestrator (không có orca-team.json). Hủy để tránh xóa nhầm file của bạn.", file=sys.stderr)
-        sys.exit(1)
+    has_any_orca_artifact = (
+        (root / "orca-team.json").is_file()
+        or (root / ".agents" / "GEMINI.md").is_file()
+        or any(_is_orca_discovery_link(root / f) for f in ("GEMINI.md", "CLAUDE.md", "AGENTS.md"))
+    )
+    if not has_any_orca_artifact:
+        print(f"ℹ️  Dự án '{root}' chưa được cấu hình Orca Orchestrator.")
+        return
 
     print(f"\n⚠️  [ORCA UNINSTALL PROJECT] Bạn sắp gỡ bỏ cấu hình Multi-Agent Orchestrator khỏi:")
     print(f"   📁 {root}")
@@ -3134,10 +3141,12 @@ def cmd_watchdog(root: Path, args: list = None):
             t_metrics = _analyze_antigravity_transcript(tf_match, scope_id=d_id) if tf_match else {}
             if t_metrics and t_metrics.get("bloated_logs"):
                 if auto_unblock:
-                    tasks_dir = tf_match.parent.parent / "tasks"
+                    tasks_dir = (tf_match.parent.parent / "tasks") if (tf_match and tf_match.parent.name == "logs") else None
                     guard_bin = os.path.expanduser("~/.local/bin/orca-command-guard")
+                    if not os.path.exists(guard_bin):
+                        guard_bin = str(Path(__file__).resolve().parent / "orca-command-guard.py")
                     try:
-                        if os.path.exists(guard_bin):
+                        if tasks_dir and tasks_dir.is_dir() and os.path.exists(guard_bin):
                             import importlib.util
                             from importlib.machinery import SourceFileLoader
                             guard_spec = importlib.util.spec_from_file_location(
@@ -3145,6 +3154,7 @@ def cmd_watchdog(root: Path, args: list = None):
                             )
                             guard_mod = importlib.util.module_from_spec(guard_spec)
                             guard_spec.loader.exec_module(guard_mod)
+                            guard_mod.MAX_TASK_LOG_BYTES = 10 * 1024 * 1024
                             guard_mod._enforce_task_log_cap(tasks_dir)
                         else:
                             for bl_path, bl_sz in t_metrics["bloated_logs"]:
@@ -3154,7 +3164,7 @@ def cmd_watchdog(root: Path, args: list = None):
                                     bf.seek(max(0, bl_sz - 128 * 1024))
                                     tail_b = bf.read()
                                 bl_p.write_bytes(head_b + f"\n[... ORCA-WATCHDOG: đã lược bỏ {bl_sz - len(head_b) - len(tail_b):,} bytes giữa log ...]\n".encode() + tail_b)
-                        bl_msg = "🛡️ ĐÃ NGẮT LỆNH XẢ LOG >16MB & CẮT GỌN FILE LOG"
+                        bl_msg = "🛡️ ĐÃ NGẮT LỆNH XẢ LOG >10MB & CẮT GỌN FILE LOG"
                         note = f"{note} | {bl_msg}" if note else bl_msg
                     except Exception:
                         pass
@@ -3169,9 +3179,12 @@ def cmd_watchdog(root: Path, args: list = None):
                     unblocked_idle = False
                     if auto_unblock and term != "-":
                         try:
-                            if tf_match:
+                            cap_fixed = 0
+                            if tf_match and tf_match.parent.name == "logs":
                                 tasks_dir = tf_match.parent.parent / "tasks"
                                 guard_bin = os.path.expanduser("~/.local/bin/orca-command-guard")
+                                if not os.path.exists(guard_bin):
+                                    guard_bin = str(Path(__file__).resolve().parent / "orca-command-guard.py")
                                 if tasks_dir.is_dir() and os.path.exists(guard_bin):
                                     import importlib.util
                                     from importlib.machinery import SourceFileLoader
@@ -3180,28 +3193,32 @@ def cmd_watchdog(root: Path, args: list = None):
                                     )
                                     guard_mod = importlib.util.module_from_spec(guard_spec)
                                     guard_spec.loader.exec_module(guard_mod)
-                                    guard_mod._enforce_task_log_cap(tasks_dir)
-                            t_read_idle = _safe_orca_run([orca_bin, "terminal", "read", "--terminal", term, "--limit", "15", "--screen", "--json"], timeout=5)
-                            if t_read_idle.returncode == 0:
-                                t_data_i = json.loads(t_read_idle.stdout)
-                                t_res_i = t_data_i.get("result", t_data_i) if isinstance(t_data_i, dict) else {}
-                                term_obj_i = t_res_i.get("terminal", {}) if isinstance(t_res_i, dict) else {}
-                                tail_i = term_obj_i.get("tail") if isinstance(term_obj_i, dict) else None
-                                scr_i = "\n".join(str(line) for line in tail_i) if isinstance(tail_i, list) else str(t_res_i.get("content") or t_res_i.get("screen") or "")
-                                clean_i = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", scr_i)
-                                has_destructive = any(rx.search(clean_i) for rx in _WATCHDOG_DESTRUCTIVE_RES)
-                                if not has_destructive and re.search(r"(?m)^\s*>\s*$", clean_i):
-                                    nudge_res = _safe_orca_run(
-                                        [
-                                            orca_bin, "terminal", "send", "--terminal", term,
-                                            "--text", "Tiếp tục hoàn thành nhiệm vụ đang dở (nếu chạy jest phải kèm --forceExit) và gửi báo cáo worker_done về Coordinator ngay khi xong.",
-                                            "--enter",
-                                        ],
-                                        timeout=5,
-                                    )
-                                    if nudge_res.returncode == 0:
-                                        note = f"🔓 ĐÃ GỬI NUDGE ĐÁNH THỨC WORKER TREO ({_fmt_dur(idle_s)})"
-                                        unblocked_idle = True
+                                    cap_fixed = guard_mod._enforce_task_log_cap(tasks_dir) or 0
+                            if cap_fixed > 0:
+                                note = f"🔓 ĐÃ TỰ ĐỘNG NGẮT TIẾN TRÌNH JEST/LOG TREO ({_fmt_dur(idle_s)})"
+                                unblocked_idle = True
+                            else:
+                                t_read_idle = _safe_orca_run([orca_bin, "terminal", "read", "--terminal", term, "--limit", "15", "--screen", "--json"], timeout=5)
+                                if t_read_idle.returncode == 0:
+                                    t_data_i = json.loads(t_read_idle.stdout)
+                                    t_res_i = t_data_i.get("result", t_data_i) if isinstance(t_data_i, dict) else {}
+                                    term_obj_i = t_res_i.get("terminal", {}) if isinstance(t_res_i, dict) else {}
+                                    tail_i = term_obj_i.get("tail") if isinstance(term_obj_i, dict) else None
+                                    scr_i = "\n".join(str(line) for line in tail_i) if isinstance(tail_i, list) else str(t_res_i.get("content") or t_res_i.get("screen") or "")
+                                    clean_i = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", scr_i)
+                                    has_destructive = any(rx.search(clean_i) for rx in _WATCHDOG_DESTRUCTIVE_RES)
+                                    if not has_destructive and re.search(r"(?m)^\s*[>❯]\s*$", clean_i):
+                                        nudge_res = _safe_orca_run(
+                                            [
+                                                orca_bin, "terminal", "send", "--terminal", term,
+                                                "--text", "Tiếp tục hoàn thành nhiệm vụ đang dở (nếu chạy jest phải kèm --forceExit) và gửi báo cáo worker_done về Coordinator ngay khi xong.",
+                                                "--enter",
+                                            ],
+                                            timeout=5,
+                                        )
+                                        if nudge_res.returncode == 0:
+                                            note = f"🔓 ĐÃ GỬI NUDGE ĐÁNH THỨC WORKER TREO ({_fmt_dur(idle_s)})"
+                                            unblocked_idle = True
                         except Exception:
                             pass
                     if not unblocked_idle:
@@ -3753,11 +3770,19 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                     tc_names_in_turn.append(nm_item)
                     if nm_item in ("view_file", "Read"):
                         view_calls += 1
+            tc_cmds = [_command_from_tool_call(tc) for tc in tcs if isinstance(tc, dict)]
             if tc_names_in_turn:
                 last_tool_name = tc_names_in_turn[-1]
-                if all(nm_item in ("manage_task", "schedule") for nm_item in tc_names_in_turn):
+                is_pure_poll_tools = all(
+                    nm_item in ("manage_task", "schedule", "TaskOutput", "BashOutput", "Sleep")
+                    for nm_item in tc_names_in_turn
+                )
+                is_pure_sleep_cmd = bool(tc_cmds) and all(
+                    bool(cmd_c and re.match(r"^\s*sleep\s+\d+(?:\.\d+)?\s*$", cmd_c))
+                    for cmd_c in tc_cmds
+                )
+                if is_pure_poll_tools or is_pure_sleep_cmd:
                     poll_turns += 1
-            tc_cmds = [_command_from_tool_call(tc) for tc in tcs if isinstance(tc, dict)]
             turn_has_git_commit = any(_GIT_COMMIT_CMD_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
             turn_has_git_amend = any(_GIT_COMMIT_AMEND_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
             turn_has_rev_inspect = any(_GIT_REV_INSPECT_CMD_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
@@ -3859,8 +3884,8 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
     idle_since_last = max(0.0, (now_utc - tN).total_seconds()) if tN else 0.0
 
     bloated_logs = []
-    tasks_dir = tf_path.parent.parent / "tasks"
-    if tasks_dir.is_dir():
+    tasks_dir = (tf_path.parent.parent / "tasks") if tf_path.parent.name == "logs" else None
+    if tasks_dir and tasks_dir.is_dir():
         try:
             for tl in tasks_dir.glob("*.log"):
                 sz = tl.stat().st_size
@@ -4165,8 +4190,14 @@ def _collect_git_diff_stats(
                         if "|" not in rln:
                             continue
                         r_sha, r_gs = rln.split("|", 1)
-                        if r_gs.startswith(("commit:", "commit (amend):", "commit (initial):")) and r_sha.strip() not in shas:
-                            shas.append(r_sha.strip())
+                        r_sha_clean = r_sha.strip()
+                        if r_gs.startswith(("commit:", "commit (amend):", "commit (initial):")) and r_sha_clean not in shas:
+                            anc_chk = subprocess.run(
+                                ["git", "-C", git_dir, "merge-base", "--is-ancestor", r_sha_clean, target_ref],
+                                capture_output=True, timeout=2,
+                            )
+                            if anc_chk.returncode == 0:
+                                shas.append(r_sha_clean)
             if not shas and not reflog_checked:
                 rev_args = ["rev-list", "--no-merges", f"--since=@{since_ts}", f"--until=@{until_ts}", target_ref]
                 if wt_name and not wt_name.startswith(("dev-worker", "devops-worker", "ui-worker")):
@@ -4425,13 +4456,21 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             coord_goal_cfg = _is_goal_mode_enabled(config.get("coordinator") or {}, config)
             any_worker_goal_cfg = any(
                 _is_goal_mode_enabled(roles_cfg_chk.get(rk) or {}, config)
-                for rk, _, _ in role_wt_map_chk
+                for rk in ("developer", "qa", "security", "devopsSpecialist", "benchSpecialist", "reSpecialist", "uiSpecialist", "criticSpecialist", "prReviewer", "issueResolver")
             )
-            missing_goal_directive = (
-                (coord_goal_cfg and "CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH" not in g_txt)
-                or (not coord_goal_cfg and not any_worker_goal_cfg and "CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH" in g_txt)
-                or (not coord_goal_cfg and "(`goalMode: true` trên `coordinator`)" in g_txt)
-            )
+            if coord_goal_cfg:
+                missing_goal_directive = "CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH" not in g_txt
+            elif any_worker_goal_cfg:
+                missing_goal_directive = (
+                    "CHẾ ĐỘ LÀM TRIỆT ĐỂ TRÊN WORKER" not in g_txt
+                    or "CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH" in g_txt
+                    or "(`goalMode: true` trên `coordinator`)" in g_txt
+                )
+            else:
+                missing_goal_directive = (
+                    "CHẾ ĐỘ LÀM TRIỆT ĐỂ" in g_txt
+                    or "(`goalMode: true` trên `coordinator`)" in g_txt
+                )
             if missing_slot_wts or missing_goal_directive:
                 if auto_fix:
                     sync_gemini_directive(root, config)
@@ -4918,7 +4957,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 git_str = f"git: {files_mod_count} files (+{git_stats['ins']}/-{git_stats['del']}, {git_stats['commits']} commits)"
                 if t_metrics:
                     poll_t = int(t_metrics.get("poll_turns") or 0)
-                    eff_t = int(t_metrics.get("effective_turns") or t_metrics["turns"])
+                    eff_t = int(t_metrics["effective_turns"]) if "effective_turns" in t_metrics else max(0, int(t_metrics["turns"]) - poll_t)
                     poll_info = f" | eff_turns: {eff_t}t (poll={poll_t}t)" if poll_t > 0 else ""
                     lat_str = f"avg_turn: {t_metrics['avg_turn_s']:.1f}s/turn{poll_info} | active_vel: {t_metrics['active_tok_s']:.1f} tok/s | in_fresh: {_fmt_tok(t_metrics['in_tok'])} | cache_read: {_fmt_tok(t_metrics['cache_tok'])} | last_tool: {t_metrics['last_tool']}"
                 else:
@@ -4937,7 +4976,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 if t_metrics and t_metrics["turns"] > 120:
                     raw_t = int(t_metrics["turns"])
                     poll_t = int(t_metrics.get("poll_turns") or 0)
-                    eff_t = int(t_metrics.get("effective_turns") or (raw_t - poll_t))
+                    eff_t = int(t_metrics["effective_turns"]) if "effective_turns" in t_metrics else max(0, raw_t - poll_t)
                     view_c = int(t_metrics.get("view_calls") or 0)
                     t_errs = int(t_metrics["tool_errors"])
                     t_calls = int(t_metrics["tool_calls"])
@@ -4945,11 +4984,11 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         warning_issues.append(
                             f"Worker {wt_name} ({d_id}) đã chạy {raw_t} turns (thực thi: {eff_t}t, poll: {poll_t}t) kèm {t_errs}/{t_calls} lỗi tool — dấu hiệu sa đà đào bới lỗi hoặc vòng lặp retry."
                         )
-                    elif eff_t <= 120 and poll_t >= 20:
+                    elif eff_t <= 120:
                         warning_issues.append(
                             f"Worker {wt_name} ({d_id}) có tổng {raw_t} turns ({w_state}, chỉ {t_errs}/{t_calls} lỗi), nhưng thực thi chính chỉ {eff_t} turns (còn {poll_t} turns là poll manage_task/schedule chờ lệnh background)."
                         )
-                    elif eff_t > 160:
+                    else:
                         warning_issues.append(
                             f"Worker {wt_name} ({d_id}) chạy {raw_t} turns trên tác vụ lớn ({w_state}, {files_mod_count} files, chỉ {t_errs}/{t_calls} lỗi; thực thi chính: {eff_t}t, poll background: {poll_t}t, đọc file: {view_c} lần)."
                         )
@@ -4964,6 +5003,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         if auto_fix:
                             try:
                                 guard_bin_fix = os.path.expanduser("~/.local/bin/orca-command-guard")
+                                if not os.path.exists(guard_bin_fix):
+                                    guard_bin_fix = str(Path(__file__).resolve().parent / "orca-command-guard.py")
                                 if os.path.exists(guard_bin_fix):
                                     import importlib.util
                                     from importlib.machinery import SourceFileLoader
@@ -4972,6 +5013,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                                     )
                                     guard_mod = importlib.util.module_from_spec(guard_spec)
                                     guard_spec.loader.exec_module(guard_mod)
+                                    guard_mod.MAX_TASK_LOG_BYTES = 10 * 1024 * 1024
                                     guard_mod._enforce_task_log_cap(bl_p.parent)
                                 else:
                                     with open(bl_p, "rb") as bf:
@@ -5315,6 +5357,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
                 w_with_m = [wm["telemetry"] for wm in worker_metrics_list if wm.get("telemetry")]
                 w_turns = sum(m["turns"] for m in w_with_m)
+                w_poll_turns = sum(int(m.get("poll_turns") or 0) for m in w_with_m)
+                w_eff_turns = sum(int(m["effective_turns"]) if "effective_turns" in m else max(0, int(m["turns"]) - int(m.get("poll_turns") or 0)) for m in w_with_m)
                 w_tools = sum(m["tool_calls"] for m in w_with_m)
                 w_errs = sum(m["tool_errors"] for m in w_with_m)
                 w_in_tok = sum(m["in_tok"] for m in w_with_m)
@@ -5336,7 +5380,12 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 print("   │ Chỉ số kỹ thuật (Đo trực tiếp từ Transcript) │ LEADER (Coordinator)            │ WORKERS (Tổng hợp các nhánh)    │")
                 print("   ├──────────────────────────────────────────────┼─────────────────────────────────┼─────────────────────────────────┤")
                 if leader_m:
-                    l_turns_str = f"{leader_m['turns']} turns / {leader_m['tool_calls']} tools ({leader_m['tool_errors']} err)"
+                    l_poll_t = int(leader_m.get("poll_turns") or 0)
+                    l_eff_t = int(leader_m["effective_turns"]) if "effective_turns" in leader_m else max(0, int(leader_m["turns"]) - l_poll_t)
+                    if l_poll_t > 0:
+                        l_turns_str = f"{leader_m['turns']}t (eff:{l_eff_t}) / {leader_m['tool_calls']}c ({leader_m['tool_errors']}e)"
+                    else:
+                        l_turns_str = f"{leader_m['turns']} turns / {leader_m['tool_calls']} tools ({leader_m['tool_errors']} err)"
                     l_time_str = f"LLM {_fmt_dur(leader_m['llm_secs'])} | Tool {_fmt_dur(leader_m['tool_secs'])}"
                     l_spd_str = f"{leader_m['out_tok_s']:.1f} out/s | {_fmt_tok(int(leader_m['prefill_tok_s']))} tot/s"
                     l_in_str = f"{leader_m['in_tok']:,} tok"
@@ -5352,7 +5401,13 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     l_out_str = f"~{total_spec_tokens:,} tok (spec)"
                     l_peak_str = f"~{base_tokens + total_report_tokens:,} tok"
 
-                w_turns_str = f"{w_turns} turns / {w_tools} tools ({w_errs} err)" if w_with_m else "N/A"
+                if w_with_m:
+                    if w_poll_turns > 0:
+                        w_turns_str = f"{w_turns}t (eff:{w_eff_turns}) / {w_tools}c ({w_errs}e)"
+                    else:
+                        w_turns_str = f"{w_turns} turns / {w_tools} tools ({w_errs} err)"
+                else:
+                    w_turns_str = "N/A"
                 w_time_str = f"LLM {_fmt_dur(w_llm_s)} | Tool {_fmt_dur(w_tool_s)}" if w_with_m else "N/A"
                 w_spd_str = f"{w_out_speed:.1f} out/s | {_fmt_tok(int(w_prefill_speed))} tot/s" if w_with_m else "N/A"
                 w_in_str = f"{w_in_tok:,} tok" if w_with_m else "N/A"
@@ -5509,6 +5564,22 @@ def _resolve_monitor_root(default_root: Path, default_config: dict, sub_args: li
     return default_root, default_config
 
 
+KNOWN_SUBCOMMANDS = {
+    "status", "list", "show",
+    "set", "get",
+    "watchdog", "workers", "health",
+    "monitor", "debug", "tokens", "token", "audit-tokens",
+    "link", "discovery",
+    "sync",
+    "uninstall", "remove", "clean-all", "purge",
+    "models", "list-models", "discover-models",
+    "select", "menu", "choose",
+    "agents", "list-agents",
+    "spec", "role-spec", "prompt",
+    "-h", "--help", "help",
+}
+
+
 def main():
     raw_args = sys.argv[1:]
 
@@ -5558,22 +5629,40 @@ def main():
             args.append(raw_args[i])
             i += 1
 
-    if args and args[0] in ("spec", "role-spec", "prompt"):
-        cmd_spec(args[1:], explicit_root=explicit_root)
-        return
+    prog_name = Path(sys.argv[0]).name
+    if prog_name != "orca-monitor" and args:
+        cmd0 = args[0].lower()
+        if cmd0 in ("spec", "role-spec", "prompt"):
+            cmd_spec(args[1:], explicit_root=explicit_root)
+            return
+        if cmd0 in ("models", "list-models", "discover-models"):
+            cmd_models(args[1:])
+            return
+        if cmd0 in ("select", "menu", "choose"):
+            cmd_select(args[1:])
+            return
+        if cmd0 in ("agents", "list-agents"):
+            print("🐋 Các Agent chính thức được Orca ADE hỗ trợ:")
+            for ag in KNOWN_AGENTS:
+                print(f"  • {ag}")
+            return
+        if cmd0 in ("-h", "--help", "help"):
+            print(__doc__)
+            return
 
     root = explicit_root if explicit_root is not None else find_project_root()
     config = load_config(root)
 
     # Nếu được gọi trực tiếp qua alias 'orca-monitor'
-    prog_name = Path(sys.argv[0]).name
     if prog_name == "orca-monitor":
         root, config = _resolve_monitor_root(root, config, args)
         cmd_monitor(root, config, args)
         return
 
     if not args or args[0] in ["status", "list", "show"] or (
-        args[0].lower() not in ROLE_ALIASES and Path(args[0]).expanduser().is_dir()
+        args[0].lower() not in ROLE_ALIASES
+        and args[0].lower() not in KNOWN_SUBCOMMANDS
+        and Path(args[0]).expanduser().is_dir()
     ):
         scan_args = args[1:] if (args and args[0] in ("status", "list", "show")) else args
         if any(a in ("-h", "--help", "help") for a in scan_args):
@@ -5619,16 +5708,6 @@ def main():
         print(f"✅ Đã đồng bộ '{root / '.agents' / 'GEMINI.md'}' từ '{root / 'orca-team.json'}'.")
     elif args[0] in ["uninstall", "remove", "clean-all", "purge"]:
         cmd_uninstall_project(root, args[1:])
-    elif args[0] in ["models", "list-models", "discover-models"]:
-        cmd_models(args[1:])
-    elif args[0] in ["select", "menu", "choose"]:
-        cmd_select(args[1:])
-    elif args[0] in ["agents", "list-agents"]:
-        print("🐋 Các Agent chính thức được Orca ADE hỗ trợ:")
-        for ag in KNOWN_AGENTS:
-            print(f"  • {ag}")
-    elif args[0] in ["-h", "--help", "help"]:
-        print(__doc__)
     else:
         # Default fallback: check if first arg is a role name directly, e.g. "orca-team dev"
         if args[0].lower() in ROLE_ALIASES:

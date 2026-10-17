@@ -36,6 +36,7 @@ SHOW_HELP=false
 FORCE_SELF=false
 PRESET_MODE=""
 PROJECT_DIR=""
+GOAL_MODE=true
 
 while [[ $# -gt 0 ]]; do
   arg="$1"
@@ -50,6 +51,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --force-self)
       FORCE_SELF=true
+      shift
+      ;;
+    --goal|--enable-goal)
+      GOAL_MODE=true
+      shift
+      ;;
+    --no-goal|--disable-goal)
+      GOAL_MODE=false
+      shift
+      ;;
+    --goal=*)
+      goal_val="${${arg#--goal=}:l}"
+      if [[ "$goal_val" =~ ^(true|on|1|yes)$ ]]; then
+        GOAL_MODE=true
+      elif [[ "$goal_val" =~ ^(false|off|0|no)$ ]]; then
+        GOAL_MODE=false
+      else
+        echo "❌ Giá trị không hợp lệ cho '--goal=': '$goal_val' (dùng true hoặc false)." >&2
+        exit 1
+      fi
       shift
       ;;
     -u|--uninstall|uninstall|--clean)
@@ -121,6 +142,7 @@ if [[ "$SHOW_HELP" == true ]]; then
   echo "Tùy chọn:"
   echo "  -y, --yes               Khởi tạo tự động với cấu hình khuyến nghị (không hỏi tương tác)"
   echo "  --preset <mode>         Chọn cấu hình preset nhanh: high, balanced, cost, minimal, full"
+  echo "  --goal / --no-goal      Bật (mặc định) hoặc tắt chế độ /goal trên toàn bộ các role"
   echo "  --path, -C <dir>        Chỉ định thư mục dự án đích"
   echo "  -u, --uninstall         Gỡ bỏ cấu hình Orchestrator khỏi dự án"
   echo "  -h, --help              Hiển thị hướng dẫn sử dụng"
@@ -204,7 +226,7 @@ gi.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
   exit 0
 fi
 
-if [[ ! -t 0 && "$AUTO_YES" != true ]]; then
+if [[ ( ! -t 0 || ! -t 2 ) && "$AUTO_YES" != true ]]; then
   echo "❌ Môi trường không tương tác (non-TTY). Hãy thêm cờ '--yes' (-y) để khởi tạo tự động." >&2
   exit 1
 fi
@@ -381,10 +403,12 @@ choose_model() {
   elif [[ "$AUTO_YES" == true ]]; then
     case "${agent:l}" in
       antigravity)
-        if [[ "$role_tier" == "tier3" ]]; then
-          SELECTED_MODEL="gemini-3-flash"
+        if [[ "$role_tier" == "tier1" ]]; then
+          SELECTED_MODEL="claude-opus-5-5-high"
+        elif [[ "$role_tier" == "tier2" ]]; then
+          SELECTED_MODEL="gemini-4-argon-high"
         else
-          SELECTED_MODEL="gemini-3.1-pro"
+          SELECTED_MODEL="gemini-3.8-flash-${default_eff:-high}"
         fi
         ;;
       claude)
@@ -1016,12 +1040,12 @@ cat > "$TARGET_CONFIG" << JSON
 {
   "projectPath": $(json_str_or_null "$PROJECT_PATH"),
   "executionHost": $(json_str_or_null "$EXEC_HOST"),
-  "goalMode": true,
+  "goalMode": $GOAL_MODE,
   "coordinator": {
     "agent": $(json_str_or_null "$COORD_AGENT"),
     "model": $(json_str_or_null "$COORD_MODEL"),
     "effort": $(json_str_or_null "$COORD_EFFORT"),
-    "goalMode": true
+    "goalMode": $GOAL_MODE
   },
   "roles": {
     "developer": {
@@ -1029,7 +1053,7 @@ cat > "$TARGET_CONFIG" << JSON
       "model": $(json_str_or_null "$DEV_MODEL"),
       "effort": $(json_str_or_null "$DEV_EFFORT"),
       "concurrency": $DEV_COUNT,
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": $DEV_UTILS_JSON
     },
     "qa": {
@@ -1037,7 +1061,7 @@ cat > "$TARGET_CONFIG" << JSON
       "model": $(json_str_or_null "$QA_MODEL"),
       "effort": $(json_str_or_null "$QA_EFFORT"),
       "concurrency": $QA_COUNT,
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": $QA_UTILS_JSON
     },
     "security": {
@@ -1045,21 +1069,21 @@ cat > "$TARGET_CONFIG" << JSON
       "model": $(json_str_or_null "$SEC_MODEL"),
       "effort": $(json_str_or_null "$SEC_EFFORT"),
       "concurrency": $SEC_COUNT,
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": $SEC_UTILS_JSON
     },
     "prReviewer": {
       "agent": $(json_str_or_null "$PR_AGENT"),
       "model": $(json_str_or_null "$PR_MODEL"),
       "effort": $(json_str_or_null "$PR_EFFORT"),
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": ["git-worktrees", "diff-viewer", "annotate-ai-diff"]
     },
     "issueResolver": {
       "agent": $(json_str_or_null "$ISSUE_AGENT"),
       "model": $(json_str_or_null "$ISSUE_MODEL"),
       "effort": $(json_str_or_null "$ISSUE_EFFORT"),
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": ["git-worktrees", "issue-metadata", "commit-push"]
     },
     "uiSpecialist": {
@@ -1067,7 +1091,7 @@ cat > "$TARGET_CONFIG" << JSON
       "agent": $(json_str_or_null "${UI_AGENT:-none}"),
       "model": $(json_str_or_null "$UI_MODEL"),
       "effort": $(json_str_or_null "$UI_EFFORT"),
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": ["browser-design-mode", "per-worktree-browser"]
     },
     "devopsSpecialist": {
@@ -1075,7 +1099,7 @@ cat > "$TARGET_CONFIG" << JSON
       "agent": $(json_str_or_null "${DEVOPS_AGENT:-none}"),
       "model": $(json_str_or_null "$DEVOPS_MODEL"),
       "effort": $(json_str_or_null "$DEVOPS_EFFORT"),
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": ["ssh-remote-execution", "orca-per-workspace-env"]
     },
     "benchSpecialist": {
@@ -1083,7 +1107,7 @@ cat > "$TARGET_CONFIG" << JSON
       "agent": $(json_str_or_null "${BENCH_AGENT:-none}"),
       "model": $(json_str_or_null "$BENCH_MODEL"),
       "effort": $(json_str_or_null "$BENCH_EFFORT"),
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": ["git-worktrees", "ssh-remote-execution", "orca-skills-registry"]
     },
     "reSpecialist": {
@@ -1091,7 +1115,7 @@ cat > "$TARGET_CONFIG" << JSON
       "agent": $(json_str_or_null "${RE_AGENT:-none}"),
       "model": $(json_str_or_null "$RE_MODEL"),
       "effort": $(json_str_or_null "$RE_EFFORT"),
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": ["git-worktrees", "orca-skills-registry", "reverse-engineer-anything"]
     },
     "criticSpecialist": {
@@ -1099,7 +1123,7 @@ cat > "$TARGET_CONFIG" << JSON
       "agent": $(json_str_or_null "${CRITIC_AGENT:-none}"),
       "model": $(json_str_or_null "$CRITIC_MODEL"),
       "effort": $(json_str_or_null "$CRITIC_EFFORT"),
-      "goalMode": true,
+      "goalMode": $GOAL_MODE,
       "utilities": ["git-worktrees", "diff-viewer", "orca-skills-registry"]
     }
   }

@@ -51,6 +51,10 @@ EXCLUDED_CHILD_MARKERS = (
     "language_server",
     " mcp",
     "/mcp",
+    "-mcp",
+    "mcp-",
+    "mcp_",
+    "modelcontextprotocol",
 )
 
 
@@ -72,21 +76,26 @@ AGENT_EXEC_NAMES = {
 
 
 def _ancestor_pids() -> list[int]:
-    """PID chain of this hook process up to init (agent CLI / language_server is one of them)."""
+    """PID chain of this hook process up to init (innermost agent CLI / language_server first)."""
     pids: list[int] = []
     try:
         table = _get_process_table()
         cur = os.getppid()
         seen = set()
         transient = {"sh", "bash", "zsh", "dash", "env", "python", "python3", "timeout"}
+        found_agent = False
         while cur > 1 and cur not in seen and len(seen) < 16:
             seen.add(cur)
             ppid, _, args_str = table.get(cur, (0, 0, ""))
             toks = args_str.split()
-            exe = os.path.basename(toks[0]).lower() if toks else ""
+            exe = os.path.basename(toks[0]).lower().lstrip("-") if toks else ""
+            is_agent = _looks_like_agent(args_str)
+            if is_agent:
+                found_agent = True
             is_transient = exe in transient or exe.startswith("python")
-            # Bỏ qua wrapper ngắn hạn (sh -c của hook, python harness): PID của chúng có thể bị tái sử dụng cho lệnh runaway
-            if not is_transient or _looks_like_agent(args_str):
+            # Chỉ bỏ qua wrapper ngắn hạn (sh -c của hook) nằm BÊN DƯỚI agent CLI;
+            # các shell/tiến trình phía trên agent (như -zsh của Orca pane) là tổ tiên cố định cần bảo vệ.
+            if found_agent or not is_transient or is_agent:
                 pids.append(cur)
             cur = ppid
     except Exception:
@@ -123,14 +132,18 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def _load_agent_pids(tasks_dir: Path) -> set[int]:
+def _load_agent_pids_ordered(tasks_dir: Path) -> list[int]:
     try:
         raw = json.loads((tasks_dir / AGENT_PIDS_FILE).read_text(encoding="utf-8"))
         if not isinstance(raw, list):
-            return set()
-        return {int(x) for x in raw if str(x).isdigit() and _pid_alive(int(x))}
+            return []
+        return [int(x) for x in raw if str(x).isdigit() and _pid_alive(int(x))]
     except Exception:
-        return set()
+        return []
+
+
+def _load_agent_pids(tasks_dir: Path) -> set[int]:
+    return set(_load_agent_pids_ordered(tasks_dir))
 
 
 def _looks_like_agent(args_str: str) -> bool:
@@ -1044,27 +1057,53 @@ def _run_stream_filter() -> None:
         return
 
 
-def _get_process_table() -> dict[int, tuple[int, int, str]]:
-    """Return mapping of pid -> (ppid, pgid, args_str)."""
+def _parse_ps_etime(etime_str: str) -> int:
+    s = etime_str.strip()
+    days = 0
+    if "-" in s:
+        d_part, s = s.split("-", 1)
+        if d_part.isdigit():
+            days = int(d_part)
+    parts = [int(p) for p in s.split(":") if p.isdigit()]
+    if len(parts) == 3:
+        return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+    if len(parts) == 2:
+        return days * 86400 + parts[0] * 60 + parts[1]
+    if len(parts) == 1:
+        return days * 86400 + parts[0]
+    return 0
+
+
+def _get_process_table_with_etime() -> tuple[dict[int, tuple[int, int, str]], dict[int, int]]:
+    """Return (mapping of pid -> (ppid, pgid, args_str), mapping of pid -> elapsed_seconds)."""
     table: dict[int, tuple[int, int, str]] = {}
+    etimes: dict[int, int] = {}
     try:
         res = subprocess.run(
-            ["ps", "-eo", "pid=,ppid=,pgid=,args="],
+            ["ps", "-eo", "pid=,ppid=,pgid=,etime=,args="],
             capture_output=True,
             text=True,
             timeout=2,
         )
         if res.returncode == 0:
             for line in res.stdout.splitlines():
-                parts = line.strip().split(None, 3)
-                if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit():
+                parts = line.strip().split(None, 4)
+                if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit():
                     pid = int(parts[0])
                     ppid = int(parts[1])
                     pgid = int(parts[2])
-                    args_str = parts[3] if len(parts) > 3 else ""
+                    etime_s = _parse_ps_etime(parts[3])
+                    args_str = parts[4] if len(parts) > 4 else ""
                     table[pid] = (ppid, pgid, args_str)
+                    etimes[pid] = etime_s
     except Exception:
         pass
+    return table, etimes
+
+
+def _get_process_table() -> dict[int, tuple[int, int, str]]:
+    """Return mapping of pid -> (ppid, pgid, args_str)."""
+    table, _ = _get_process_table_with_etime()
     return table
 
 
@@ -1085,29 +1124,104 @@ def _collect_descendants(root_pid: int, children_map: dict[int, list[int]]) -> l
     return result
 
 
-def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
+def _normalize_cmd_hint(raw_cmd: str) -> str:
+    s = raw_cmd.strip()
+    if len(s) >= 158 and " " in s:
+        s = s.rsplit(None, 1)[0]
+    prev = None
+    while s and s != prev:
+        prev = s
+        s = re.sub(
+            r"^(?:\s*(?:set\s+-[a-zA-Z0-9\s-]+|cd\s+[^;&|\n]+|export\s+[^;&|\n]+|source\s+[^;&|\n]+|\.\s+[^;&|\n]+)\s*(?:&&|;)\s*)+",
+            "",
+            s,
+        ).strip()
+        s = re.sub(
+            r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)+",
+            "",
+            s,
+        ).strip()
+    s = re.sub(r"<<-?\s*['\"\\]?[A-Za-z0-9_.-]+['\"]?", "", s)
+    s = re.sub(r"\b\d*>&\d+\b", "", s)
+    s = re.sub(r"\b\d*>>?\s*\S+", "", s)
+    return s.strip()
+
+
+def _extract_hint_tokens(raw_hint: str) -> list[str]:
+    norm = _normalize_cmd_hint(raw_hint)
+    tokens: list[str] = []
+    for raw_tok in re.split(r"\s+", norm):
+        t = raw_tok.strip("'\"`;|&()")
+        if not t or len(t) <= 2:
+            continue
+        if t in ("&&", "||", "|", ";", "-c", "-e", "--"):
+            continue
+        if "=" in t and not t.startswith("-"):
+            continue
+        tokens.append(t)
+        if len(tokens) >= 6:
+            break
+    return tokens
+
+
+def _kill_runaway_process_for_log(
+    log_file: Path,
+    tasks_dir: Path,
+    require_jest: bool = False,
+) -> bool:
     """
-    Find the process holding `log_file` open:
+    Find the process responsible for `log_file`:
     - If held directly by a non-agent child process, kill that process and its process group.
-    - If held by the Agent parent process (`agy` / `language_server`), locate the active tool-execution
+    - If held by or running under the Agent parent process (`agy` / `language_server`), locate the active tool-execution
       child shell (`ppid == agent_pid`) and terminate its process group and descendants without touching the Agent CLI.
     """
     killed_any = False
     try:
-        lsof_res = subprocess.run(
-            ["lsof", "-t", str(log_file)],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if lsof_res.returncode != 0 or not lsof_res.stdout.strip():
+        holder_pids: list[int] = []
+        try:
+            lsof_res = subprocess.run(
+                ["lsof", "-t", str(log_file)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if lsof_res.returncode == 0 and lsof_res.stdout.strip():
+                holder_pids = [int(x.strip()) for x in lsof_res.stdout.splitlines() if x.strip().isdigit()]
+        except Exception:
+            pass
+
+        proc_table, etime_map = _get_process_table_with_etime()
+        if not proc_table:
             return False
 
-        holder_pids = [int(x.strip()) for x in lsof_res.stdout.splitlines() if x.strip().isdigit()]
+        # Fallback khi `agy`/`language_server` không giữ mở FD của `task-XX.log` liên tục (chỉ open->write->close khi có output):
+        # lấy PID của leaf agent thuộc conversation này từ `.orca-agent-pids.json` hoặc `lsof` trên `.system_generated`.
+        if not holder_pids:
+            ordered_agents = _load_agent_pids_ordered(tasks_dir)
+            for apid in ordered_agents:
+                if apid in proc_table and _looks_like_agent(proc_table[apid][2]):
+                    holder_pids.append(apid)
+                    break
+            if not holder_pids and tasks_dir.parent.name == ".system_generated":
+                try:
+                    sg_res = subprocess.run(
+                        ["lsof", "-t", str(tasks_dir.parent)],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                    )
+                    if sg_res.returncode == 0 and sg_res.stdout.strip():
+                        for x in sg_res.stdout.splitlines():
+                            if x.strip().isdigit():
+                                p_cand = int(x.strip())
+                                if p_cand in proc_table and _looks_like_agent(proc_table[p_cand][2]):
+                                    holder_pids.append(p_cand)
+                except Exception:
+                    pass
+
         if not holder_pids:
             return False
 
-        proc_table = _get_process_table()
         children_map: dict[int, list[int]] = {}
         for pid, (ppid, _, _) in proc_table.items():
             children_map.setdefault(ppid, []).append(pid)
@@ -1118,6 +1232,12 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
             pid for pid, (_, _, a_str) in proc_table.items() if _looks_like_agent(a_str)
         }
         agent_pgids = {proc_table[p][1] for p in agent_pids if p in proc_table}
+
+        log_idle_s = 0.0
+        try:
+            log_idle_s = max(0.0, time.time() - log_file.stat().st_mtime)
+        except Exception:
+            pass
 
         # Check if we recorded command snippets for this task log during PreToolUse
         cmd_hints: list[str] = []
@@ -1146,6 +1266,8 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
             if not is_protected_agent:
                 # Direct child process holding the log FD
                 if any(ex in h_args_low for ex in EXCLUDED_CHILD_MARKERS):
+                    continue
+                if require_jest and not re.search(r"\b(?:jest|vitest)\b", h_args_low):
                     continue
                 for d_pid in _collect_descendants(h_pid, children_map):
                     d_info = proc_table.get(d_pid)
@@ -1184,30 +1306,54 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
                     # Exclude MCP servers that share process group with language_server and don't run a shell command
                     if ch_pgid == h_pgid and not re.search(r"\b(?:zsh|bash|sh|python3?|node|docker)\b", ch_low):
                         continue
+                    desc_pids = _collect_descendants(ch_pid, children_map)
                     tree_args = " ; ".join(
                         proc_table[dp][2]
-                        for dp in _collect_descendants(ch_pid, children_map)
+                        for dp in desc_pids
                         if dp in proc_table
                     )
-                    candidate_children.append((ch_pid, ch_pgid, tree_args or ch_args))
+                    full_args = tree_args or ch_args
+                    full_low = full_args.lower()
+                    if any(ex in full_low for ex in EXCLUDED_CHILD_MARKERS):
+                        continue
+                    # Chống giết nhầm tiến trình mới vừa khởi chạy cho một file log cũ đã ngừng ghi từ trước:
+                    max_etime = max([etime_map.get(dp, 0) for dp in desc_pids] + [etime_map.get(ch_pid, 0)])
+                    if log_idle_s >= 5.0 and max_etime > 0 and (max_etime + 2.0) < log_idle_s:
+                        continue
+                    if require_jest and not re.search(r"\b(?:jest|vitest)\b", full_low):
+                        continue
+                    candidate_children.append((ch_pid, ch_pgid, full_args))
 
                 # Chỉ kill khi xác định ĐƠN NHẤT được tiến trình chạy lệnh của log này.
                 # Mơ hồ (0 hoặc >1 ứng viên) ➔ KHÔNG kill gì (chỉ cắt log) để không giết nhầm dev server / MCP server / lệnh song song.
                 if cmd_hints:
                     matched: list[tuple[int, int, str]] = []
                     for hint in reversed(cmd_hints):
-                        exact = [c for c in candidate_children if hint in c[2]]
+                        norm_hint = _normalize_cmd_hint(hint)
+                        exact = [
+                            c
+                            for c in candidate_children
+                            if (hint and hint in c[2]) or (norm_hint and norm_hint in c[2])
+                        ]
                         if len(exact) == 1:
                             matched = exact
                             break
-                        hint_tokens = [t for t in re.split(r"\s+", hint) if len(t) > 2][:8]
+                        hint_tokens = _extract_hint_tokens(hint)
                         tok_match = [
-                            c for c in candidate_children
-                            if hint in c[2] or (hint_tokens and all(t in c[2] for t in hint_tokens))
+                            c
+                            for c in candidate_children
+                            if (hint and hint in c[2])
+                            or (norm_hint and norm_hint in c[2])
+                            or (hint_tokens and all(t in c[2] for t in hint_tokens))
                         ]
                         if len(tok_match) == 1:
                             matched = tok_match
                             break
+                    if not matched and len(candidate_children) == 1:
+                        # Khi đã lọc `max_etime >= log_idle_s - 2` (và `require_jest` hoặc PTY session tách biệt `ch_pgid != h_pgid`),
+                        # nếu chỉ có duy nhất 1 tiến trình con đang chạy dưới agent này thì chính là nó.
+                        if require_jest or candidate_children[0][1] != h_pgid:
+                            matched = candidate_children
                     candidate_children = matched
                 elif len(candidate_children) != 1:
                     candidate_children = []
@@ -1253,19 +1399,28 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
             except Exception:
                 continue
             if sz <= MAX_TASK_LOG_BYTES:
-                if sz >= 120 and 3.0 <= (now_ts - mtime) <= 1800.0:
+                idle_age = now_ts - mtime
+                if sz >= 120 and 3.0 <= idle_age <= 1800.0:
                     try:
                         with open(log_file, "rb") as jf:
-                            if sz > 2048:
-                                jf.seek(sz - 2048)
-                            tail_j = jf.read(2048)
-                        if jest_hang_marker in tail_j and jest_exit_notice not in tail_j:
-                            if _kill_runaway_process_for_log(log_file, tasks_dir):
-                                with open(log_file, "ab") as jf_out:
-                                    jf_out.write(
-                                        b"\n[ORCA AUTO-EXIT: Terminated hung Jest process after all tests completed (open handles). Tip: pass --forceExit to jest.]\n"
-                                    )
-                                truncated_count += 1
+                            if sz > 8192:
+                                jf.seek(sz - 8192)
+                            tail_j = jf.read(8192)
+                        if jest_exit_notice not in tail_j:
+                            tail_clean = re.sub(rb"\x1b\[[0-9;]*[A-Za-z]", b"", tail_j)
+                            if jest_hang_marker in tail_clean:
+                                if _kill_runaway_process_for_log(log_file, tasks_dir, require_jest=True):
+                                    with open(log_file, "ab") as jf_out:
+                                        jf_out.write(
+                                            b"\n[ORCA AUTO-EXIT: Terminated hung Jest process after all tests completed (open handles). Tip: pass --forceExit to jest.]\n"
+                                        )
+                                    truncated_count += 1
+                                elif idle_age >= 5.0:
+                                    # Đánh dấu đã kiểm tra để không gọi lsof/ps lặp lại mỗi 1.5s hoặc giết nhầm lần chạy Jest sau
+                                    with open(log_file, "ab") as jf_out:
+                                        jf_out.write(
+                                            b"\n[ORCA AUTO-EXIT: Jest open-handle warning noted (process already exited). Tip: pass --forceExit to jest.]\n"
+                                        )
                     except Exception:
                         pass
                 continue
@@ -1328,6 +1483,36 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
     return truncated_count
 
 
+def _has_active_tool_children(tasks_dir: Path) -> bool:
+    """Return True if the conversation's leaf agent process still has an active non-MCP tool child running."""
+    try:
+        ordered_agents = _load_agent_pids_ordered(tasks_dir)
+        if not ordered_agents:
+            return False
+        proc_table = _get_process_table()
+        leaf_agent = None
+        for apid in ordered_agents:
+            if apid in proc_table and _looks_like_agent(proc_table[apid][2]):
+                leaf_agent = apid
+                break
+        if not leaf_agent:
+            return False
+        _, h_pgid, _ = proc_table[leaf_agent]
+        my_pid = os.getpid()
+        for pid, (ppid, pgid, args_str) in proc_table.items():
+            if ppid == leaf_agent and pid != my_pid:
+                low = args_str.lower()
+                if any(ex in low for ex in EXCLUDED_CHILD_MARKERS):
+                    continue
+                if _looks_like_agent(args_str):
+                    continue
+                if pgid != h_pgid or re.search(r"\b(?:zsh|bash|sh|python3?|node|docker|mvn|gradle|cargo|go|jest|vitest|pytest)\b", low):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def _run_background_watcher(tasks_dir_str: str) -> None:
     tasks_dir = Path(tasks_dir_str)
     lock_file = tasks_dir / ".orca-watcher.pid"
@@ -1358,12 +1543,12 @@ def _run_background_watcher(tasks_dir_str: str) -> None:
             recent_log_activity = False
             try:
                 for lf in tasks_dir.glob("task-*.log"):
-                    if now - lf.stat().st_mtime < 25.0:
+                    if now - lf.stat().st_mtime < 120.0:
                         recent_log_activity = True
                         break
             except Exception:
                 pass
-            if (now - lock_mtime > 20.0) and not recent_log_activity:
+            if (now - lock_mtime > 45.0) and not recent_log_activity and not _has_active_tool_children(tasks_dir):
                 break
     finally:
         try:
@@ -1418,11 +1603,12 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
                         cmap = loaded_cmap
                 except Exception:
                     cmap = {}
-            if len(cmap) > 40:
-                cmap = dict(list(cmap.items())[-20:])
+            if len(cmap) > 200:
+                cmap = dict(list(cmap.items())[-120:])
             non_comment_lines = [
                 ln.strip()
                 for ln in cmd.splitlines()
+                for ln in [ _normalize_cmd_hint(ln) or ln.strip() ]
                 if ln.strip() and not ln.strip().startswith("#")
             ]
             meaningful_lines = [
@@ -1432,7 +1618,8 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
             ] or non_comment_lines
             first_line_cmd = meaningful_lines[0][:160] if meaningful_lines else ""
             if str(step_idx).isdigit() and first_line_cmd:
-                for key in (f"task-{step_idx}.log", f"task-{int(step_idx) + 1}.log"):
+                base_idx = int(step_idx)
+                for key in (f"task-{base_idx}.log", f"task-{base_idx + 1}.log", f"task-{base_idx + 2}.log"):
                     prev = cmap.get(key)
                     if isinstance(prev, list):
                         if first_line_cmd not in prev:
