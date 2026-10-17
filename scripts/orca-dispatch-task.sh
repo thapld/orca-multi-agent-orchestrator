@@ -64,7 +64,7 @@ if [[ "$REQ_AGENT" =~ $KNOWN_AGENTS_RE ]]; then
     ROLE_QUERY="pr"
   elif [[ "$TASK_TITLE" =~ ^hotfix-issue-[0-9]+$ ]]; then
     ROLE_QUERY="issue"
-  elif [[ "$TASK_TITLE" =~ ^(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker$ ]]; then
+  elif [[ "$TASK_TITLE" =~ ^(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker(-[0-9]+)?$ ]]; then
     ROLE_QUERY="${match[1]}"
   else
     ROLE_QUERY="dev"
@@ -133,10 +133,12 @@ fi
 
 echo "🐋 [Orca Dispatch] Đang khởi tạo task: '$TASK_TITLE' cho agent: $AGENT ${MODEL_ARGS[*]}..."
 
-# Xác định định danh worktree cố định theo từng vai trò (1 Role = 1 Worktree định danh duy nhất, gom nhóm các Terminal Tabs bên trong)
+# Xác định định danh worktree cố định theo từng vai trò & số lượng slot song song (Concurrency)
 ROLE_WORKTREE="dev-worker"
-if [[ "$TASK_TITLE" =~ ^(review-pr-[0-9]+|hotfix-issue-[0-9]+|(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker)$ ]]; then
+EXPLICIT_SLOT=false
+if [[ "$TASK_TITLE" =~ ^(review-pr-[0-9]+|hotfix-issue-[0-9]+|(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker(-[0-9]+)?)$ ]]; then
   ROLE_WORKTREE="$TASK_TITLE"
+  EXPLICIT_SLOT=true
 else
   case "${ROLE_QUERY:l}" in
     devops|devopsspecialist|infra|sre|ops) ROLE_WORKTREE="devops-worker" ;;
@@ -152,7 +154,54 @@ else
   esac
 fi
 
-# Tự động tiêm Hiến pháp Vai trò Cấp Principal (Chống vượt rào & Chống báo sạch giả) nếu SPEC chưa có
+# Tự động chọn Worktree Slot đang rảnh (<role>-worker .. <role>-worker-N) khi role có Concurrency >= 2
+ROLE_CONCURRENCY=1
+ROLE_GOAL_MODE="true"
+if [[ -x "$ORCA_TEAM_BIN" ]]; then
+  RAW_CONC=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field concurrency 2>/dev/null || true)
+  [[ "$RAW_CONC" =~ ^[0-9]+$ ]] && ROLE_CONCURRENCY="$RAW_CONC"
+  RAW_GOAL=$("$ORCA_TEAM_BIN" get "$EFF_ROLE_QUERY" --field goal 2>/dev/null || true)
+  [[ "$RAW_GOAL" == "false" ]] && ROLE_GOAL_MODE="false"
+fi
+
+if [[ "$EXPLICIT_SLOT" == false && "$ROLE_CONCURRENCY" -ge 2 ]]; then
+  ACTIVE_WORKERS_JSON=$("$ORCA_BIN" orchestration worker-list --json 2>/dev/null || true)
+  CHOSEN_SLOT=$(python3 -c '
+import sys, json
+
+base_wt = sys.argv[1]
+try:
+    conc = max(1, min(10, int(sys.argv[2])))
+except Exception:
+    conc = 1
+slots = [base_wt if i == 1 else f"{base_wt}-{i}" for i in range(1, conc + 1)]
+live_slots = set()
+counts = {s: 0 for s in slots}
+try:
+    d = json.loads(sys.stdin.read())
+    res = d.get("result") if isinstance(d, dict) and isinstance(d.get("result"), dict) else (d if isinstance(d, dict) else {})
+    for w in (res.get("workers") or []):
+        ws_id = str((w.get("resource") or {}).get("worktreeId") or "")
+        wt_n = ws_id.rsplit("/", 1)[-1] if "/" in ws_id else (ws_id.split("::", 1)[-1] if "::" in ws_id else ws_id)
+        st = str(w.get("workerState") or w.get("state") or "").lower()
+        if wt_n in counts:
+            counts[wt_n] += 1
+            if st not in ("succeeded", "failed", "stopped", "timed_out", "settled"):
+                live_slots.add(wt_n)
+except Exception:
+    pass
+free_slots = [s for s in slots if s not in live_slots]
+if free_slots:
+    print(min(free_slots, key=lambda s: (counts.get(s, 0), slots.index(s))))
+else:
+    print(min(slots, key=lambda s: (counts.get(s, 0), slots.index(s))))
+' "$ROLE_WORKTREE" "$ROLE_CONCURRENCY" <<< "$ACTIVE_WORKERS_JSON" 2>/dev/null || true)
+  [[ -n "$CHOSEN_SLOT" ]] && ROLE_WORKTREE="$CHOSEN_SLOT"
+fi
+
+GOAL_MODE_CLAUSE=" CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ + gửi bản tin báo cáo + gửi worker_done về Coordinator mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal. /goal"
+
+# Tự động tiêm Hiến pháp Vai trò Cấp Principal (Chống vượt rào, Chống báo sạch giả & Chế độ /goal) nếu SPEC chưa có
 if [[ "$SPEC" != "[ROLE:"* && -x "$ORCA_TEAM_BIN" ]]; then
   INJECTED_SPEC=$("$ORCA_TEAM_BIN" spec "$ROLE_QUERY" -- "$SPEC" 2>/dev/null || true)
   [[ -n "$INJECTED_SPEC" ]] && SPEC="$INJECTED_SPEC"
@@ -188,9 +237,12 @@ if [[ "$SPEC" != "[ROLE:"* ]]; then
       SPEC="[ROLE: PRINCIPAL ISSUE RESOLVER] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: (1) Tìm Root Cause, (2) Viết Reproduction Test xác nhận FAIL trước khi sửa, (3) Sửa code tối thiểu tới khi Reproduction Test PASS, (4) Chạy regression test đạt EXIT_CODE=0. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ. BẰNG CHỨNG BẮT BUỘC: Commit sạch kèm Commit Hash + log chạy test."
       ;;
     *)
-      SPEC="[ROLE: PRINCIPAL DEV] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Clean Architecture, type-safe 100%, xử lý edge cases (null, timeout, concurrency), không TODO/mock giả/hardcode secret. CẤM VƯỢT RÀO: Chỉ sửa code app & unit test; CẤM sửa K8s/Docker của DevOps; CẤM xóa/skip (@Ignore, .skip) test cũ đang fail. GIAO TIẾP & THẨM QUYỀN QUYẾT ĐỊNH (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): (1) Đồng bộ nhánh mới nhất (git merge --no-edit main) và kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận chỉ đạo/spec từ Coordinator; nếu cần quyết định kiến trúc/cấu hình, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json (worker KHÔNG tự ý đổi thiết kế liên role), (2) Build & Unit Test EXIT_CODE=0 và git commit sạch vào nhánh dev-worker, (3) Trước khi gửi worker_done, BẮT BUỘC gửi bàn giao về Coordinator duyệt: orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: dev-worker (<commit_hash>)' --body 'Tóm tắt file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench' --task-id <task_id> --dispatch-id <dispatch_id> --json (KHÔNG dùng --to '@all' vì '@all' loại trừ Coordinator!)."
+      SPEC="[ROLE: PRINCIPAL DEV] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Clean Architecture, type-safe 100%, xử lý edge cases (null, timeout, concurrency), không TODO/mock giả/hardcode secret. CẤM VƯỢT RÀO: Chỉ sửa code app & unit test trong phạm vi file được giao; CẤM sửa K8s/Docker của DevOps; CẤM xóa/skip (@Ignore, .skip) test cũ đang fail. GIAO TIẾP & THẨM QUYỀN QUYẾT ĐỊNH (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): (1) Đồng bộ nhánh mới nhất (git merge --no-edit main) và kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận chỉ đạo/spec từ Coordinator; nếu cần quyết định kiến trúc/cấu hình, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json (worker KHÔNG tự ý đổi thiết kế liên role), (2) Build & Unit Test EXIT_CODE=0 và git commit sạch vào nhánh worktree hiện tại (${ROLE_WORKTREE}), (3) Trước khi gửi worker_done, BẮT BUỘC gửi bàn giao về Coordinator duyệt: orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: ${ROLE_WORKTREE} (<commit_hash>)' --body 'Tóm tắt nhánh, file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench' --task-id <task_id> --dispatch-id <dispatch_id> --json (KHÔNG dùng --to '@all' vì '@all' loại trừ Coordinator!)."
       ;;
   esac
+fi
+if [[ "$ROLE_GOAL_MODE" != "false" && "$SPEC" != *" /goal" ]]; then
+  SPEC="${SPEC%.}.${GOAL_MODE_CLAUSE}"
 fi
 
 # 0. Đảm bảo có Run đang bound trong Orca

@@ -111,14 +111,14 @@ ROLE_SPEC_TEMPLATES = {
     "developer": (
         "[ROLE: PRINCIPAL DEV] Nhiệm vụ: {task}. "
         "Chuẩn: Clean Architecture, type-safe 100%, xử lý edge cases (null, timeout, concurrency), không TODO/mock giả/hardcode secret. "
-        "CẤM VƯỢT RÀO: Chỉ sửa code app & unit test; CẤM sửa K8s/Docker của DevOps; CẤM xóa/skip (@Ignore, .skip) test cũ đang fail. "
+        "CẤM VƯỢT RÀO: Chỉ sửa code app & unit test trong phạm vi file được giao; CẤM sửa K8s/Docker của DevOps; CẤM xóa/skip (@Ignore, .skip) test cũ đang fail. "
         "GIAO TIẾP & THẨM QUYỀN QUYẾT ĐỊNH (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): "
         "(1) Đồng bộ nhánh mới nhất (git merge --no-edit main) và kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận chỉ đạo/spec từ Coordinator; "
         "nếu cần quyết định kiến trúc/cấu hình, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json "
-        "(worker KHÔNG tự ý đổi thiết kế liên role), (2) Build & Unit Test EXIT_CODE=0 và git commit sạch vào nhánh dev-worker, "
+        "(worker KHÔNG tự ý đổi thiết kế liên role), (2) Build & Unit Test EXIT_CODE=0 và git commit sạch vào nhánh worktree hiện tại (dev-worker / dev-worker-N), "
         "(3) Trước khi gửi worker_done, BẮT BUỘC gửi bàn giao về Coordinator duyệt: "
-        "orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: dev-worker (<commit_hash>)' "
-        "--body 'Tóm tắt file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench' "
+        "orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: <branch_name> (<commit_hash>)' "
+        "--body 'Tóm tắt nhánh, file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench' "
         "--task-id <task_id> --dispatch-id <dispatch_id> --json (KHÔNG dùng --to '@all' vì '@all' loại trừ Coordinator!)."
     ),
     "devopsSpecialist": (
@@ -219,20 +219,50 @@ ROLE_SPEC_TEMPLATES = {
 }
 
 
-def build_role_spec(role_input: str, task_desc: str, config: dict = None) -> str:
-    """Tiêm Sổ tay Hiến pháp & Cấm vượt rào của từng Worker vào task spec (không bắt Leader lưu trong GEMINI.md)."""
-    clean_task = (task_desc or "").strip().rstrip(".")
-    if clean_task.startswith("[ROLE:"):
-        return clean_task
-    if not clean_task:
-        clean_task = "[Xem chi tiết nhiệm vụ]"
+GOAL_MODE_CLAUSE = (
+    " CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế "
+    "(file diff, build/test EXIT_CODE=0, runtime log); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; "
+    "chỉ sau khi đã hoàn tất 100% nhiệm vụ + gửi bản tin báo cáo + gửi worker_done về Coordinator mới được xuất thẻ "
+    "<!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal. /goal"
+)
+
+
+def _is_goal_mode_enabled(role_cfg: dict = None, config: dict = None) -> bool:
+    """Kiểm tra chế độ /goal cho vai trò (mặc định BẬT = True trên toàn bộ các vai trò)."""
+    if isinstance(role_cfg, dict) and "goalMode" in role_cfg and role_cfg.get("goalMode") is not None:
+        return bool(role_cfg.get("goalMode"))
+    if isinstance(config, dict) and "goalMode" in config and config.get("goalMode") is not None:
+        return bool(config.get("goalMode"))
+    return True
+
+
+def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_override: bool = None) -> str:
+    """Tiêm Sổ tay Hiến pháp, Cấm vượt rào & Chế độ /goal của từng Worker vào task spec."""
     canonical = ROLE_ALIASES.get((role_input or "dev").strip().lower(), "developer")
     if canonical == "coordinator":
         canonical = "developer"
+    roles = (config.get("roles") if isinstance(config, dict) else None) or {}
+    role_cfg = roles.get(canonical) if isinstance(roles, dict) else {}
+    goal_on = goal_override if goal_override is not None else _is_goal_mode_enabled(role_cfg, config)
+
+    raw_task = (task_desc or "").strip()
+    if raw_task.startswith("[ROLE:"):
+        if goal_on:
+            if not raw_task.endswith(" /goal"):
+                if "CHẾ ĐỘ /goal" in raw_task:
+                    return re.sub(r"(?:\s+/goal)?[.\s]*$", "", raw_task) + " /goal"
+                return raw_task.rstrip(".") + "." + GOAL_MODE_CLAUSE
+        else:
+            raw_task = re.sub(r"\s*CHẾ ĐỘ /goal[\s\S]*?/goal\s*$", "", raw_task)
+            raw_task = re.sub(r"\s+/goal\s*$", "", raw_task)
+        return raw_task
+
+    clean_task = re.sub(r"(?:^|\s+)/goal\s*$", "", raw_task, flags=re.IGNORECASE).strip().rstrip(".")
+    if not clean_task:
+        clean_task = "[Xem chi tiết nhiệm vụ]"
     tpl = ROLE_SPEC_TEMPLATES.get(canonical, ROLE_SPEC_TEMPLATES["developer"])
     rendered = tpl.replace("{task}", clean_task)
     if isinstance(config, dict):
-        roles = config.get("roles") or {}
         if not _is_role_enabled(roles.get("reSpecialist", {}), is_optional=True):
             rendered = rendered.replace(
                 " (nếu cần giải phẫu binary phải báo Coordinator giao re-worker)",
@@ -247,6 +277,21 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None) -> str
         if _is_role_enabled(roles.get("benchSpecialist", {}), is_optional=True):
             downstream.append("Bench")
         rendered = rendered.replace("điều phối cho DevOps/QA/Sec/Bench", f"điều phối cho {'/'.join(downstream)}")
+        try:
+            dev_conc = max(1, min(10, int(((roles.get("developer") or {}).get("concurrency")) or 1)))
+        except (ValueError, TypeError):
+            dev_conc = 1
+        if dev_conc >= 2:
+            extra_merges = " && ".join(
+                f"(git rev-parse --verify --quiet dev-worker-{k} >/dev/null && git merge --no-edit dev-worker-{k} || true)"
+                for k in range(2, dev_conc + 1)
+            )
+            rendered = rendered.replace(
+                "git merge --no-edit main && git merge --no-edit dev-worker",
+                f"git merge --no-edit main && git merge --no-edit dev-worker && {extra_merges}",
+            )
+    if goal_on:
+        rendered = rendered + GOAL_MODE_CLAUSE
     return rendered
 
 
@@ -257,7 +302,7 @@ def cmd_spec(args: list, explicit_root: Path = None):
         raw_list = raw_list[1:]
         leading_dd = True
     if not raw_list or (not leading_dd and raw_list[0] in ("-h", "--help", "help")):
-        print("Sử dụng: orca-team spec <role> \"<mô-tả-nhiệm-vụ>\"")
+        print("Sử dụng: orca-team spec <role> \"<mô-tả-nhiệm-vụ>\" [--goal|--no-goal]")
         print("Các role hỗ trợ: dev, devops, critic, sec, qa, bench, re, ui, pr, issue")
         return
     if not leading_dd and raw_list[0] == "--list":
@@ -268,6 +313,7 @@ def cmd_spec(args: list, explicit_root: Path = None):
     clean_args = []
     explicit_role = None
     explicit_task = None
+    goal_override = None
     spec_root = explicit_root
     idx = 0
     after_dd = leading_dd
@@ -276,6 +322,14 @@ def cmd_spec(args: list, explicit_root: Path = None):
         if not after_dd:
             if tok == "--":
                 after_dd = True
+                idx += 1
+                continue
+            if tok == "--goal":
+                goal_override = True
+                idx += 1
+                continue
+            if tok == "--no-goal":
+                goal_override = False
                 idx += 1
                 continue
             if tok in ("--path", "-C"):
@@ -353,7 +407,7 @@ def cmd_spec(args: list, explicit_root: Path = None):
         task_text = ""
     cfg_root = spec_root if spec_root is not None else find_project_root()
     cfg = load_config(cfg_root) if cfg_root else None
-    sys.stdout.write(build_role_spec(role_arg, task_text, config=cfg) + "\n")
+    sys.stdout.write(build_role_spec(role_arg, task_text, config=cfg, goal_override=goal_override) + "\n")
 
 
 def _is_orca_discovery_link(p: Path) -> bool:
@@ -368,9 +422,13 @@ def _is_orca_discovery_link(p: Path) -> bool:
 
 
 def _ensure_critic_defaults(config: dict) -> dict:
-    """Bổ sung criticSpecialist (trong bộ nhớ) cho config cũ — dùng chung cho status/get/sync."""
+    """Bổ sung criticSpecialist và goalMode mặc định (trong bộ nhớ) cho config cũ — dùng chung cho status/get/sync."""
     if not isinstance(config, dict):
         return config
+    if "goalMode" not in config:
+        config["goalMode"] = True
+    if isinstance(config.get("coordinator"), dict) and "goalMode" not in config["coordinator"]:
+        config["coordinator"]["goalMode"] = config.get("goalMode", True)
     if not isinstance(config.get("roles"), dict):
         config["roles"] = {}
     roles = config["roles"]
@@ -382,8 +440,12 @@ def _ensure_critic_defaults(config: dict) -> dict:
             "agent": sec_cfg.get("agent") or coord.get("agent") or "antigravity",
             "model": sec_cfg.get("model") or coord.get("model") or "gemini-4-argon-high",
             "effort": sec_cfg.get("effort") or "high",
+            "goalMode": config.get("goalMode", True),
             "utilities": ["git-worktrees", "diff-viewer", "orca-skills-registry"],
         }
+    for r_cfg in roles.values():
+        if isinstance(r_cfg, dict) and "goalMode" not in r_cfg:
+            r_cfg["goalMode"] = config.get("goalMode", True)
     return config
 
 REA_REPO_URL = "https://github.com/morluto/rea.git"
@@ -666,12 +728,41 @@ def sync_gemini_directive(root: Path, config: dict):
     rows.append("| Role | Agent & Model | Concurrency | Capabilities & Orca Utilities |")
     rows.append("| :--- | :--- | :--- | :--- |")
 
+    def _goal_badge(role_cfg: dict) -> str:
+        return " (🎯 /goal)" if _is_goal_mode_enabled(role_cfg, config) else ""
+
     # Coordinator
     coord = config.get("coordinator") or {}
     c_agent = coord.get("agent") or "claude"
     c_model = coord.get("model")
     c_display = f"`{c_agent}`" + (f" ({c_model})" if c_model else "")
-    rows.append(f"| **Lead Coordinator** | {c_display} | 1 | Task DAG, Zero-Trust Audit, Decision Gates, Release |")
+    rows.append(f"| **Lead Coordinator** | {c_display} | 1{_goal_badge(coord)} | Task DAG, Zero-Trust Audit, Decision Gates, Release |")
+
+    def _role_conc(role_cfg: dict, default: int = 1) -> int:
+        try:
+            v = int((role_cfg or {}).get("concurrency") or default)
+            return max(1, min(10, v))
+        except (ValueError, TypeError):
+            return default
+
+    def _table_conc_label(role_cfg: dict, default: int = 1, is_on_demand_default: bool = False) -> str:
+        badge = _goal_badge(role_cfg)
+        if is_on_demand_default and "concurrency" not in (role_cfg or {}):
+            return f"On-demand{badge}"
+        c = _role_conc(role_cfg, default)
+        if is_on_demand_default and c == 1:
+            return f"On-demand{badge}"
+        return f"{c} parallel{badge}"
+
+    def _slot_names(base_wt: str, count: int) -> list:
+        return [base_wt if i == 1 else f"{base_wt}-{i}" for i in range(1, max(1, count) + 1)]
+
+    def _routing_target(base_wt: str, count: int) -> str:
+        slots = _slot_names(base_wt, count)
+        if len(slots) == 1:
+            return f"**`{slots[0]}`**"
+        slots_str = " & ".join(f"`{s}`" for s in slots)
+        return f"**{slots_str} ({count} agents song song)**"
 
     # Developer
     roles = config.get("roles") or {}
@@ -679,74 +770,78 @@ def sync_gemini_directive(root: Path, config: dict):
     d_agent = dev.get("agent") or "kimi"
     d_model = dev.get("model")
     d_display = f"`{d_agent}`" + (f" ({d_model})" if d_model else "")
-    d_count = dev.get("concurrency") or 2
-    rows.append(f"| **Full-Stack Devs** | {d_display} | {d_count} parallel | Child worktrees, clean architecture, unit tests |")
+    d_count = _role_conc(dev, 2)
+    rows.append(f"| **Full-Stack Devs** | {d_display} | {d_count} parallel{_goal_badge(dev)} | Child worktrees, clean architecture, unit tests |")
 
     # QA
     qa = roles.get("qa") or {}
     q_agent = qa.get("agent") or "kimi"
     q_model = qa.get("model")
     q_display = f"`{q_agent}`" + (f" ({q_model})" if q_model else "")
-    q_count = qa.get("concurrency") or 1
-    rows.append(f"| **QA & Testers** | {q_display} | {q_count} parallel | Integration/E2E suites, adversarial edge-case testing |")
+    q_count = _role_conc(qa, 1)
+    rows.append(f"| **QA & Testers** | {q_display} | {q_count} parallel{_goal_badge(qa)} | Integration/E2E suites, adversarial edge-case testing |")
 
     # Security
     sec = roles.get("security") or {}
     s_agent = sec.get("agent") or "codex"
     s_model = sec.get("model")
     s_display = f"`{s_agent}`" + (f" ({s_model})" if s_model else "")
-    s_count = sec.get("concurrency") or 1
-    rows.append(f"| **Security & Bug Hunter** | {s_display} | {s_count} parallel | OWASP Top 10, concurrency/race conditions, leak audit |")
+    s_count = _role_conc(sec, 1)
+    rows.append(f"| **Security & Bug Hunter** | {s_display} | {s_count} parallel{_goal_badge(sec)} | OWASP Top 10, concurrency/race conditions, leak audit |")
 
     # PR Reviewer
     pr = roles.get("prReviewer") or {}
     p_agent = pr.get("agent") or "claude"
     p_model = pr.get("model")
     p_display = f"`{p_agent}`" + (f" ({p_model})" if p_model else "")
-    rows.append(f"| **PR Reviewer** | {p_display} | On-demand | PR checkout (`--pr`), line-by-line diff audit |")
+    rows.append(f"| **PR Reviewer** | {p_display} | {_table_conc_label(pr, 1, True)} | PR checkout (`--pr`), line-by-line diff audit |")
 
     # Issue Resolver
     issue = roles.get("issueResolver") or {}
     i_agent = issue.get("agent") or "kimi"
     i_model = issue.get("model")
     i_display = f"`{i_agent}`" + (f" ({i_model})" if i_model else "")
-    rows.append(f"| **Issue Resolver** | {i_display} | On-demand | Issue checkout (`--issue`), reproduction test & fix |")
+    rows.append(f"| **Issue Resolver** | {i_display} | {_table_conc_label(issue, 1, True)} | Issue checkout (`--issue`), reproduction test & fix |")
 
     # DevOps Specialist
     devops = roles.get("devopsSpecialist") or {}
     devops_enabled = _is_role_enabled(devops, is_optional=True)
+    do_count = _role_conc(devops, 1)
     if devops_enabled:
         do_agent = devops.get("agent") or "codex"
         do_model = devops.get("model")
         do_display = f"`{do_agent}`" + (f" ({do_model})" if do_model else "")
-        rows.append(f"| **DevOps Specialist** | {do_display} | On-demand | Docker/K8s rollout, DB migrations, SSH worktrees |")
+        rows.append(f"| **DevOps Specialist** | {do_display} | {_table_conc_label(devops, 1, True)} | Docker/K8s rollout, DB migrations, SSH worktrees |")
 
     # Bench & Perf Specialist
     bench = roles.get("benchSpecialist") or {}
     bench_enabled = _is_role_enabled(bench, is_optional=True)
+    b_count = _role_conc(bench, 1)
     if bench_enabled:
         b_agent = bench.get("agent") or "antigravity"
         b_model = bench.get("model")
         b_display = f"`{b_agent}`" + (f" ({b_model})" if b_model else "")
-        rows.append(f"| **Bench & Perf Specialist** | {b_display} | On-demand | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |")
+        rows.append(f"| **Bench & Perf Specialist** | {b_display} | {_table_conc_label(bench, 1, True)} | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |")
 
     # Reverse Engineering Specialist (REA)
     re_spec = roles.get("reSpecialist") or {}
     re_enabled = _is_role_enabled(re_spec, is_optional=True)
+    r_count = _role_conc(re_spec, 1)
     if re_enabled:
         r_agent = re_spec.get("agent") or "antigravity"
         r_model = re_spec.get("model")
         r_display = f"`{r_agent}`" + (f" ({r_model})" if r_model else "")
-        rows.append(f"| **Reverse Eng (REA)** | {r_display} | On-demand | Binary/Package/ASAR/Protocol decompile (`rea` skill) |")
+        rows.append(f"| **Reverse Eng (REA)** | {r_display} | {_table_conc_label(re_spec, 1, True)} | Binary/Package/ASAR/Protocol decompile (`rea` skill) |")
 
     # UI Specialist
     ui = roles.get("uiSpecialist") or {}
     ui_enabled = _is_role_enabled(ui, is_optional=True)
+    u_count = _role_conc(ui, 1)
     if ui_enabled:
         u_agent = ui.get("agent") or "claude"
         u_model = ui.get("model")
         u_display = f"`{u_agent}`" + (f" ({u_model})" if u_model else "")
-        rows.append(f"| **UI/UX Specialist** | {u_display} | On-demand | Design Mode (Click-to-code), responsive & a11y |")
+        rows.append(f"| **UI/UX Specialist** | {u_display} | {_table_conc_label(ui, 1, True)} | Design Mode (Click-to-code), responsive & a11y |")
 
     # Research & Adversarial Critic Specialist (Auto-seed from security/coordinator if missing in legacy config)
     if "criticSpecialist" not in roles:
@@ -755,6 +850,7 @@ def sync_gemini_directive(root: Path, config: dict):
             "agent": sec.get("agent") or coord.get("agent") or "antigravity",
             "model": sec.get("model") or coord.get("model") or "gemini-4-argon-high",
             "effort": sec.get("effort") or "high",
+            "goalMode": config.get("goalMode", True),
             "utilities": ["git-worktrees", "diff-viewer", "orca-skills-registry"],
         }
         try:
@@ -763,28 +859,29 @@ def sync_gemini_directive(root: Path, config: dict):
             pass
     critic_spec = roles.get("criticSpecialist") or {}
     critic_enabled = _is_role_enabled(critic_spec, is_optional=True)
+    cr_count = _role_conc(critic_spec, 1)
     if critic_enabled:
         cr_agent = critic_spec.get("agent") or "antigravity"
         cr_model = critic_spec.get("model")
         cr_display = f"`{cr_agent}`" + (f" ({cr_model})" if cr_model else "")
-        rows.append(f"| **Research & Critic** | {cr_display} | On-demand | Deep research, Devil's Advocate critique, root-cause consensus |")
+        rows.append(f"| **Research & Critic** | {cr_display} | {_table_conc_label(critic_spec, 1, True)} | Deep research, Devil's Advocate critique, root-cause consensus |")
 
     table_text = "\n".join(rows)
 
-    # Đồng bộ dòng BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN & LUẬT CHỐNG ĐỘC ĐOÁN ở đầu file theo đúng các role đang bật
-    routing_parts = ["Code ứng dụng ➔ **`dev-worker`**"]
+    # Đồng bộ dòng BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN, LUẬT CHỐNG ĐỘC ĐOÁN & CHẾ ĐỘ /goal ở đầu file theo đúng các role đang bật và số slot song song
+    routing_parts = [f"Code ứng dụng ➔ {_routing_target('dev-worker', d_count)}"]
     if devops_enabled:
-        routing_parts.append("Docker, K8s, Helm, DB migration, `.env`, infra ➔ **`devops-worker`**")
-    routing_parts.append("Kiểm toán bảo mật & rò rỉ ➔ **`sec-worker`**")
-    routing_parts.append("Kiểm thử nghiệm thu ➔ **`qa-worker`**")
+        routing_parts.append(f"Docker, K8s, Helm, DB migration, `.env`, infra ➔ {_routing_target('devops-worker', do_count)}")
+    routing_parts.append(f"Kiểm toán bảo mật & rò rỉ ➔ {_routing_target('sec-worker', s_count)}")
+    routing_parts.append(f"Kiểm thử nghiệm thu ➔ {_routing_target('qa-worker', q_count)}")
     if bench_enabled:
-        routing_parts.append("Đo tải RPS/EPS & tối ưu hiệu năng ➔ **`bench-worker`**")
+        routing_parts.append(f"Đo tải RPS/EPS & tối ưu hiệu năng ➔ {_routing_target('bench-worker', b_count)}")
     if re_enabled:
-        routing_parts.append("Dịch ngược Binary/ASAR/Protocol (`rea`) ➔ **`re-worker`**")
+        routing_parts.append(f"Dịch ngược Binary/ASAR/Protocol (`rea`) ➔ {_routing_target('re-worker', r_count)}")
     if ui_enabled:
-        routing_parts.append("Giao diện CSS/DOM ➔ **`ui-worker`**")
+        routing_parts.append(f"Giao diện CSS/DOM ➔ {_routing_target('ui-worker', u_count)}")
     if critic_enabled:
-        routing_parts.append("Khảo sát sâu, phản biện giả thuyết/kế hoạch của Leader & truy tìm root-cause ➔ **`critic-worker`**")
+        routing_parts.append(f"Khảo sát sâu, phản biện giả thuyết/kế hoạch của Leader & truy tìm root-cause ➔ {_routing_target('critic-worker', cr_count)}")
     routing_line = "> - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** " + " | ".join(routing_parts) + "."
     anti_autocracy_line = (
         "> - **LUẬT CHỐNG ĐỘC ĐOÁN & QUY KẾT VỘI VÀNG (ANTI-AUTOCRACY):** Leader **CẤM** quy kết lỗi cho bất kỳ role nào "
@@ -797,9 +894,16 @@ def sync_gemini_directive(root: Path, config: dict):
             "> - **LUẬT CHỐNG ĐỘC ĐOÁN & QUY KẾT VỘI VÀNG:** Leader **CẤM** quy kết lỗi cho bất kỳ role nào "
             "hoặc khóa thiết kế/root-cause khi chưa có bằng chứng `file:line` + log."
         )
+    goal_rule_line = (
+        "> - **CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH (`/goal` MODE ON ALL ROLES):** Toàn bộ các vai trò (Lead Coordinator & mọi Worker) "
+        "đều bật sẵn chế độ **`/goal` (`goalMode: true`)**. Mọi Task Spec sinh qua `orca-team spec` đều tự động đính kèm hậu tố kích hoạt `/goal` "
+        "(`GoalStopHook` + checklist nghiệm thu) buộc Worker làm triệt để 100% yêu cầu và gửi `worker_done` trước khi xuất `<!-- GOAL_COMPLETE -->`. "
+        "Bản thân **Lead Coordinator** cũng vận hành ở chế độ `/goal`: phải tự lập checklist theo dõi toàn bộ DAG từ Bước 1 đến Bước 4, "
+        "tuyệt đối không dừng nửa chừng khi còn task/gate/lỗi chưa xử lý, và chỉ xuất `<!-- GOAL_COMPLETE -->` sau khi đã hoàn tất Bước 4."
+    )
     content = re.sub(
-        r"^> - \*\*BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:\*\*.*(?:\n> - \*\*LUẬT CHỐNG ĐỘC ĐOÁN[^\n]*)?$",
-        routing_line + "\n" + anti_autocracy_line,
+        r"^> - \*\*BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:\*\*.*(?:\n> - \*\*LUẬT CHỐNG ĐỘC ĐOÁN[^\n]*)?(?:\n> - \*\*CHẾ ĐỘ LÀM TRIỆT ĐỂ[^\n]*)?$",
+        routing_line + "\n" + anti_autocracy_line + "\n" + goal_rule_line,
         content,
         flags=re.M
     )
@@ -831,54 +935,92 @@ def sync_gemini_directive(root: Path, config: dict):
     def _wt_expr(w_name):
         return f"$(git worktree list | sed -n 's/^\\([^ ]*\\/{w_name}\\) .*/--worktree path:\\1/p; s/^\\([^ ]*\\).*\\[{w_name}\\].*/--worktree path:\\1/p' | head -n 1 | grep . || echo \"--worktree new-child --name {w_name}$([ -f package.json ] || echo ' --setup skip')\")"
 
-    # Bước 1: Chỉ chứa lệnh gọi `$(orca-team spec <role> '...')` ngắn gọn — Sổ tay Hiến pháp của từng Worker được tiêm tự động khi tạo task,
-    # giải phóng ~2,500 tokens/turn khỏi bộ nhớ tĩnh của Leader!
+    def _append_step1_role(out_lines: list, num: int, role_title: str, role_cli: str, single_spec: str, base_wt: str, count: int):
+        slots = _slot_names(base_wt, count)
+        if count <= 1:
+            out_lines.append(f"  # {num}. {role_title}:")
+            out_lines.append(f"  orca orchestration task-create --spec \"$(orca-team spec {role_cli} '{single_spec}')\"")
+        else:
+            out_lines.append(
+                f"  # {num}. {role_title} — Đang cấu hình {count} parallel ({', '.join(slots)}): "
+                f"BẮT BUỘC chia thành {count} Task độc lập không trùng phạm vi file khi có ≥2 hạng mục:"
+            )
+            for idx_s, s_name in enumerate(slots, 1):
+                out_lines.append(
+                    f"  orca orchestration task-create --spec \"$(orca-team spec {role_cli} "
+                    f"'[Slot {idx_s}/{count} ({s_name}) - Phạm vi module/file nhánh {idx_s} (không đụng nhánh khác): {single_spec.strip('[]')}]')\""
+                )
+
+    def _append_step2_role(out_lines: list, single_comment: str, multi_prefix: str, task_var: str, base_wt: str, count: int, w_args: str):
+        slots = _slot_names(base_wt, count)
+        if count <= 1:
+            out_lines.append(f"  # {single_comment}:")
+            out_lines.append(f"  orca orchestration worker-start --task <{task_var}_ID> {_wt_expr(base_wt)} {w_args} --json")
+        else:
+            out_lines.append(
+                f"  # {multi_prefix} ({count} parallel slots: {', '.join(slots)} — BẮT BUỘC khởi chạy đồng thời cho {count} Tasks độc lập):"
+            )
+            for idx_s, s_name in enumerate(slots, 1):
+                out_lines.append(
+                    f"  orca orchestration worker-start --task <{task_var}_{idx_s}_ID> {_wt_expr(s_name)} {w_args} --json"
+                )
+
+    # Bước 1: Tự động sinh đủ N lệnh task-create cho các vai trò có Concurrency >= 2
     step1_lines = [
-        "### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ (CẤM GỘP VIỆC — TỰ ĐỘNG TIÊM SỔ TAY WORKER)",
-        "- Tạo Run mới và **tách Task riêng cho từng vai trò**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **KHÔNG** thêm `--json` vào `task-create` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng `orca orchestration task-list --brief`):",
+        "### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ + CONCURRENCY (CẤM GỘP VIỆC — TỰ ĐỘNG TIÊM SỔ TAY WORKER)",
+        "- Tạo Run mới và **tách Task riêng cho từng vai trò & từng Slot song song**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **KHÔNG** thêm `--json` vào `task-create` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng `orca orchestration task-list --brief`).",
+        "- 🔴 **LUẬT CHIA TẢI SONG SONG BẮT BUỘC (`CONCURRENCY ≥ 2`):** Với mọi vai trò được cấu hình `N parallel` (ví dụ `Full-Stack Devs: 2 parallel`), khi bài toán có ≥ 2 hạng mục/module/nhóm file độc lập, Leader **BẮT BUỘC chia thành đủ `N` Task song song với phạm vi file tách biệt (Disjoint File Ownership — không sửa trùng file)** để huy động đồng thời cả `N` agent ở Bước 2 (tuyệt đối **CẤM** gom toàn bộ việc vào 1 task bắt 1 agent gánh một mình!):",
         "  ```bash",
         '  orca orchestration run-create --objective "[Mô tả tổng thể]"',
         "",
-        "  # 1. Principal Dev (Code/API/Logic):",
-        "  orca orchestration task-create --spec \"$(orca-team spec dev '[Chi tiết code, file paths & yêu cầu]')\"",
     ]
+    _append_step1_role(step1_lines, 1, "Principal Dev (Code/API/Logic)", "dev", "[Chi tiết code, file paths & yêu cầu]", "dev-worker", d_count)
     step_num = 2
     if devops_enabled:
-        step1_lines += [
-            f"  # {step_num}. Principal DevOps/SRE (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):",
-            "  orca orchestration task-create --spec \"$(orca-team spec devops '[Docker/K8s/DB/Infra cần triển khai]')\"",
-        ]
+        _append_step1_role(
+            step1_lines, step_num,
+            "Principal DevOps/SRE (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra)",
+            "devops", "[Docker/K8s/DB/Infra cần triển khai]", "devops-worker", do_count
+        )
         step_num += 1
     if critic_enabled:
-        step1_lines += [
-            f"  # {step_num}. Principal Research & Adversarial Critic (BẮT BUỘC khi gặp 1 trong 4 trigger Anti-Autocracy ở Bước 3):",
-            "  orca orchestration task-create --spec \"$(orca-team spec critic 'Triệu chứng & bằng chứng thô: [...] | Giả thuyết/Kế hoạch của Leader: [...]')\"",
-        ]
+        _append_step1_role(
+            step1_lines, step_num,
+            "Principal Research & Adversarial Critic (BẮT BUỘC khi gặp 1 trong 4 trigger Anti-Autocracy ở Bước 3)",
+            "critic", "Triệu chứng & bằng chứng thô: [...] | Giả thuyết/Kế hoạch của Leader: [...]", "critic-worker", cr_count
+        )
         step_num += 1
-    step1_lines += [
-        f"  # {step_num}. Principal AppSec Auditor (BẮT BUỘC khi có API mới, Auth/JWT, input validation, concurrency, OWASP):",
-        "  orca orchestration task-create --spec \"$(orca-team spec sec 'Kiểm toán Red-Team cho [module/diff]')\"",
-        f"  # {step_num + 1}. Principal SDET / QA (Kiểm thử độc lập, Nghiệm thu & Kiểm toán Runtime Logs):",
-        "  orca orchestration task-create --spec \"$(orca-team spec qa 'Kiểm thử nghiệm thu, Adversarial Testing & Runtime Logs cho [chi tiết]')\"",
-    ]
+    _append_step1_role(
+        step1_lines, step_num,
+        "Principal AppSec Auditor (BẮT BUỘC khi có API mới, Auth/JWT, input validation, concurrency, OWASP)",
+        "sec", "Kiểm toán Red-Team cho [module/diff]", "sec-worker", s_count
+    )
+    _append_step1_role(
+        step1_lines, step_num + 1,
+        "Principal SDET / QA (Kiểm thử độc lập, Nghiệm thu & Kiểm toán Runtime Logs)",
+        "qa", "Kiểm thử nghiệm thu, Adversarial Testing & Runtime Logs cho [chi tiết]", "qa-worker", q_count
+    )
     step_num += 2
     if bench_enabled:
-        step1_lines += [
-            f"  # {step_num}. Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):",
-            "  orca orchestration task-create --spec \"$(orca-team spec bench '[Đo tải, benchmark & profiling]')\"",
-        ]
+        _append_step1_role(
+            step1_lines, step_num,
+            "Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning)",
+            "bench", "[Đo tải, benchmark & profiling]", "bench-worker", b_count
+        )
         step_num += 1
     if re_enabled:
-        step1_lines += [
-            f"  # {step_num}. Principal Reverse Engineer - REA (BẮT BUỘC khi dịch ngược binary/JAR/ASAR/APK/firmware/network capture hoặc tái tạo giao thức đóng):",
-            "  orca orchestration task-create --spec \"$(orca-team spec re '[Giải phẫu artifact/binary/protocol với rea]')\"",
-        ]
+        _append_step1_role(
+            step1_lines, step_num,
+            "Principal Reverse Engineer - REA (BẮT BUỘC khi dịch ngược binary/JAR/ASAR/APK/firmware/network capture hoặc tái tạo giao thức đóng)",
+            "re", "[Giải phẫu artifact/binary/protocol với rea]", "re-worker", r_count
+        )
         step_num += 1
     if ui_enabled:
-        step1_lines += [
-            f"  # {step_num}. Principal UI/UX (Khi có Frontend, CSS/DOM, Design Mode):",
-            "  orca orchestration task-create --spec \"$(orca-team spec ui '[Giao diện, CSS/DOM, Responsive & a11y]')\"",
-        ]
+        _append_step1_role(
+            step1_lines, step_num,
+            "Principal UI/UX (Khi có Frontend, CSS/DOM, Design Mode)",
+            "ui", "[Giao diện, CSS/DOM, Responsive & a11y]", "ui-worker", u_count
+        )
     step1_lines.append("  ```\n\n")
     step1_full = "\n".join(step1_lines)
     content = re.sub(
@@ -888,58 +1030,84 @@ def sync_gemini_directive(root: Path, config: dict):
         flags=re.M
     )
 
-    # Bước 2: Thay thế nguyên khối theo đúng thứ tự của Bước 1 và các role đang bật
-    active_wt_names = ["`dev-worker`"]
+    # Bước 2: Thay thế nguyên khối theo đúng thứ tự của Bước 1, các role đang bật và số lượng Worktree Slots (Concurrency)
+    active_wt_names = [f"`{s}`" for s in _slot_names("dev-worker", d_count)]
     if devops_enabled:
-        active_wt_names.append("`devops-worker`")
-    active_wt_names += ["`qa-worker`", "`sec-worker`"]
+        active_wt_names += [f"`{s}`" for s in _slot_names("devops-worker", do_count)]
+    active_wt_names += [f"`{s}`" for s in _slot_names("qa-worker", q_count)]
+    active_wt_names += [f"`{s}`" for s in _slot_names("sec-worker", s_count)]
     if bench_enabled:
-        active_wt_names.append("`bench-worker`")
+        active_wt_names += [f"`{s}`" for s in _slot_names("bench-worker", b_count)]
     if re_enabled:
-        active_wt_names.append("`re-worker`")
+        active_wt_names += [f"`{s}`" for s in _slot_names("re-worker", r_count)]
     if ui_enabled:
-        active_wt_names.append("`ui-worker`")
+        active_wt_names += [f"`{s}`" for s in _slot_names("ui-worker", u_count)]
     if critic_enabled:
-        active_wt_names.append("`critic-worker`")
+        active_wt_names += [f"`{s}`" for s in _slot_names("critic-worker", cr_count)]
 
     step2_lines = [
-        "### BƯỚC 2: FAN-OUT (1 ROLE = 1 WORKTREE ĐỊNH DANH DUY NHẤT & GOM NHÓM TERMINAL TABS)",
-        f'- 🔴 **QUY TẮC GOM NHÓM TERMINAL TABS (CẤM ĐẺ THÊM WORKTREE TRÙNG LẶP `-2`, `-3` & TRÁNH XUNG ĐỘT ĐA REPO `selector_ambiguous`):** Mỗi vai trò ({", ".join(active_wt_names)}) chỉ dùng **1 Worktree định danh duy nhất**. Nếu worktree của role đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <role>-worker` ở lần chạy đầu tiên khi worktree chưa tồn tại:',
+        "### BƯỚC 2: PARALLEL FAN-OUT THEO CONCURRENCY & GOM NHÓM TERMINAL TABS TRÊN CÁC SLOT CỐ ĐỊNH",
+        f'- 🔴 **QUY TẮC FIXED-POOL WORKTREE SLOTS THEO CONCURRENCY (CHẠY SONG SONG ĐỦ `N` AGENTS & GOM NHÓM TERMINAL TABS):** Mỗi vai trò sử dụng **đúng `N` Worktree Slots cố định theo cấu hình `Concurrency`** ({", ".join(active_wt_names)}). Với vai trò có `N parallel` (như `Full-Stack Devs: {d_count} parallel`), Leader **BẮT BUỘC khởi chạy đồng thời đủ `N` workers vào `N` worktree slots riêng biệt (`dev-worker`, `dev-worker-2`...) ngay trong cùng lượt Fan-out** để các agent thực thi song song 100% mà không xung đột `git index.lock`! Nếu worktree của slot đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree slot đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <slot_name>` ở lần chạy đầu tiên khi slot chưa tồn tại (CẤM đẻ thêm worktree vượt quá số slot `Concurrency` đã cấu hình):',
         "  ```bash",
-        "  # Dev Worker:",
-        f'  orca orchestration worker-start --task <DEV_TASK_ID> {_wt_expr("dev-worker")} {_fmt_worker_args_py(d_agent, d_model, dev.get("effort"))} --json',
     ]
+    _append_step2_role(
+        step2_lines, "Dev Worker", "Dev Workers", "DEV_TASK", "dev-worker", d_count,
+        _fmt_worker_args_py(d_agent, d_model, dev.get("effort"))
+    )
     if devops_enabled:
-        step2_lines += [
-            "  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):",
-            f'  orca orchestration worker-start --task <DEVOPS_TASK_ID> {_wt_expr("devops-worker")} {_fmt_worker_args_py(devops.get("agent") or "antigravity", devops.get("model"), devops.get("effort"))} --json',
-        ]
+        _append_step2_role(
+            step2_lines,
+            "DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra)",
+            "DevOps Workers (khi có Task DevOps - Docker/K8s/DB/Infra)",
+            "DEVOPS_TASK", "devops-worker", do_count,
+            _fmt_worker_args_py(devops.get("agent") or "antigravity", devops.get("model"), devops.get("effort"))
+        )
     if critic_enabled:
-        step2_lines += [
-            "  # Research & Critic Worker (khi cần khảo sát sâu, phản biện kế hoạch Leader & thống nhất root-cause):",
-            f'  orca orchestration worker-start --task <CRITIC_TASK_ID> {_wt_expr("critic-worker")} {_fmt_worker_args_py(critic_spec.get("agent") or "antigravity", critic_spec.get("model"), critic_spec.get("effort"))} --json',
-        ]
-    step2_lines += [
-        "  # Security Worker (khi có Task Security Audit):",
-        f'  orca orchestration worker-start --task <SEC_TASK_ID> {_wt_expr("sec-worker")} {_fmt_worker_args_py(s_agent, s_model, sec.get("effort"))} --json',
-        "  # QA Worker (Test nghiệm thu):",
-        f'  orca orchestration worker-start --task <QA_TASK_ID> {_wt_expr("qa-worker")} {_fmt_worker_args_py(q_agent, q_model, qa.get("effort"))} --json',
-    ]
+        _append_step2_role(
+            step2_lines,
+            "Research & Critic Worker (khi cần khảo sát sâu, phản biện kế hoạch Leader & thống nhất root-cause)",
+            "Research & Critic Workers",
+            "CRITIC_TASK", "critic-worker", cr_count,
+            _fmt_worker_args_py(critic_spec.get("agent") or "antigravity", critic_spec.get("model"), critic_spec.get("effort"))
+        )
+    _append_step2_role(
+        step2_lines,
+        "Security Worker (khi có Task Security Audit)",
+        "Security Workers (khi có Task Security Audit)",
+        "SEC_TASK", "sec-worker", s_count,
+        _fmt_worker_args_py(s_agent, s_model, sec.get("effort"))
+    )
+    _append_step2_role(
+        step2_lines,
+        "QA Worker (Test nghiệm thu)",
+        "QA Workers (Test nghiệm thu)",
+        "QA_TASK", "qa-worker", q_count,
+        _fmt_worker_args_py(q_agent, q_model, qa.get("effort"))
+    )
     if bench_enabled:
-        step2_lines += [
-            "  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):",
-            f'  orca orchestration worker-start --task <BENCH_TASK_ID> {_wt_expr("bench-worker")} {_fmt_worker_args_py(bench.get("agent") or "antigravity", bench.get("model"), bench.get("effort"))} --json',
-        ]
+        _append_step2_role(
+            step2_lines,
+            "Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng)",
+            "Benchmark Workers (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng)",
+            "BENCH_TASK", "bench-worker", b_count,
+            _fmt_worker_args_py(bench.get("agent") or "antigravity", bench.get("model"), bench.get("effort"))
+        )
     if re_enabled:
-        step2_lines += [
-            "  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):",
-            f'  orca orchestration worker-start --task <RE_TASK_ID> {_wt_expr("re-worker")} {_fmt_worker_args_py(re_spec.get("agent") or "antigravity", re_spec.get("model"), re_spec.get("effort"))} --json',
-        ]
+        _append_step2_role(
+            step2_lines,
+            "Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA)",
+            "Reverse Engineering Workers (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA)",
+            "RE_TASK", "re-worker", r_count,
+            _fmt_worker_args_py(re_spec.get("agent") or "antigravity", re_spec.get("model"), re_spec.get("effort"))
+        )
     if ui_enabled:
-        step2_lines += [
-            "  # UI Worker (khi có Task Frontend/UI):",
-            f'  orca orchestration worker-start --task <UI_TASK_ID> {_wt_expr("ui-worker")} {_fmt_worker_args_py(ui.get("agent") or "antigravity", ui.get("model"), ui.get("effort"))} --json',
-        ]
+        _append_step2_role(
+            step2_lines,
+            "UI Worker (khi có Task Frontend/UI)",
+            "UI Workers (khi có Task Frontend/UI)",
+            "UI_TASK", "ui-worker", u_count,
+            _fmt_worker_args_py(ui.get("agent") or "antigravity", ui.get("model"), ui.get("effort"))
+        )
     step2_lines += [
         "  ```",
         "  *(On-demand Git: Review PR dùng `orca-review-pr <PR_NUM>` | Sửa Issue dùng `orca-hotfix <ISSUE_ID>`)*\n\n",
@@ -960,8 +1128,10 @@ def sync_gemini_directive(root: Path, config: dict):
     qa_branch_roles = "/".join([r for r, en in [("QA", True), ("DevOps", devops_enabled), ("Sec", True), ("Bench", bench_enabled)] if en])
     log_blind_roles = "/".join([r for r, en in [("DevOps", devops_enabled), ("QA", True)] if en])
     zt4_ro_roles = "/".join([r for r, en in [("Critic", critic_enabled), ("QA", True), ("Bench", bench_enabled), ("RE", re_enabled)] if en])
-    self_heal_fixers = "/".join([w for w, en in [("`dev-worker`", True), ("`devops-worker`", devops_enabled)] if en])
+    dev_slots_label = "/".join(f"`{s}`" for s in _slot_names("dev-worker", d_count))
+    self_heal_fixers = "/".join([w for w, en in [(dev_slots_label, True), ("`devops-worker`", devops_enabled)] if en])
     self_heal_verifiers = "/".join([w for w, en in [("`qa-worker`", True), ("`sec-worker`", True), ("`bench-worker`", bench_enabled)] if en])
+    dev_branches_desc = "tất cả các nhánh Dev (`" + "`, `".join(_slot_names("dev-worker", d_count)) + "`)" if d_count >= 2 else "nhánh `dev-worker` của Dev"
 
     step3_full = (
         '### BƯỚC 3: REACTIVE WAIT, CƠ CHẾ PHẢN BIỆN ĐỒNG THUẬN (ANTI-AUTOCRACY) & KIỂM CHỨNG ZERO-TRUST\n'
@@ -984,7 +1154,7 @@ def sync_gemini_directive(root: Path, config: dict):
         )
         + '  - **Nhận `question` (từ `ask`):** Coordinator phản hồi qua `orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json`.\n'
         f'  - **Nhận `handoff` (từ {handoff_roles}):** Coordinator kiểm duyệt bằng chứng ({handoff_ev}) rồi quyết định bàn giao cho role kế tiếp.\n'
-        f'  - **Nhận `escalation` (từ {esc_roles}):** Coordinator phân xử dựa trên bằng chứng{" (gặp trigger Anti-Autocracy ➔ qua `critic-worker` trước)" if critic_enabled else ""} và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` vào đúng worktree định danh của role đó (`--worktree path:<abs_path>`), rồi điều phối {reverify_w} kiểm toán lại.\n'
+        f'  - **Nhận `escalation` (từ {esc_roles}):** Coordinator phân xử dựa trên bằng chứng{" (gặp trigger Anti-Autocracy ➔ qua `critic-worker` trước)" if critic_enabled else ""} và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` vào đúng worktree slot của role đó (`--worktree path:<abs_path>`), rồi điều phối {reverify_w} kiểm toán lại.\n'
         '- **Nghiệm thu Zero-Trust:** Đọc `orca orchestration worker-read --dispatch <DISPATCH_ID> --json` và `orca orchestration inbox --json`. '
         '**BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:\n'
         '  1. **Báo sạch giả (Fake Clean):** Báo `succeeded` nhưng thiếu `EXIT_CODE=0`, thiếu `git commit` (Commit Hash), '
@@ -992,7 +1162,7 @@ def sync_gemini_directive(root: Path, config: dict):
         f'{", thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99)" if bench_enabled else ""}'
         f'{", thiếu Evidence từ `rea` (`re-worker`)" if re_enabled else ""}'
         f'{", thiếu bằng chứng `file:line` khi phản biện (`critic-worker`)" if critic_enabled else ""}, '
-        f'hoặc {qa_branch_roles} chạy trên nhánh cũ chưa merge commit mới của Dev.\n'
+        f'hoặc {qa_branch_roles} chạy trên nhánh cũ chưa merge đầy đủ commit mới từ {dev_branches_desc}.\n'
         f'  2. **Bỏ sót/Che giấu Lỗi Runtime (Log Blindness/Masking):** {log_blind_roles} báo `PASS` nhưng thiếu bằng chứng quét '
         '**Full Container/Pod Logs** (từ lúc start trên toàn bộ App + DB + Kafka/Broker sau chu kỳ background job), dùng `--since` ngắn '
         'cắt lỗi, bỏ sót pod phụ trợ (`postgres`, `kafka`), hoặc QA sửa test script nới lỏng assert / '
@@ -1005,7 +1175,7 @@ def sync_gemini_directive(root: Path, config: dict):
         f'{", `RE_VERDICT: BLOCKED_BY_UNKNOWN`" if re_enabled else ""}'
         f'{", hoặc pod `CrashLoopBackOff`/`ErrImagePull`" if devops_enabled else ""}.\n'
         f'  4. **Vượt rào (Boundary Crossing):** {zt4_ro_roles} tự sửa code app, Dev xóa/skip test cũ{", DevOps sửa business logic" if devops_enabled else ""}, hoặc Worker tự ý đổi kiến trúc không qua Coordinator.\n'
-        f'- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao {self_heal_fixers} sửa (mở tab mới ngay trong worktree định danh hiện hữu) và bắt buộc chạy lại {self_heal_verifiers} xác nhận đến khi PASS 100%.\n'
+        f'- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao {self_heal_fixers} sửa (mở tab mới ngay trong worktree slot định danh hiện hữu) và bắt buộc chạy lại {self_heal_verifiers} xác nhận đến khi PASS 100%.\n'
         '- ⚠️ **GIỮ TERMINAL WORKER SỐNG Ở BƯỚC 3 BẰNG `worker-retain` (KHÔNG GỌI `worker-release` Ở BƯỚC 3):** Khi một worker đã hoàn tất (`worker_done`), gọi `orca orchestration worker-retain --dispatch <DISPATCH_ID> --json` để thỏa mãn Completion Accounting của Orca đồng thời giữ nguyên terminal worker trên Orca Sidebar (hiển thị **chấm xanh `🟢`**, **icon Agent `✓`** và **chuông thông báo `🔔`** cho tới Bước 4)!\n\n'
     )
     content = re.sub(
@@ -1036,6 +1206,12 @@ def sync_gemini_directive(root: Path, config: dict):
         gate_q_items.append(tail_opt)
     gate_q_str = ", ".join(gate_q_items[:-1]) + " và " + gate_q_items[-1]
 
+    merge_branches_hint = ", ".join(f"`{s}`" for s in _slot_names("dev-worker", d_count))
+    if devops_enabled:
+        merge_branches_hint += ", `devops-worker`"
+    if ui_enabled:
+        merge_branches_hint += ", `ui-worker`"
+
     step4_full = (
         '### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)\n'
         f'- Chỉ khi {"đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` khi có trigger Anti-Autocracy) và " if critic_enabled else ""}đủ bằng chứng thép của {step4_ev_str}, mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):\n'
@@ -1048,7 +1224,7 @@ def sync_gemini_directive(root: Path, config: dict):
         '     orca orchestration gate-resolve --id <GATE_ID> --resolution "yes"\n'
         '     orca orchestration task-update --id <FINAL_TASK_ID> --status completed\n'
         '     ```\n'
-        '  2. Thực hiện `git merge` vào nhánh chính, sau đó chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention và đóng các terminal worker.\n'
+        f'  2. Thực hiện `git merge` đầy đủ tất cả các nhánh worker có thay đổi ({merge_branches_hint}) vào nhánh chính, sau đó chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention, đóng các terminal worker và xuất thẻ `<!-- GOAL_COMPLETE -->` ở câu trả lời cuối cùng để đóng Goal.\n'
     )
     content = re.sub(
         r"### BƯỚC 4:[^\n]*\n[\s\S]*$",
@@ -1894,22 +2070,23 @@ def cmd_status(root: Path, config: dict):
         print("👉 Hãy khởi tạo trước bằng: orca-project-init")
         sys.exit(1)
 
-    print("\n╔═════════════════════════════════════════════════════════════════════════════════════════╗")
-    print("║                🐋  ORCA MULTI-AGENT TEAM TOPOLOGY & MODEL CONFIGURATION                ║")
-    print("╚═════════════════════════════════════════════════════════════════════════════════════════╝")
+    print("\n╔════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+    print("║                     🐋  ORCA MULTI-AGENT TEAM TOPOLOGY & MODEL CONFIGURATION                       ║")
+    print("╚════════════════════════════════════════════════════════════════════════════════════════════════════╝")
     print(f"📍 Dự án: {root}")
     print(f"🌐 Host thực thi: {config.get('executionHost', 'local')}\n")
 
-    print(f"{'VAI TRÒ (ROLE)':<24} | {'AGENT':<12} | {'MODEL':<26} | {'EFFORT':<8} | {'SONG SONG'}")
-    print("-" * 89)
+    print(f"{'VAI TRÒ (ROLE)':<24} | {'AGENT':<12} | {'MODEL':<26} | {'EFFORT':<8} | {'SONG SONG':<10} | {'GOAL MODE'}")
+    print("-" * 100)
 
+    _ensure_critic_defaults(config)
     coord = config.get("coordinator") or {}
     c_agent = coord.get("agent") or "claude"
     c_model = coord.get("model") or "(default)"
     c_effort = coord.get("effort") or "-"
-    print(f"{'1. Lead Coordinator':<24} | {c_agent:<12} | {c_model:<26} | {c_effort:<8} | 1")
+    c_goal = "🎯 /goal" if _is_goal_mode_enabled(coord, config) else "OFF"
+    print(f"{'1. Lead Coordinator':<24} | {c_agent:<12} | {c_model:<26} | {c_effort:<8} | {'1':<10} | {c_goal}")
 
-    _ensure_critic_defaults(config)
     roles = config.get("roles", {})
     role_order = [
         ("developer", "2. Full-Stack Devs"),
@@ -1929,22 +2106,23 @@ def cmd_status(root: Path, config: dict):
         is_opt = key in ("uiSpecialist", "devopsSpecialist", "benchSpecialist", "reSpecialist", "criticSpecialist")
         enabled = _is_role_enabled(data, is_optional=is_opt)
         if not enabled:
-            print(f"{label:<24} | {'[ĐÃ TẮT]':<12} | {'-':<26} | {'-':<8} | -")
+            print(f"{label:<24} | {'[ĐÃ TẮT]':<12} | {'-':<26} | {'-':<8} | {'-':<10} | -")
             continue
         agent = data.get("agent") or "kimi"
         model = data.get("model") or "(default)"
         effort = data.get("effort") or "-"
         conc = str(data.get("concurrency", "On-demand"))
-        print(f"{label:<24} | {agent:<12} | {model:<26} | {effort:<8} | {conc}")
+        r_goal = "🎯 /goal" if _is_goal_mode_enabled(data, config) else "OFF"
+        print(f"{label:<24} | {agent:<12} | {model:<26} | {effort:<8} | {conc:<10} | {r_goal}")
 
-    print("-" * 89)
+    print("-" * 100)
     print("💡 Xem model từ CLI của provider: orca-team models <agent>")
-    print("💡 Thay đổi cấu hình role:        orca-team set <role> [--agent <id>] [--model <model_id>] [--effort <low|med|high>]\n")
+    print("💡 Thay đổi cấu hình role:        orca-team set <role> [--agent <id>] [--model <model_id>] [--effort <low|med|high>] [--concurrency <1..10>] [--goal|--no-goal]\n")
 
 def cmd_set(root: Path, config: dict, args: list):
     if args and any(a in ("-h", "--help", "help") for a in args):
-        print("Sử dụng: orca-team set <role> [--agent <id>] [--model <model_id>] [--effort <low|medium|high>] [--concurrency <1..10>] [--enable|--disable]")
-        print("👉 Các role hợp lệ: coord, dev, qa, sec, pr, issue, ui, devops, bench, re, critic")
+        print("Sử dụng: orca-team set <role|all> [--agent <id>] [--model <model_id>] [--effort <low|medium|high>] [--concurrency <1..10>] [--goal|--no-goal] [--enable|--disable]")
+        print("👉 Các role hợp lệ: coord, dev, qa, sec, pr, issue, ui, devops, bench, re, critic, all")
         return
 
     if not config:
@@ -1953,14 +2131,15 @@ def cmd_set(root: Path, config: dict, args: list):
 
     if not args:
         print("❌ Thiếu vai trò cần cấu hình. Dùng: orca-team set <role> [options]", file=sys.stderr)
-        print("👉 Các role hợp lệ: coord, dev, qa, sec, pr, issue, ui, devops, bench, re, critic", file=sys.stderr)
+        print("👉 Các role hợp lệ: coord, dev, qa, sec, pr, issue, ui, devops, bench, re, critic, all", file=sys.stderr)
         sys.exit(1)
 
     role_raw = args[0].lower()
-    role_key = ROLE_ALIASES.get(role_raw)
+    is_all_roles = role_raw in ("all", "*", "team")
+    role_key = "all" if is_all_roles else ROLE_ALIASES.get(role_raw)
     if not role_key:
         print(f"❌ Vai trò không hợp lệ: '{role_raw}'.", file=sys.stderr)
-        print(f"👉 Hợp lệ: {', '.join(sorted(set(ROLE_ALIASES.keys())))}", file=sys.stderr)
+        print(f"👉 Hợp lệ: all, {', '.join(sorted(set(ROLE_ALIASES.keys())))}", file=sys.stderr)
         sys.exit(1)
 
     # Parse options
@@ -1968,6 +2147,7 @@ def cmd_set(root: Path, config: dict, args: list):
     new_model = None
     new_effort = None
     new_concurrency = None
+    new_goal_mode = None
     toggle_enable = None
     sync_only = False
     force_flag = False
@@ -2039,6 +2219,22 @@ def cmd_set(root: Path, config: dict, args: list):
             if new_concurrency < 1 or new_concurrency > 10:
                 print(f"❌ --concurrency phải là số nguyên từ 1 đến 10 (nhận được: '{c_raw}').", file=sys.stderr)
                 sys.exit(1)
+        elif opt == "--goal":
+            new_goal_mode = True
+            idx += 1
+        elif opt == "--no-goal":
+            new_goal_mode = False
+            idx += 1
+        elif opt.startswith("--goal="):
+            gv = opt.split("=", 1)[1].strip().lower()
+            if gv in ("1", "true", "on", "yes"):
+                new_goal_mode = True
+            elif gv in ("0", "false", "off", "no"):
+                new_goal_mode = False
+            else:
+                print(f"❌ Giá trị không hợp lệ cho '--goal=': '{gv}' (hợp lệ: true/false, on/off).", file=sys.stderr)
+                sys.exit(1)
+            idx += 1
         elif opt == "--enable":
             toggle_enable = True
             idx += 1
@@ -2071,13 +2267,30 @@ def cmd_set(root: Path, config: dict, args: list):
     if new_effort:
         new_effort = new_effort.lower()
 
-    if sync_only and new_agent is None and new_model is None and new_effort is None and new_concurrency is None and toggle_enable is None:
+    if is_all_roles:
+        if new_goal_mode is None and not sync_only:
+            print("❌ Với vai trò 'all', hãy truyền '--goal' hoặc '--no-goal' (ví dụ: orca-team set all --goal).", file=sys.stderr)
+            sys.exit(1)
+        _ensure_critic_defaults(config)
+        if new_goal_mode is not None:
+            config["goalMode"] = new_goal_mode
+            config.setdefault("coordinator", {})["goalMode"] = new_goal_mode
+            for r_obj in config.setdefault("roles", {}).values():
+                if isinstance(r_obj, dict):
+                    r_obj["goalMode"] = new_goal_mode
+            save_config(root, config)
+        sync_gemini_directive(root, config)
+        state_lbl = "BẬT (🎯 /goal)" if new_goal_mode else "TẮT (OFF)"
+        print(f"\n✅ Đã cập nhật Chế độ /goal = {state_lbl} cho TOÀN BỘ 11 vai trò trong 'orca-team.json' và '.agents/GEMINI.md'.\n")
+        return
+
+    if sync_only and new_agent is None and new_model is None and new_effort is None and new_concurrency is None and new_goal_mode is None and toggle_enable is None:
         sync_gemini_directive(root, config)
         print("📁 Đã đồng bộ lại '.agents/GEMINI.md' từ 'orca-team.json'.")
         return
 
     # Interactive prompt if no flags provided
-    if new_agent is None and new_model is None and new_effort is None and new_concurrency is None and toggle_enable is None:
+    if new_agent is None and new_model is None and new_effort is None and new_concurrency is None and new_goal_mode is None and toggle_enable is None:
         if not (sys.stdin.isatty() and sys.stderr.isatty()):
             print(
                 "❌ Môi trường không có TTY tương tác. Hãy truyền cờ tường minh: "
@@ -2191,6 +2404,29 @@ def cmd_set(root: Path, config: dict, args: list):
             else:
                 new_effort = ""
 
+        # Chọn số lượng agent song song (Concurrency) cho các vai trò Worker
+        if role_key != "coordinator":
+            default_conc_val = 2 if role_key == "developer" else 1
+            try:
+                curr_conc_val = max(1, min(5, int(current.get("concurrency") or default_conc_val)))
+            except (ValueError, TypeError):
+                curr_conc_val = default_conc_val
+            conc_choices = [
+                "1 agent",
+                "2 agents (khuyến nghị chạy song song 2 nhánh)" if role_key == "developer" else "2 agents (chạy song song 2 nhánh)",
+                "3 agents (chạy song song 3 nhánh)",
+                "4 agents (chạy song song 4 nhánh)",
+                "5 agents (chạy song song 5 nhánh)",
+            ]
+            c_i, _ = interactive_select(
+                f"👉 Chọn số lượng agent song song (Concurrency) cho vai trò [{role_label}]:",
+                conc_choices,
+                default_idx=curr_conc_val - 1
+            )
+            chosen_conc = c_i + 1
+            if chosen_conc != current.get("concurrency"):
+                new_concurrency = chosen_conc
+
 
     # Apply changes
     if role_key == "coordinator":
@@ -2278,6 +2514,12 @@ def cmd_set(root: Path, config: dict, args: list):
         old_c = target.get("concurrency")
         target["concurrency"] = new_concurrency
         changes.append(f"Concurrency: {old_c} ➔ {new_concurrency}")
+
+    if new_goal_mode is not None:
+        old_g = _is_goal_mode_enabled(target, config)
+        target["goalMode"] = new_goal_mode
+        if old_g != new_goal_mode or "goalMode" not in target:
+            changes.append(f"Goal Mode: {'🎯 /goal' if old_g else 'OFF'} ➔ {'🎯 /goal' if new_goal_mode else 'OFF'}")
 
     if role_key == "criticSpecialist" and target.get("enabled", True) and not target.get("utilities"):
         target["utilities"] = ["git-worktrees", "diff-viewer", "orca-skills-registry"]
@@ -2495,7 +2737,7 @@ def cmd_uninstall_project(root: Path, args: list):
 
 def cmd_get(root: Path, config: dict, args: list):
     if args and any(a in ("-h", "--help", "help") for a in args):
-        print("Sử dụng: orca-team get <role> [<field>|--field <agent|model|effort|concurrency|enabled|json>]")
+        print("Sử dụng: orca-team get <role> [<field>|--field <agent|model|effort|concurrency|goal|enabled|json>]")
         return
     if not config:
         print("❌ Không tìm thấy orca-team.json", file=sys.stderr)
@@ -2546,10 +2788,12 @@ def cmd_get(root: Path, config: dict, args: list):
         print("none")
     elif field == "enabled":
         print("true" if _is_role_enabled(target, is_optional=is_opt) else "false")
+    elif field in ("goal", "goalMode", "goal_mode"):
+        print("true" if _is_goal_mode_enabled(target, config) else "false")
     else:
         val = target.get(field)
-        if val is None and field == "concurrency" and role_key == "coordinator":
-            val = 1
+        if val is None and field == "concurrency":
+            val = 1 if role_key != "developer" else 2
         if val is None:
             sys.exit(1)
         print(json.dumps(val, ensure_ascii=False) if isinstance(val, (list, dict)) else val)
@@ -3956,6 +4200,65 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
         warning_issues.append(f"Base Directive Overhead ở mức trung bình (~{base_tokens:,} tokens/turn).")
     else:
         critical_issues.append(f"Base Directive Overhead vượt ngưỡng (~{base_tokens:,} tokens/turn).")
+
+    # Kiểm tra đồng bộ số lượng Worktree Slots song song (Concurrency >= 2) và Chế độ /goal trong .agents/GEMINI.md
+    gemini_path_chk = root / ".agents" / "GEMINI.md"
+    if config and gemini_path_chk.is_file():
+        try:
+            g_txt = gemini_path_chk.read_text(encoding="utf-8", errors="ignore")
+            role_wt_map_chk = [
+                ("developer", "dev-worker", 2),
+                ("qa", "qa-worker", 1),
+                ("security", "sec-worker", 1),
+                ("devopsSpecialist", "devops-worker", 1),
+                ("benchSpecialist", "bench-worker", 1),
+                ("reSpecialist", "re-worker", 1),
+                ("uiSpecialist", "ui-worker", 1),
+                ("criticSpecialist", "critic-worker", 1),
+            ]
+            missing_slot_wts = []
+            roles_cfg_chk = config.get("roles") or {}
+            for r_key, base_wt, def_c in role_wt_map_chk:
+                r_obj = roles_cfg_chk.get(r_key) or {}
+                is_opt_r = r_key in ("devopsSpecialist", "benchSpecialist", "reSpecialist", "uiSpecialist", "criticSpecialist")
+                if not _is_role_enabled(r_obj, is_optional=is_opt_r):
+                    continue
+                try:
+                    c_val = max(1, min(10, int(r_obj.get("concurrency") or def_c)))
+                except (ValueError, TypeError):
+                    c_val = def_c
+                if c_val >= 2:
+                    for k_slot in range(2, c_val + 1):
+                        slot_wt = f"{base_wt}-{k_slot}"
+                        if slot_wt not in g_txt:
+                            missing_slot_wts.append(slot_wt)
+            missing_goal_directive = (
+                _is_goal_mode_enabled(config.get("coordinator") or {}, config)
+                and "CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH" not in g_txt
+            )
+            if missing_slot_wts or missing_goal_directive:
+                if auto_fix:
+                    sync_gemini_directive(root, config)
+                    fix_parts = []
+                    if missing_slot_wts:
+                        fix_parts.append(f"Worktree Slots song song ({', '.join(missing_slot_wts)})")
+                    if missing_goal_directive:
+                        fix_parts.append("Chế độ /goal mặc định (goalMode)")
+                    actions_taken.append(
+                        f"Đồng bộ lại '.agents/GEMINI.md' bổ sung đầy đủ: {' & '.join(fix_parts)}."
+                    )
+                else:
+                    if missing_slot_wts:
+                        warning_issues.append(
+                            f"File '.agents/GEMINI.md' đang ở bản cũ thiếu lệnh khởi chạy song song cho Worktree Slots ({', '.join(missing_slot_wts)}) "
+                            f"khiến Leader chỉ gọi 1 agent (chạy 'orca-team sync' hoặc 'orca-monitor --fix' để cập nhật)."
+                        )
+                    if missing_goal_directive:
+                        warning_issues.append(
+                            "File '.agents/GEMINI.md' chưa đồng bộ chỉ dẫn Chế độ /goal mặc định (chạy 'orca-team sync' hoặc 'orca-monitor --fix' để cập nhật)."
+                        )
+        except Exception:
+            pass
     print("")
 
     # ─────────────────────────────────────────────────────────────────────────────
@@ -4492,6 +4795,45 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     pt_title = str(pt.get("task_title") or pt.get("display_name") or "")[:68]
                     pt_status = str(pt.get("status") or "ready")
                     print(f"   ⏳ Queued in DAG ({pt.get('id')} - {pt_status}): \"{pt_title}\"")
+
+            # Kiểm tra việc huy động đủ số lượng agent song song (Concurrency >= 2) trong Run
+            if config and worker_metrics_list:
+                roles_cfg_rt = config.get("roles") or {}
+                rt_role_map = [
+                    ("developer", "dev-worker", "Full-Stack Devs", 2),
+                    ("qa", "qa-worker", "QA & Testers", 1),
+                    ("security", "sec-worker", "Security & Bug Hunter", 1),
+                    ("devopsSpecialist", "devops-worker", "DevOps Specialist", 1),
+                    ("benchSpecialist", "bench-worker", "Bench & Perf Specialist", 1),
+                    ("reSpecialist", "re-worker", "Reverse Eng (REA)", 1),
+                    ("uiSpecialist", "ui-worker", "UI/UX Specialist", 1),
+                    ("criticSpecialist", "critic-worker", "Research & Critic", 1),
+                ]
+                for r_key_rt, base_wt_rt, r_lbl_rt, def_c_rt in rt_role_map:
+                    r_obj_rt = roles_cfg_rt.get(r_key_rt) or {}
+                    is_opt_rt = r_key_rt in ("devopsSpecialist", "benchSpecialist", "reSpecialist", "uiSpecialist", "criticSpecialist")
+                    if not _is_role_enabled(r_obj_rt, is_optional=is_opt_rt):
+                        continue
+                    try:
+                        cfg_conc = max(1, min(10, int(r_obj_rt.get("concurrency") or def_c_rt)))
+                    except (ValueError, TypeError):
+                        cfg_conc = def_c_rt
+                    if cfg_conc < 2:
+                        continue
+                    slot_re = re.compile(rf"^{re.escape(base_wt_rt)}(?:-\d+)?$")
+                    role_wms = [wm for wm in worker_metrics_list if slot_re.match(str(wm.get("role") or ""))]
+                    if not role_wms:
+                        continue
+                    used_slots = sorted({str(wm.get("role") or "") for wm in role_wms})
+                    max_files_rt = max((int(wm.get("files") or 0) for wm in role_wms), default=0)
+                    max_turns_rt = max((int((wm.get("telemetry") or {}).get("turns") or 0) for wm in role_wms), default=0)
+                    if len(used_slots) < cfg_conc and (len(role_wms) >= 2 or max_files_rt >= 4 or max_turns_rt >= 25):
+                        expected_slots = ", ".join(base_wt_rt if i == 1 else f"{base_wt_rt}-{i}" for i in range(1, cfg_conc + 1))
+                        warning_issues.append(
+                            f"Vai trò '{r_lbl_rt}' đang cấu hình {cfg_conc} agents song song ({expected_slots}) nhưng Run {active_run_id} "
+                            f"chỉ huy động {len(used_slots)}/{cfg_conc} worktree slot ({', '.join(used_slots)}). "
+                            f"Hãy chia thành {cfg_conc} Task độc lập ở Bước 1 và fan-out đồng thời trên đủ {cfg_conc} slots ở Bước 2."
+                        )
 
             # Kiểm tra các Gate treo (pending) bất kể worker đang retained hay đã released,
             # và chỉ tự chữa các Task bị kẹt 'blocked'/'ready' khi toàn bộ worker đã released (và ít nhất 1 succeeded) và không còn pending gate.
