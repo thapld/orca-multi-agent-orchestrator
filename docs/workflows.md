@@ -26,9 +26,9 @@ sequenceDiagram
     Lead->>Orca: orca orchestration run-create
     Lead->>Orca: orca orchestration task-create (Tạo Task DAG có dependency)
 
-    par Khởi chạy Workers (Fixed-Pool Worktree Slots theo Concurrency, gom nhóm Terminal Tabs)
-        Lead->>Orca: worker-start Dev (path:.../dev-worker, dev-worker-2..N)
-        Lead->>Orca: worker-start DevOps (path:.../devops-worker hoặc new-child: devops-worker)
+    par Khởi chạy Workers (Elastic Worktree Auto-Scale qua $(orca-team worktree-arg <role>))
+        Lead->>Orca: worker-start Dev $(orca-team worktree-arg dev) (dev-worker, dev-worker-2..N)
+        Lead->>Orca: worker-start DevOps $(orca-team worktree-arg devops)
     end
 
     loop Trong khi code
@@ -40,14 +40,14 @@ sequenceDiagram
     Devs->>Orca: worker-done --terminal <handle> --outcome succeeded
     Lead->>Orca: check [--ack <DELIVERY_ID>] --wait, git log -n 1 --stat & worker-retain (Kiểm duyệt Commit Hash & Build=0)
 
-    Lead->>Orca: worker-start QA & Security Auditor (Mở tab mới trong worktree qa-worker & sec-worker)
+    Lead->>Orca: worker-start QA & Security Auditor ($(orca-team worktree-arg qa) & $(orca-team worktree-arg sec))
     QA->>Orca: send --from <handle> --type worker_done --outcome succeeded (QA_VERDICT: PASS + Runtime Log Clean)
     Sec->>Orca: send --from <handle> --type worker_done --outcome succeeded (SECURITY_VERDICT: PASS)
 
     Lead->>Orca: orca file open-changed --mode diff (Soi diff tổng thể)
     Lead->>Orca: orca orchestration gate-create (Xin phép Human User trước khi merge)
     User->>Lead: Duyệt Merge (Approved)
-    Lead->>Orca: gate-resolve, task-update --status completed, git merge & worker-release
+    Lead->>Orca: gate-resolve, task-update --status completed, git merge & orca-team release-workers --run <RUN_ID>
     Lead-->>User: Báo cáo hoàn tất
 ```
 
@@ -174,7 +174,7 @@ sequenceDiagram
         Worker->>Orca: orca orchestration send --from <handle> --task-id <tid> --dispatch-id <did> --type handoff --subject "Dev Handoff" --body "DEV_HANDOFF: branch=dev-worker, commit=..." --json
         Orca-->>Lead: Sự kiện 'handoff'
         Lead->>Lead: Kiểm duyệt Commit Hash / Clean-Room Spec / Runtime Logs
-        Lead->>Orca: Duyệt & Điều phối cho role kế tiếp (send --to dispatch:<LIVE_ID> --type dispatch hoặc task-create + worker-start --worktree path:<wt_path>)
+        Lead->>Orca: Duyệt & Điều phối cho role kế tiếp (send --to dispatch:<LIVE_ID> --type dispatch hoặc task-create + worker-start $(orca-team worktree-arg <role>))
     else Trường hợp C: Worker thực thi Quyền Phủ quyết Chuyên môn (Domain Veto / Escalation)
         Worker->>Orca: orca orchestration send --from <handle> --task-id <tid> --dispatch-id <did> --type escalation --subject "Runtime Log Error" --body "DEVOPS_ALERT / QA_ALERT / SEC_BLOCK: <error_detail>" --json
         Orca-->>Lead: Sự kiện 'escalation'
@@ -182,7 +182,7 @@ sequenceDiagram
         alt Worker cần sửa vẫn đang chạy (live)
             Lead->>Orca: orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "<Chỉ dẫn vá lỗi>" --json
         else Worker cần sửa đã kết thúc (settled / đã gửi worker_done)
-            Lead->>Orca: orca orchestration task-create & worker-start --worktree path:<wt_path> (Mở tab mới trong worktree định danh của role)
+            Lead->>Orca: orca orchestration task-create & worker-start $(orca-team worktree-arg <role>) (Tái sử dụng slot rảnh hoặc tự đẻ <role>-worker-2 nếu bận)
         end
     else Trường hợp D: Vấn đề vượt phạm vi spec cần ý kiến con người
         Lead->>Orca: orca orchestration gate-create --task <tid> --question "..." --options '["approve","revise"]' --json
@@ -205,7 +205,7 @@ sequenceDiagram
     participant Critic as 🔎 critic-worker (Read-Only)
 
     Lead->>Orca: task-create [ROLE: PRINCIPAL RESEARCH & ADVERSARIAL CRITIC] gồm Triệu chứng + bằng chứng thô và Giả thuyết Leader
-    Orca->>Critic: worker-start --worktree critic-worker
+    Orca->>Critic: worker-start $(orca-team worktree-arg critic)
     Critic->>Critic: Lập giả thuyết độc lập TRƯỚC khi đọc giả thuyết Leader, kiểm chứng file:line, git blame, DB, runtime log
     loop Tối đa 3 vòng
         Critic->>Orca: ask --question "CRITIC_CHALLENGE vòng n/3: bằng chứng + phương án" (chặn chờ)
@@ -227,7 +227,7 @@ sequenceDiagram
     end
 ```
 
-> **Giới hạn:** Đây là ràng buộc ở tầng chỉ dẫn + kiểm tra Zero-Trust; Orca CLI không chặn cứng việc Leader bỏ qua Critic. Dấu vết kiểm toán nằm ở hộp thư Run (`orca orchestration inbox --json`): thiếu `Critic Consensus`/`Critic Deadlock` cho một task có trigger là vi phạm có thể phát hiện được.
+> **Giới hạn:** Đây là ràng buộc ở tầng chỉ dẫn + kiểm tra Zero-Trust; Orca CLI không chặn cứng việc Leader bỏ qua Critic. Dấu vết kiểm toán nằm ở hộp thư Run (`orca orchestration check --json`): thiếu `Critic Consensus`/`Critic Deadlock` cho một task có trigger là vi phạm có thể phát hiện được.
 
 ---
 

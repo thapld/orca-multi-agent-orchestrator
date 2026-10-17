@@ -4,17 +4,20 @@ Orca không chỉ là một trình chạy CLI mà là một **Agent Development 
 
 ---
 
-## 1. Git Worktree Isolation (`orca worktree` — Fixed-Pool Worktree Slots Theo Concurrency + Gom Nhóm Terminal Tabs)
+## 1. Git Worktree Isolation (`orca worktree` — Elastic Worktree Auto-Scale + Tự Động Dọn Tab Cũ)
 
-Mỗi vai trò trong Orca được cấp đúng **`N` Git Worktree Slots cố định theo cấu hình `Concurrency`** (`dev-worker`, `dev-worker-2..N`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`, `critic-worker`). Ở các task tiếp theo của cùng slot, hệ thống truyền `--worktree path:<abs_path>` vào `orca orchestration worker-start` để **mở và gom nhóm các Terminal Tab mới ngay bên trong worktree slot đó**, giải quyết triệt để xung đột mã nguồn và `git index.lock` mà không đẻ ra các worktree dư thừa vượt quá số slot `Concurrency`.
+Mỗi vai trò trong Orca được cấp phát Worktree Slot tự động co giãn theo thời gian thực qua `$(orca-team worktree-arg <role>)` (`dev-worker`, `dev-worker-2..N`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`, `critic-worker`). Khi slot hiện có đang rảnh (`done` / `settled` / `released`), hệ thống tự động đóng các tab worker cũ đã hoàn tất trên slot đó rồi truyền `--worktree path:<abs_path>` vào `orca orchestration worker-start` để tái sử dụng worktree; khi slot hiện có đang bận chạy task khác (kể cả khi nhiều Leader chạy song song), hệ thống tự động đẻ hoặc chọn sang `<role>-worker-2`, `<role>-worker-3`..., giải quyết triệt để xung đột mã nguồn và `git index.lock`.
 
 ### Các lệnh phổ biến:
 ```bash
 # Xem danh sách các worktree đang hoạt động
 orca worktree ps --json
 
-# Khởi chạy worker và tự động tái sử dụng worktree định danh hiện có (hoặc tạo mới ở lần đầu)
-orca orchestration worker-start --task <TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/dev-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[dev-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name dev-worker$([ -f package.json ] || echo ' --setup skip')") --agent antigravity --json
+# Khởi chạy worker với cơ chế tự động co giãn Worktree Slot & dọn tab cũ
+orca orchestration worker-start --task <TASK_ID> $(orca-team worktree-arg dev) --agent antigravity --json
+
+# Lưu trữ archive & đóng triệt để toàn bộ tab terminal cũ (done/retained/user_takeover) của các worker đã xong việc
+orca-team release-workers --run <RUN_ID>
 
 # Tạo worktree gắn liền với GitHub Issue (độc lập, không kế thừa context dở dang)
 orca worktree create --repo path:$(git rev-parse --show-toplevel) --name "hotfix-issue-42" --issue 42 --no-parent --agent antigravity --setup skip --json

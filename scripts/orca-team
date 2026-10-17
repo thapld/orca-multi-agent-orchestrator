@@ -312,9 +312,37 @@ BASE_WORKTREE_MAP = {
 }
 
 
+_CANONICAL_SLOT_SUFFIX_RE = re.compile(
+    r"(?:^|[.])((?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix|pr|issue)-worker(?:-\d+)?|hotfix-issue-\d+(?:-\d+)?|review-pr-\d+(?:-\d+)?)$",
+    re.IGNORECASE,
+)
+
+
+def _extract_canonical_slot_name(name_or_path: str) -> str:
+    if not name_or_path:
+        return ""
+    s = str(name_or_path).strip().strip("\"'")
+    if s.startswith("path:"):
+        s = s[5:].strip()
+    base = Path(s.rstrip("/")).name if "/" in s else s
+    m = _CANONICAL_SLOT_SUFFIX_RE.search(base)
+    return m.group(1).lower() if m else ""
+
+
 def _resolve_role_and_slot(role_input: str, raw_task: str = "") -> tuple[str, str]:
-    """Chuẩn hóa role_input (kể cả khi truyền tên slot như 'dev-worker-2', 'dev-2', 'devops-worker', 'ui-worker-2') thành (canonical_role, slot_branch_hint)."""
+    """Chuẩn hóa role_input (kể cả khi truyền tên slot như 'dev-worker-2', 'dev-2', 'devops-worker', 'hotfix-issue-42', 'review-pr-89') thành (canonical_role, slot_branch_hint)."""
     raw_r = (role_input or "dev").strip().lower()
+    if raw_r.startswith("path:"):
+        raw_r = Path(raw_r[5:].rstrip("/")).name.lower()
+    canon_from_suffix = _extract_canonical_slot_name(raw_r)
+    if canon_from_suffix:
+        raw_r = canon_from_suffix
+
+    if re.match(r"^hotfix-issue-\d+(?:-\d+)?$", raw_r):
+        return "issueResolver", raw_r
+    if re.match(r"^review-pr-\d+(?:-\d+)?$", raw_r):
+        return "prReviewer", raw_r
+
     m_slot = re.match(r"^([a-z0-9_-]+?)(?:-worker)?(?:-(\d+))?$", raw_r)
     slot_num = None
     base_r = raw_r
@@ -423,9 +451,15 @@ def release_settled_worker_terminals(
     import subprocess
     import time
 
+    if target_worktree_name:
+        target_worktree_name = _extract_canonical_slot_name(target_worktree_name) or target_worktree_name.strip()
+    if ignore_reserved_slot:
+        ignore_reserved_slot = _extract_canonical_slot_name(ignore_reserved_slot) or ignore_reserved_slot.strip()
+
     base_dir = (root or find_project_root() or Path.cwd()).resolve()
     main_root = base_dir
     repo_wt_paths = {}
+    path_to_slot = {}
     try:
         wt_res = subprocess.run(
             ["git", "-C", str(base_dir), "worktree", "list", "--porcelain"],
@@ -452,15 +486,31 @@ def release_settled_worker_terminals(
                     except Exception:
                         wt_p = Path(cur_wt)
                     if wt_p != main_root and wt_p.is_dir():
-                        repo_wt_paths[wt_p.name] = str(wt_p)
-                        if cur_br.startswith("refs/heads/"):
-                            br_short = cur_br[len("refs/heads/"):]
-                            if br_short:
-                                repo_wt_paths.setdefault(br_short, str(wt_p))
+                        wt_str = str(wt_p)
+                        br_short = cur_br[len("refs/heads/"):] if cur_br.startswith("refs/heads/") else ""
+                        canon_slot = (
+                            _extract_canonical_slot_name(br_short)
+                            or _extract_canonical_slot_name(wt_p.name)
+                            or br_short
+                            or wt_p.name
+                        )
+                        path_to_slot[wt_str] = canon_slot
+                        repo_wt_paths[wt_p.name] = wt_str
+                        repo_wt_paths.setdefault(canon_slot, wt_str)
+                        if br_short:
+                            repo_wt_paths.setdefault(br_short, wt_str)
                     cur_wt = ""
                     cur_br = ""
     except Exception:
         pass
+
+    def _slot_for_path(p_str: str, fallback_name: str = "") -> str:
+        if not p_str:
+            return _extract_canonical_slot_name(fallback_name) or fallback_name
+        if p_str in path_to_slot:
+            return path_to_slot[p_str]
+        base_n = Path(p_str).name
+        return _extract_canonical_slot_name(base_n) or base_n
 
     main_root_str = str(main_root)
     repo_path_set = set(repo_wt_paths.values())
@@ -502,7 +552,10 @@ def release_settled_worker_terminals(
                 norm_tp = str(Path(raw_tp).resolve())
             except Exception:
                 norm_tp = raw_tp
-            if Path(norm_tp).name == target_worktree_name and (norm_tp == target_wt_path or norm_tp in repo_path_set):
+            slot_tp = _slot_for_path(norm_tp)
+            if (target_wt_path and norm_tp == target_wt_path) or (
+                slot_tp == target_worktree_name and norm_tp in repo_path_set
+            ):
                 has_open_in_slot = True
                 break
         if not has_open_in_slot:
@@ -550,8 +603,10 @@ def release_settled_worker_terminals(
                 )
                 if not belongs:
                     continue
-                s_name = Path(norm_p or raw_p).name if (norm_p or raw_p) else str(wt_obj.get("displayName") or "").strip()
+                disp_n = str(wt_obj.get("displayName") or wt_obj.get("branch") or "").strip()
+                s_name = _slot_for_path(norm_p or raw_p, disp_n)
                 if norm_p and norm_p != main_root_str and Path(norm_p).is_dir():
+                    path_to_slot.setdefault(norm_p, s_name)
                     repo_wt_paths.setdefault(s_name, norm_p)
                     repo_path_set.add(norm_p)
                 if norm_p == main_root_str or wt_obj.get("isMainWorktree"):
@@ -567,6 +622,8 @@ def release_settled_worker_terminals(
                         has_busy_ag = True
                 if wt_st in ("working", "running", "busy", "starting") or has_busy_ag:
                     busy_slots.add(s_name)
+                    if norm_p:
+                        busy_slots.add(Path(norm_p).name)
     except Exception:
         pass
 
@@ -576,11 +633,13 @@ def release_settled_worker_terminals(
         try:
             raw_res = json.loads(res_path.read_text(encoding="utf-8", errors="ignore"))
             if isinstance(raw_res, dict):
-                for s_key, r_ts in raw_res.items():
-                    if s_key == ignore_reserved_slot:
+                for s_key, r_val in raw_res.items():
+                    canon_k = _extract_canonical_slot_name(s_key) or str(s_key)
+                    if canon_k == ignore_reserved_slot or s_key == ignore_reserved_slot:
                         continue
-                    if isinstance(r_ts, (int, float)) and (now - float(r_ts)) < 45.0:
-                        busy_slots.add(str(s_key))
+                    r_ts = float(r_val.get("ts") or 0.0) if isinstance(r_val, dict) else (float(r_val) if isinstance(r_val, (int, float)) else 0.0)
+                    if r_ts > 0 and (now - r_ts) < 45.0:
+                        busy_slots.add(canon_k)
         except Exception:
             pass
 
@@ -607,7 +666,7 @@ def release_settled_worker_terminals(
         if norm_tp == main_root_str:
             protected_handles.add(h_id)
         elif norm_tp in repo_path_set or raw_tp in repo_path_set:
-            s_name = Path(norm_tp).name
+            s_name = _slot_for_path(norm_tp)
             repo_worker_terminals.setdefault(s_name, []).append(t_obj)
 
     # 3. Duyệt danh sách Runs & Workers để xác định các dispatches cần release và các handles cần bảo vệ
@@ -628,6 +687,7 @@ def release_settled_worker_terminals(
     if run_id and run_id.strip():
         run_ids_to_inspect.append(run_id.strip())
         seen_rids.add(run_id.strip())
+    # Pass 1: Ưu tiên mọi Run đang active / running hoặc có coordinator_handle
     for r_obj in runs_list:
         if not isinstance(r_obj, dict):
             continue
@@ -635,7 +695,16 @@ def release_settled_worker_terminals(
         if ch:
             protected_handles.add(ch)
         rid = str(r_obj.get("id") or "").strip()
-        if rid and rid not in seen_rids and len(run_ids_to_inspect) < 15:
+        rst = str(r_obj.get("status") or "").strip().lower()
+        if rid and rid not in seen_rids and (ch or rst in ("running", "active", "waiting", "pending")):
+            run_ids_to_inspect.append(rid)
+            seen_rids.add(rid)
+    # Pass 2: Lấy thêm các Run gần nhất cho tới tối đa 30 runs
+    for r_obj in runs_list:
+        if not isinstance(r_obj, dict):
+            continue
+        rid = str(r_obj.get("id") or "").strip()
+        if rid and rid not in seen_rids and len(run_ids_to_inspect) < 30:
             run_ids_to_inspect.append(rid)
             seen_rids.add(rid)
 
@@ -684,7 +753,7 @@ def release_settled_worker_terminals(
             if not belongs_to_repo:
                 continue
             repo_runs.add(rid_k)
-            s_name = Path(norm_wt_part or wt_part).name if (norm_wt_part or wt_part) else ""
+            s_name = _slot_for_path(norm_wt_part or wt_part) if (norm_wt_part or wt_part) else ""
             wstate = str(w.get("workerState") or w.get("state") or "").strip().lower()
             dstate = str(w.get("dispatchStatus") or "").strip().lower()
             tstate = str(w.get("terminalState") or res_obj.get("terminalState") or "").strip().lower()
@@ -741,6 +810,7 @@ def release_settled_worker_terminals(
     dispatches_to_release = []
     seen_dids = set()
     targeted_handles = set()
+    targeted_slots = set()
 
     for rec in all_settled_records:
         did = rec["dispatchId"]
@@ -768,6 +838,8 @@ def release_settled_worker_terminals(
             continue
 
         seen_dids.add(did)
+        if slot_k:
+            targeted_slots.add(slot_k)
         if h_k and h_k not in protected_handles:
             targeted_handles.add(h_k)
         if t_st != "released":
@@ -815,13 +887,20 @@ def release_settled_worker_terminals(
     for h_id in targeted_handles:
         if h_id in still_open_by_handle and h_id not in protected_handles and h_id not in seen_close_handles:
             t_meta = still_open_by_handle[h_id]
-            s_name = Path(str(t_meta.get("worktreePath") or "")).name
+            raw_tp = str(t_meta.get("worktreePath") or "").strip()
+            try:
+                norm_tp = str(Path(raw_tp).resolve()) if raw_tp else ""
+            except Exception:
+                norm_tp = raw_tp
+            s_name = _slot_for_path(norm_tp)
             # Chỉ đóng nếu worktree không có agent đang active hoặc nếu chính handle này là của dispatch cũ đã settled
             handles_to_close.append((h_id, s_name, str(t_meta.get("title") or "")))
             seen_close_handles.add(h_id)
 
-    # 4b. Quét dọn các tab mồ côi (`Terminal 1` hoặc `worker-task_*` cũ) trên các worker worktrees đang hoàn toàn rảnh
-    worker_slot_pattern = re.compile(r"^(?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix)-worker(?:-\d+)?$")
+    # 4b. Quét dọn các tab mồ côi (`Terminal 1`, `Setup` hoặc `worker-task_*` cũ) trên các worker worktrees đang hoàn toàn rảnh
+    worker_slot_pattern = re.compile(
+        r"^(?:(?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix|pr|issue)-worker(?:-\d+)?|hotfix-issue-\d+(?:-\d+)?|review-pr-\d+(?:-\d+)?)$"
+    )
     for h_id, t_meta in still_open_by_handle.items():
         if h_id in protected_handles or h_id in seen_close_handles:
             continue
@@ -836,12 +915,12 @@ def release_settled_worker_terminals(
             continue
         if norm_tp not in repo_path_set and raw_tp not in repo_path_set:
             continue
-        s_name = Path(norm_tp).name
+        s_name = _slot_for_path(norm_tp)
         if target_worktree_name:
             if s_name != target_worktree_name or s_name in busy_slots:
                 continue
         else:
-            if not sweep_idle_worktrees:
+            if not sweep_idle_worktrees and s_name not in targeted_slots:
                 continue
             if not worker_slot_pattern.match(s_name):
                 continue
@@ -897,23 +976,33 @@ def resolve_elastic_worktree_slot(
       tự động nhảy sang slot kế tiếp (<role>-worker-2, <role>-worker-3...) — tái sử dụng nếu đã có trên đĩa và đang rảnh,
       hoặc tạo mới (--worktree new-child --name <slot>) nếu chưa tồn tại.
     """
+    from concurrent.futures import ThreadPoolExecutor
     import fcntl
     import subprocess
     import time
 
+    if check_exact_slot:
+        check_exact_slot = _extract_canonical_slot_name(check_exact_slot) or check_exact_slot.strip().lower()
+
     canonical, slot_hint = _resolve_role_and_slot(role_input)
-    base_wt = BASE_WORKTREE_MAP.get(canonical, "dev-worker")
-    min_slot = 1
-    if slot_hint != base_wt and slot_hint.startswith(base_wt + "-"):
-        try:
-            min_slot = max(1, int(slot_hint.rsplit("-", 1)[1]))
-        except ValueError:
-            min_slot = 1
+    m_custom_prefix = re.match(r"^((?:hotfix-issue|review-pr)-\d+)(?:-(\d+))?$", slot_hint)
+    if m_custom_prefix:
+        base_wt = m_custom_prefix.group(1)
+        min_slot = max(1, int(m_custom_prefix.group(2))) if m_custom_prefix.group(2) else 1
+    else:
+        base_wt = BASE_WORKTREE_MAP.get(canonical, "dev-worker")
+        min_slot = 1
+        if slot_hint != base_wt and slot_hint.startswith(base_wt + "-"):
+            try:
+                min_slot = max(1, int(slot_hint.rsplit("-", 1)[1]))
+            except ValueError:
+                min_slot = 1
 
     # 1. Xác định main_root và danh sách worktrees hiện có của git repo
     base_dir = (root or find_project_root() or Path.cwd()).resolve()
     main_root = base_dir
     existing_wt_paths = {}
+    path_to_slot = {}
     try:
         subprocess.run(
             ["git", "-C", str(base_dir), "worktree", "prune"],
@@ -947,16 +1036,31 @@ def resolve_elastic_worktree_slot(
                     except Exception:
                         wt_p = Path(cur_wt)
                     if wt_p != main_root and wt_p.is_dir():
-                        wt_name = wt_p.name
-                        existing_wt_paths[wt_name] = str(wt_p)
-                        if cur_br.startswith("refs/heads/"):
-                            br_short = cur_br[len("refs/heads/"):]
-                            if br_short:
-                                existing_wt_paths.setdefault(br_short, str(wt_p))
+                        wt_str = str(wt_p)
+                        br_short = cur_br[len("refs/heads/"):] if cur_br.startswith("refs/heads/") else ""
+                        canon_slot = (
+                            _extract_canonical_slot_name(br_short)
+                            or _extract_canonical_slot_name(wt_p.name)
+                            or br_short
+                            or wt_p.name
+                        )
+                        path_to_slot[wt_str] = canon_slot
+                        existing_wt_paths[wt_p.name] = wt_str
+                        existing_wt_paths.setdefault(canon_slot, wt_str)
+                        if br_short:
+                            existing_wt_paths.setdefault(br_short, wt_str)
                     cur_wt = ""
                     cur_br = ""
     except Exception:
         pass
+
+    def _slot_for_path(p_str: str, fallback_name: str = "") -> str:
+        if not p_str:
+            return _extract_canonical_slot_name(fallback_name) or fallback_name
+        if p_str in path_to_slot:
+            return path_to_slot[p_str]
+        base_n = Path(p_str).name
+        return _extract_canonical_slot_name(base_n) or base_n
 
     cache_dir = main_root / ".orca-cache"
     try:
@@ -967,9 +1071,11 @@ def resolve_elastic_worktree_slot(
     res_path = cache_dir / "slot-reservations.json"
 
     busy_slots = set()
+    hard_busy_slots = set()
     latest_done_epoch = {}
     chosen_slot = slot_hint if min_slot >= 2 else base_wt
     requested_slot_busy = False
+    requested_slot_hard_busy = False
 
     lock_fd = None
     try:
@@ -982,11 +1088,12 @@ def resolve_elastic_worktree_slot(
             try:
                 raw_res = json.loads(res_path.read_text(encoding="utf-8", errors="ignore"))
                 if isinstance(raw_res, dict):
-                    reservations = {
-                        str(k): float(v)
-                        for k, v in raw_res.items()
-                        if isinstance(v, (int, float))
-                    }
+                    for k, v in raw_res.items():
+                        canon_k = _extract_canonical_slot_name(k) or str(k)
+                        if isinstance(v, (int, float)):
+                            reservations[canon_k] = float(v)
+                        elif isinstance(v, dict) and isinstance(v.get("ts"), (int, float)):
+                            reservations[canon_k] = float(v["ts"])
             except Exception:
                 reservations = {}
 
@@ -1011,108 +1118,153 @@ def resolve_elastic_worktree_slot(
                 "mainRoot": str(main_root),
             }
 
-        # 2. Kiểm tra trạng thái toàn cục qua `orca worktree ps --json` (bắt được mọi Leader/Run)
+        # 2. Kiểm tra trạng thái toàn cục qua `orca worktree ps --json` và `orca orchestration run-list` song song
         env = _build_discovery_env()
         orca_bin = _find_cli_binary(["orca"], env) or "/usr/local/bin/orca"
         existing_path_set = set(existing_wt_paths.values())
         main_root_str = str(main_root)
 
         if os.path.exists(orca_bin):
+            def _run_orca_cmd(cmd_args):
+                try:
+                    p = subprocess.run(cmd_args, capture_output=True, text=True, env=env, timeout=3.5)
+                    if p.returncode == 0 and p.stdout.strip():
+                        return json.loads(p.stdout)
+                except Exception:
+                    pass
+                return {}
+
+            with ThreadPoolExecutor(max_workers=3) as init_pool:
+                f_ps = init_pool.submit(_run_orca_cmd, [orca_bin, "worktree", "ps", "--json"])
+                f_rl = init_pool.submit(_run_orca_cmd, [orca_bin, "orchestration", "run-list", "--json"])
+                f_wl0 = init_pool.submit(_run_orca_cmd, [orca_bin, "orchestration", "worker-list", "--json"])
+                ps_data = f_ps.result()
+                rl_data = f_rl.result()
+                wl0_data = f_wl0.result()
+
             try:
-                ps_proc = subprocess.run(
-                    [orca_bin, "worktree", "ps", "--json"],
-                    capture_output=True, text=True, env=env, timeout=4,
-                )
-                if ps_proc.returncode == 0 and ps_proc.stdout.strip():
-                    ps_data = json.loads(ps_proc.stdout)
-                    ps_res = ps_data.get("result") if isinstance(ps_data, dict) else {}
-                    for wt_obj in (ps_res.get("worktrees") if isinstance(ps_res, dict) else None) or []:
-                        if not isinstance(wt_obj, dict):
+                ps_res = ps_data.get("result") if isinstance(ps_data, dict) else {}
+                for wt_obj in (ps_res.get("worktrees") if isinstance(ps_res, dict) else None) or []:
+                    if not isinstance(wt_obj, dict):
+                        continue
+                    raw_p = str(wt_obj.get("path") or "").strip()
+                    norm_p = ""
+                    if raw_p:
+                        try:
+                            norm_p = str(Path(raw_p).resolve())
+                        except Exception:
+                            norm_p = raw_p
+                    parent_id = str(wt_obj.get("parentWorktreeId") or "").strip()
+                    parent_p = parent_id.split("::", 1)[1] if "::" in parent_id else parent_id
+                    if parent_p:
+                        try:
+                            parent_p = str(Path(parent_p).resolve())
+                        except Exception:
+                            pass
+                    belongs_to_repo = (
+                        (norm_p and norm_p in existing_path_set)
+                        or (raw_p and raw_p in existing_path_set)
+                        or (parent_p and parent_p == main_root_str)
+                    )
+                    if not belongs_to_repo:
+                        continue
+                    disp_n = str(wt_obj.get("displayName") or wt_obj.get("branch") or "").strip()
+                    s_name = _slot_for_path(norm_p or raw_p, disp_n)
+                    if not s_name:
+                        continue
+                    if norm_p and norm_p != main_root_str and Path(norm_p).is_dir():
+                        path_to_slot.setdefault(norm_p, s_name)
+                        existing_wt_paths.setdefault(s_name, norm_p)
+                        existing_path_set.add(norm_p)
+                    wt_st = str(wt_obj.get("status") or "").strip().lower()
+                    agents_list = wt_obj.get("agents") if isinstance(wt_obj.get("agents"), list) else []
+                    has_busy_ag = False
+                    for ag_item in agents_list:
+                        if not isinstance(ag_item, dict):
                             continue
-                        raw_p = str(wt_obj.get("path") or "").strip()
-                        norm_p = ""
-                        if raw_p:
-                            try:
-                                norm_p = str(Path(raw_p).resolve())
-                            except Exception:
-                                norm_p = raw_p
-                        parent_id = str(wt_obj.get("parentWorktreeId") or "").strip()
-                        parent_p = parent_id.split("::", 1)[1] if "::" in parent_id else parent_id
-                        if parent_p:
-                            try:
-                                parent_p = str(Path(parent_p).resolve())
-                            except Exception:
-                                pass
-                        belongs_to_repo = (
-                            (norm_p and norm_p in existing_path_set)
-                            or (raw_p and raw_p in existing_path_set)
-                            or (parent_p and parent_p == main_root_str)
-                        )
-                        if not belongs_to_repo:
-                            continue
-                        s_name = Path(norm_p or raw_p).name if (norm_p or raw_p) else str(wt_obj.get("displayName") or "").strip()
-                        if not s_name:
-                            continue
-                        if norm_p and norm_p != main_root_str and Path(norm_p).is_dir():
-                            existing_wt_paths.setdefault(s_name, norm_p)
-                            existing_path_set.add(norm_p)
-                        wt_st = str(wt_obj.get("status") or "").strip().lower()
-                        agents_list = wt_obj.get("agents") if isinstance(wt_obj.get("agents"), list) else []
-                        has_busy_ag = False
-                        for ag_item in agents_list:
-                            if not isinstance(ag_item, dict):
-                                continue
-                            ag_st = str(ag_item.get("state") or "").strip().lower()
-                            if ag_st and ag_st not in ("done", "exited", "stopped", "failed", "cancelled", "canceled", "idle", "settled", "released"):
-                                has_busy_ag = True
-                            else:
-                                ts_ms = max(
-                                    int(ag_item.get("updatedAt") or 0),
-                                    int(ag_item.get("stateStartedAt") or 0),
-                                )
-                                if ts_ms > 0:
-                                    latest_done_epoch[s_name] = max(latest_done_epoch.get(s_name, 0.0), ts_ms / 1000.0)
-                        if wt_st in ("working", "running", "busy", "starting") or has_busy_ag:
-                            busy_slots.add(s_name)
+                        ag_st = str(ag_item.get("state") or "").strip().lower()
+                        if ag_st and ag_st not in ("done", "exited", "stopped", "failed", "cancelled", "canceled", "idle", "settled", "released"):
+                            has_busy_ag = True
+                        else:
+                            ts_ms = max(
+                                int(ag_item.get("updatedAt") or 0),
+                                int(ag_item.get("stateStartedAt") or 0),
+                            )
+                            if ts_ms > 0:
+                                latest_done_epoch[s_name] = max(latest_done_epoch.get(s_name, 0.0), ts_ms / 1000.0)
+                    if wt_st in ("working", "running", "busy", "starting") or has_busy_ag:
+                        busy_slots.add(s_name)
+                        hard_busy_slots.add(s_name)
             except Exception:
                 pass
 
-            # 3. Kiểm tra bổ sung qua `orca orchestration worker-list --json`
+            # 3. Kiểm tra bổ sung qua `orca orchestration worker-list` trên toàn bộ các Run đang hoạt động
             try:
-                wl_proc = subprocess.run(
-                    [orca_bin, "orchestration", "worker-list", "--json"],
-                    capture_output=True, text=True, env=env, timeout=3,
-                )
-                if wl_proc.returncode == 0 and wl_proc.stdout.strip():
-                    wl_data = json.loads(wl_proc.stdout)
-                    wl_res = wl_data.get("result") if isinstance(wl_data, dict) else {}
-                    for w_item in (wl_res.get("workers") if isinstance(wl_res, dict) else None) or []:
-                        if not isinstance(w_item, dict):
-                            continue
-                        res_obj = w_item.get("resource") if isinstance(w_item.get("resource"), dict) else {}
-                        ws_id = str(res_obj.get("worktreeId") or w_item.get("worktreeId") or "").strip()
-                        wt_part = ws_id.split("::", 1)[1] if "::" in ws_id else ws_id
-                        norm_wt_part = ""
-                        if wt_part:
-                            try:
-                                norm_wt_part = str(Path(wt_part).resolve())
-                            except Exception:
-                                norm_wt_part = wt_part
-                        if norm_wt_part not in existing_path_set and wt_part not in existing_path_set:
-                            continue
-                        s_name = Path(norm_wt_part or wt_part).name
-                        st = str(w_item.get("workerState") or w_item.get("state") or "").strip().lower()
-                        d_st = str(w_item.get("dispatchStatus") or "").strip().lower()
-                        t_st = str(w_item.get("terminalState") or res_obj.get("terminalState") or "").strip().lower()
-                        lv = str((w_item.get("liveness") or {}).get("verdict") or "").strip().lower()
-                        is_dead = (
-                            st in ("succeeded", "failed", "stopped", "timed_out", "settled", "completed", "cancelled", "canceled", "released")
-                            or d_st in ("succeeded", "failed", "stopped", "timed_out", "completed", "cancelled", "canceled")
-                            or t_st in ("released", "closed", "exited")
-                            or lv in ("exited", "dead")
+                active_rids = []
+                seen_ar = set()
+                rl_runs = ((rl_data.get("result") or {}).get("runs") or []) if isinstance(rl_data, dict) else []
+                for r_obj in rl_runs:
+                    if not isinstance(r_obj, dict):
+                        continue
+                    rid = str(r_obj.get("id") or "").strip()
+                    rst = str(r_obj.get("status") or "").strip().lower()
+                    ch = str(r_obj.get("coordinator_handle") or "").strip()
+                    if rid and rid not in seen_ar and (
+                        rst in ("running", "active", "waiting", "pending")
+                        or ch
+                        or len(active_rids) < 2
+                    ):
+                        active_rids.append(rid)
+                        seen_ar.add(rid)
+                        if len(active_rids) >= 6:
+                            break
+
+                def _query_wl(r_id_opt: str):
+                    try:
+                        wp = subprocess.run(
+                            [orca_bin, "orchestration", "worker-list", "--run", r_id_opt, "--json"],
+                            capture_output=True, text=True, env=env, timeout=3,
                         )
-                        if not is_dead and s_name:
-                            busy_slots.add(s_name)
+                        if wp.returncode == 0 and wp.stdout.strip():
+                            return ((json.loads(wp.stdout).get("result") or {}).get("workers") or [])
+                    except Exception:
+                        pass
+                    return []
+
+                all_w_items = list(((wl0_data.get("result") or {}).get("workers") or []) if isinstance(wl0_data, dict) else [])
+                if active_rids:
+                    with ThreadPoolExecutor(max_workers=min(6, len(active_rids))) as pool:
+                        for w_list in pool.map(_query_wl, active_rids):
+                            all_w_items.extend(w_list)
+
+                for w_item in all_w_items:
+                    if not isinstance(w_item, dict):
+                        continue
+                    res_obj = w_item.get("resource") if isinstance(w_item.get("resource"), dict) else {}
+                    ws_id = str(res_obj.get("worktreeId") or w_item.get("worktreeId") or "").strip()
+                    wt_part = ws_id.split("::", 1)[1] if "::" in ws_id else ws_id
+                    norm_wt_part = ""
+                    if wt_part:
+                        try:
+                            norm_wt_part = str(Path(wt_part).resolve())
+                        except Exception:
+                            norm_wt_part = wt_part
+                    if norm_wt_part not in existing_path_set and wt_part not in existing_path_set:
+                        continue
+                    s_name = _slot_for_path(norm_wt_part or wt_part)
+                    st = str(w_item.get("workerState") or w_item.get("state") or "").strip().lower()
+                    d_st = str(w_item.get("dispatchStatus") or "").strip().lower()
+                    t_st = str(w_item.get("terminalState") or res_obj.get("terminalState") or "").strip().lower()
+                    lv = str((w_item.get("liveness") or {}).get("verdict") or "").strip().lower()
+                    is_dead = (
+                        st in ("succeeded", "failed", "stopped", "timed_out", "settled", "completed", "cancelled", "canceled", "released")
+                        or d_st in ("succeeded", "failed", "stopped", "timed_out", "completed", "cancelled", "canceled")
+                        or t_st in ("released", "closed", "exited")
+                        or lv in ("exited", "dead")
+                    )
+                    if not is_dead and s_name:
+                        busy_slots.add(s_name)
+                        hard_busy_slots.add(s_name)
             except Exception:
                 pass
 
@@ -1122,12 +1274,19 @@ def resolve_elastic_worktree_slot(
             age = now - r_ts
             done_ts = latest_done_epoch.get(s_key, 0.0)
             # Nếu agent trong slot vừa hoàn tất SAU thời điểm đặt chỗ và đã qua ít nhất 8s, giải phóng sớm
-            if age < reservation_ttl_secs and not (age >= 8.0 and done_ts > r_ts + 1.0 and s_key not in busy_slots):
+            if age < reservation_ttl_secs and not (age >= 8.0 and done_ts > r_ts + 1.0 and s_key not in hard_busy_slots):
                 cleaned_reservations[s_key] = r_ts
                 busy_slots.add(s_key)
 
         if check_exact_slot:
-            requested_slot_busy = check_exact_slot in busy_slots
+            requested_slot_hard_busy = check_exact_slot in hard_busy_slots
+            # Đối với `--check-slot` (do PreToolUse guard gọi):
+            # - Nếu slot đang thực sự chạy worker (`hard_busy_slots`), báo bận ngay.
+            # - Nếu chỉ có reservation mềm: chỉ coi là bận nếu reservation mới tạo trong < 3.0s (hai lệnh fan-out sát nhau);
+            #   nếu reservation đã > 3.0s mà chưa có worker thực sự chạy trên slot đó (ví dụ gọi `orca-team worktree-arg`
+            #   trước rồi mới gọi `worker-start`), cho phép sử dụng để tránh tự chặn chính mình.
+            res_age = (now - cleaned_reservations[check_exact_slot]) if check_exact_slot in cleaned_reservations else 999.0
+            requested_slot_busy = requested_slot_hard_busy or (res_age < 3.0)
 
         for k in range(min_slot, min_slot + 32):
             cand_slot = base_wt if k == 1 else f"{base_wt}-{k}"
@@ -1201,11 +1360,13 @@ def resolve_elastic_worktree_slot(
         "slot": chosen_slot,
         "requestedSlot": check_exact_slot or None,
         "slotBusy": requested_slot_busy if check_exact_slot else False,
+        "hardBusy": requested_slot_hard_busy if check_exact_slot else False,
         "exists": bool(existing_path),
         "path": existing_path,
         "args": wt_args,
         "argString": " ".join(wt_args),
         "busySlots": sorted(busy_slots),
+        "hardBusySlots": sorted(hard_busy_slots),
         "mainRoot": str(main_root),
     }
 
@@ -3815,7 +3976,7 @@ def cmd_get(root: Path, config: dict, args: list):
     else:
         val = target.get(field)
         if val is None and field == "concurrency":
-            val = 1 if role_key != "developer" else 2
+            val = "auto"
         if val is None:
             sys.exit(1)
         print(json.dumps(val, ensure_ascii=False) if isinstance(val, (list, dict)) else val)
@@ -6048,6 +6209,37 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                             )
                 except Exception:
                     pass
+
+            # Kiểm tra xung đột đa-Leader trên cùng 1 worker worktree (live working agents >= 2)
+            try:
+                ps_chk = _safe_orca_run([orca_bin, "worktree", "ps", "--json"], capture_output=True, text=True, timeout=4)
+                if ps_chk.returncode == 0 and ps_chk.stdout.strip():
+                    ps_w_list = (json.loads(ps_chk.stdout).get("result") or {}).get("worktrees") or []
+                    root_resolved_str = str(root.resolve())
+                    colliding_wts = []
+                    for wt_item in ps_w_list:
+                        if not isinstance(wt_item, dict) or wt_item.get("isMainWorktree"):
+                            continue
+                        p_raw = str(wt_item.get("path") or "").strip()
+                        parent_raw = str(wt_item.get("parentWorktreeId") or "").strip()
+                        parent_path = parent_raw.split("::", 1)[1] if "::" in parent_raw else parent_raw
+                        if parent_path != root_resolved_str and p_raw not in wt_path_map.values():
+                            continue
+                        ag_items = wt_item.get("agents") if isinstance(wt_item.get("agents"), list) else []
+                        working_cnt = sum(
+                            1 for a in ag_items
+                            if isinstance(a, dict) and str(a.get("state") or "").strip().lower() in ("working", "running", "busy", "starting")
+                        )
+                        if working_cnt >= 2:
+                            wt_disp = str(wt_item.get("displayName") or Path(p_raw).name)
+                            colliding_wts.append(f"{wt_disp} ({working_cnt} working agents)")
+                    if colliding_wts:
+                        critical_issues.append(
+                            f"Phát hiện xung đột đa-Leader trên cùng worktree: {', '.join(colliding_wts)}! "
+                            f"Bắt buộc dùng $(orca-team worktree-arg <role>) để tách sang <role>-worker-2."
+                        )
+            except Exception:
+                pass
 
             # 4.1b Kiểm tra Orca Agent Status Hooks
             hooks_res = _safe_orca_run([orca_bin, "agent", "hooks", "status", "--json"], capture_output=True, text=True, timeout=5)

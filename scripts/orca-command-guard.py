@@ -472,7 +472,10 @@ def _strip_single_quotes_and_quoted_heredocs(cmd: str) -> str:
 
 def _is_safe_orca_spec_inner(inner: str) -> bool:
     """Verify the interior of $(orca-team spec|worktree-arg ...) has no unescaped backticks, nested $(), or command chaining."""
-    if not re.match(r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|worktree-arg|wt-arg|slot-arg)\b", inner):
+    if not re.match(
+        r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|worktree-arg|wt-arg|slot-arg)\b",
+        inner,
+    ):
         return False
     i = 0
     n = len(inner)
@@ -714,7 +717,8 @@ def _strip_non_exec_prose_flags(cmd: str) -> str:
     i = 0
     n = len(cleaned)
     orca_spec_direct_re = re.compile(
-        r"(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt)(?:\s+(?:--role|-r)\s+\S+|\s+[a-zA-Z0-9_-]+)?(?:\s+(?:--task|-t))?\s+"
+        r"(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt)"
+        r"(?:\s+(?:--(?:goal|no-goal)|(?:--role|-r)(?:\s+\S+|=\S+)|--|[a-zA-Z0-9_-]+))*(?:\s+(?:--task|-t))?\s+"
     )
     while i < n:
         ch = cleaned[i]
@@ -1902,83 +1906,274 @@ def _resolve_orca_team_bin_and_cwd(payload: dict, args: dict) -> tuple[str, str]
     return "", cwd
 
 
+_WORKER_SLOT_SUFFIX_RE = re.compile(
+    r"(?:^|[.])((?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix|pr|issue)-worker(?:-\d+)?|hotfix-issue-\d+(?:-\d+)?|review-pr-\d+(?:-\d+)?)$",
+    re.IGNORECASE,
+)
+
+
+def _extract_canonical_worker_slot(raw_str: str) -> str:
+    if not raw_str:
+        return ""
+    s = raw_str.strip().strip("\"'")
+    if s.startswith("path:"):
+        s = s[5:].strip()
+    # Strip any trailing $(...) or `...` shell expansion attached to --name dev-worker$([ ... ])
+    s = re.sub(r"(?:\$\(|`).*$", "", s).strip()
+    if not s or "$" in s:
+        return ""
+    base = os.path.basename(s.rstrip("/"))
+    m = _WORKER_SLOT_SUFFIX_RE.search(base)
+    return m.group(1).lower() if m else ""
+
+
+def _role_prefix_from_slot(slot_name: str) -> str:
+    if slot_name.startswith("hotfix-issue-"):
+        return re.sub(r"-(\d+)-\d+$", r"-\1", slot_name)
+    if slot_name.startswith("review-pr-"):
+        return re.sub(r"-(\d+)-\d+$", r"-\1", slot_name)
+    if "-worker" in slot_name:
+        return slot_name.split("-worker", 1)[0]
+    return "dev"
+
+
+def _split_top_level_shell_segments(s: str) -> list[str]:
+    """Split shell string on top-level unquoted ';', '&', '|', or newline while keeping $(...) and quotes intact."""
+    segs: list[str] = []
+    start = 0
+    i = 0
+    n = len(s)
+    paren_depth = 0
+    while i < n:
+        ch = s[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "'":
+            end_sq = _find_single_quote_end(s, i)
+            i = (end_sq + 1) if end_sq != -1 else n
+            continue
+        if ch == '"':
+            end_dq = _find_double_quote_end(s, i)
+            i = (end_dq + 1) if end_dq != -1 else n
+            continue
+        if ch == "#" and (i == 0 or s[i - 1] in " \t\n;(&|"):
+            nl = s.find("\n", i + 1)
+            i = nl if nl != -1 else n
+            continue
+        if ch == "(":
+            paren_depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            if paren_depth > 0:
+                paren_depth -= 1
+            i += 1
+            continue
+        if paren_depth == 0 and ch in ";|&\n":
+            seg = s[start:i].strip()
+            if seg:
+                segs.append(seg)
+            while i < n and s[i] in ";|&\n":
+                i += 1
+            start = i
+            continue
+        i += 1
+    tail = s[start:].strip()
+    if tail:
+        segs.append(tail)
+    return segs
+
+
 def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict) -> str:
     """
-    When a Leader runs `orca orchestration worker-start` with a hardcoded `--worktree`
-    (instead of `$(orca-team worktree-arg <role>)`):
-    - If the target worker slot is BUSY (`working`/`live` or reserved), block the command and instruct
-      the Leader to use `$(orca-team worktree-arg <role>)` so it auto-scales to `<role>-worker-2`!
-    - If the target worker slot is IDLE, reserve it and close any lingering `done` tabs on it before starting.
+    When a Leader runs `orca orchestration worker-start` without `$(orca-team worktree-arg <role>)`:
+    - Immediately block deprecated `$(git worktree list | sed ...)` one-liners (which bypass elastic scaling
+      and caused multi-leader collisions on `dev-worker` / `dev-worker-2`).
+    - Inspect each top-level `worker-start` command segment independently.
+    - Block duplicate hardcoded slots in the same compound command.
+    - Block `--worktree new-child --name <slot>` if `<slot>` already exists on disk.
+    - If a hardcoded target worker slot is BUSY (`working`/`live` or reserved), block and instruct
+      the Leader to use `$(orca-team worktree-arg <role>)` so it auto-scales to `<role>-worker-2`.
+    - Only after all segments pass validation, reserve idle slots and clean lingering `done` tabs.
     """
-    if "worker-start" not in cmd or not re.search(r"\borca\s+orchestration\s+worker-start\b", cmd):
+    if "worker-start" not in cmd:
         return ""
-    if re.search(r"\borca-team\b[^\n;|&]*\b(?:worktree-arg|wt-arg|slot-arg)\b", cmd):
-        return ""
-
-    slot_candidates: list[str] = []
-    for m_wt in re.finditer(
-        r"--worktree(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|([^\s;|&\"']+))",
-        cmd,
-    ):
-        raw_wt = (m_wt.group(1) or m_wt.group(2) or m_wt.group(3) or "").strip()
-        if not raw_wt or raw_wt in ("current", "new-child", "new-top-level") or "$" in raw_wt:
-            continue
-        wt_clean = raw_wt[5:] if raw_wt.startswith("path:") else raw_wt
-        slot_name = os.path.basename(wt_clean.rstrip("/"))
-        if re.match(r"^(?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix)-worker(?:-\d+)?$", slot_name):
-            slot_candidates.append(slot_name)
-
-    for m_nm in re.finditer(
-        r"--name(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|([^\s;|&\"']+))",
-        cmd,
-    ):
-        raw_nm = (m_nm.group(1) or m_nm.group(2) or m_nm.group(3) or "").strip()
-        if raw_nm and "$" not in raw_nm and re.match(
-            r"^(?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix)-worker(?:-\d+)?$",
-            raw_nm,
-        ):
-            if raw_nm not in slot_candidates:
-                slot_candidates.append(raw_nm)
-
-    if not slot_candidates:
+    sanitized = _strip_quoted_heredocs(_strip_non_exec_prose_flags(cmd))
+    if "worker-start" not in sanitized or not re.search(r"\borca\s+orchestration\s+worker-start\b", sanitized):
         return ""
 
     orca_team_bin, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
-    if not orca_team_bin:
+    segments = _split_top_level_shell_segments(sanitized)
+
+    candidates: list[tuple[str, bool]] = []
+    seen_slots_in_cmd: set[str] = set()
+
+    for seg in segments:
+        if not re.search(
+            r"(?:^|\b(?:env|command|sudo|nohup|do|then|else|elif)\s+|-[a-zA-Z0-9]*c\s+['\"])\s*(?:\S*/)?orca\s+orchestration\s+worker-start\b",
+            seg,
+        ):
+            continue
+
+        # 1. If this segment uses `orca-team worktree-arg`, it is safe and dynamically scaled
+        if re.search(r"\borca-team\b[^\n;|&]*\b(?:worktree-arg|wt-arg|slot-arg)\b", seg):
+            continue
+
+        # 2. Block deprecated `$(git worktree list | sed ...)` pattern immediately
+        if re.search(r"\bgit\s+worktree\s+list\b", seg):
+            m_legacy = re.search(
+                r"((?:dev|devops|qa|sec|ui|bench|re|critic|doc|fix|pr|issue)-worker(?:-\d+)?|hotfix-issue-\d+(?:-\d+)?|review-pr-\d+(?:-\d+)?)",
+                seg,
+                re.IGNORECASE,
+            )
+            legacy_slot = m_legacy.group(1).lower() if m_legacy else "dev-worker"
+            role_prefix = _role_prefix_from_slot(legacy_slot)
+            next_slot = f"{role_prefix}-worker-2" if "-worker" in legacy_slot else f"{legacy_slot}-2"
+            next_args = f"$(orca-team worktree-arg {role_prefix})"
+            if orca_team_bin:
+                try:
+                    proc = subprocess.run(
+                        [sys.executable, orca_team_bin, "--path", cwd, "worktree-arg", role_prefix, "--no-reserve", "--json"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2.5,
+                    )
+                    if proc.returncode == 0 and proc.stdout.strip():
+                        info = json.loads(proc.stdout)
+                        if isinstance(info, dict):
+                            next_slot = info.get("slot") or next_slot
+                            next_args = info.get("argString") or next_args
+                except Exception:
+                    pass
+            return (
+                f"[ORCA ELASTIC WORKTREE GUARD] Cú pháp cũ '$(git worktree list | sed ...)' cho '{legacy_slot}' đã bị CẤM "
+                f"vì không kiểm tra được worktree đang bận giữa nhiều Leader (gây ghi đè worktree)! "
+                f"Cách sửa bắt buộc: Thay toàn bộ cụm '$(git worktree list ...)' bằng $({f'orca-team worktree-arg {role_prefix}'}) "
+                f"(slot rảnh hiện tại: '{next_slot}' -> {next_args})."
+            )
+
+        # 3. Extract hardcoded --worktree and --name in this worker-start segment
+        wt_tokens: list[str] = []
+        for m_wt in re.finditer(
+            r"--worktree(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|([^\s;|&\"']+))",
+            seg,
+        ):
+            val = (m_wt.group(1) or m_wt.group(2) or m_wt.group(3) or "").strip()
+            if val:
+                wt_tokens.append(val)
+
+        nm_tokens: list[str] = []
+        for m_nm in re.finditer(
+            r"--name(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|([^\s;|&\"']+))",
+            seg,
+        ):
+            val = (m_nm.group(1) or m_nm.group(2) or m_nm.group(3) or "").strip()
+            if val:
+                nm_tokens.append(val)
+
+        is_new_child = any(w in ("new-child", "new", "new-top-level") for w in wt_tokens)
+        seg_slot = ""
+        for w in wt_tokens:
+            if w in ("current", "new-child", "new", "new-top-level", "parent"):
+                continue
+            cand = _extract_canonical_worker_slot(w)
+            if cand:
+                seg_slot = cand
+                break
+        if not seg_slot:
+            for n_val in nm_tokens:
+                cand = _extract_canonical_worker_slot(n_val)
+                if cand:
+                    seg_slot = cand
+                    break
+
+        if not seg_slot:
+            continue
+
+        if seg_slot in seen_slots_in_cmd:
+            role_prefix = _role_prefix_from_slot(seg_slot)
+            return (
+                f"[ORCA ELASTIC WORKTREE GUARD] Phát hiện 2 lệnh worker-start trong cùng một cụm lệnh cùng trỏ vào worktree '{seg_slot}'! "
+                f"CẤM chạy 2 worker song song trên cùng 1 worktree. "
+                f"Cách sửa: Dùng $(orca-team worktree-arg {role_prefix}) cho mỗi lệnh worker-start để tự động tách sang '{role_prefix}-worker-2'."
+            )
+        seen_slots_in_cmd.add(seg_slot)
+        candidates.append((seg_slot, is_new_child))
+
+    if not candidates or not orca_team_bin:
         return ""
 
-    for slot_name in slot_candidates:
+    need_two_phase = len(candidates) > 1 or any(is_nc for _, is_nc in candidates)
+
+    # Phase 1: Validate all candidate slots (with --no-reserve if compound or new-child to prevent reservation poisoning)
+    for slot_name, is_new_child in candidates:
         try:
+            cmd_check = [
+                sys.executable,
+                orca_team_bin,
+                "--path",
+                cwd,
+                "worktree-arg",
+                slot_name,
+                "--check-slot",
+                slot_name,
+            ]
+            if need_two_phase:
+                cmd_check.append("--no-reserve")
+            cmd_check.append("--json")
             proc = subprocess.run(
-                [
-                    sys.executable,
-                    orca_team_bin,
-                    "--path",
-                    cwd,
-                    "worktree-arg",
-                    slot_name,
-                    "--check-slot",
-                    slot_name,
-                    "--json",
-                ],
+                cmd_check,
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=3.0,
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 info = json.loads(proc.stdout)
-                if isinstance(info, dict) and info.get("slotBusy"):
-                    role_prefix = slot_name.split("-worker", 1)[0]
+                if isinstance(info, dict):
+                    role_prefix = _role_prefix_from_slot(slot_name)
                     next_slot = info.get("slot") or f"{role_prefix}-worker-2"
                     next_args = info.get("argString") or f"$(orca-team worktree-arg {role_prefix})"
-                    return (
-                        f"[ORCA ELASTIC WORKTREE GUARD] Worktree '{slot_name}' đang BẬN chạy một tác vụ khác! "
-                        f"CẤM truyền cứng '--worktree' khi gọi worker-start vì sẽ khiến 2 agent ghi đè worktree của nhau. "
-                        f"Cách sửa: Thay tham số '--worktree ...' bằng $({f'orca-team worktree-arg {role_prefix}'}) "
-                        f"(hoặc dùng: {next_args}) để tự động điều phối sang '{next_slot}'."
-                    )
+                    if info.get("slotBusy"):
+                        return (
+                            f"[ORCA ELASTIC WORKTREE GUARD] Worktree '{slot_name}' đang BẬN chạy một tác vụ khác! "
+                            f"CẤM truyền cứng '--worktree' khi gọi worker-start vì sẽ khiến 2 agent ghi đè worktree của nhau. "
+                            f"Cách sửa: Thay tham số '--worktree ...' bằng $({f'orca-team worktree-arg {role_prefix}'}) "
+                            f"(hoặc dùng: {next_args}) để tự động điều phối sang '{next_slot}'."
+                        )
+                    if is_new_child and info.get("exists"):
+                        existing_p = info.get("path") or slot_name
+                        return (
+                            f"[ORCA ELASTIC WORKTREE GUARD] Worktree '{slot_name}' đã tồn tại sẵn tại '{existing_p}'! "
+                            f"CẤM dùng '--worktree new-child --name {slot_name}' trên worktree đã tồn tại (sẽ gây lỗi trùng git branch). "
+                            f"Cách sửa: Thay bằng $({f'orca-team worktree-arg {role_prefix}'}) (hoặc dùng: --worktree path:{existing_p})."
+                        )
         except Exception:
             pass
+
+    # Phase 2: Only needed when need_two_phase is True -> reserve each slot and clean any lingering `done` tabs
+    if need_two_phase:
+        for slot_name, _ in candidates:
+            try:
+                subprocess.run(
+                    [
+                        sys.executable,
+                        orca_team_bin,
+                        "--path",
+                        cwd,
+                        "worktree-arg",
+                        slot_name,
+                        "--check-slot",
+                        slot_name,
+                        "--json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+
     return ""
 
 
@@ -1990,30 +2185,51 @@ def _trigger_post_worker_release_sweep(cmd: str, payload: dict, args: dict) -> N
     2) If the Run has finished all workers (Step 4 teardown), any forgotten earlier-wave `retained` tabs
        in that Run and idle worker worktrees are automatically archived and closed.
     """
-    if "worker-release" not in cmd or not re.search(r"\borca\s+orchestration\s+worker-release\b", cmd):
+    if "worker-release" not in cmd:
         return
-    dids = sorted(set(re.findall(r"\b(ctx_[a-f0-9]{8,24})\b", cmd)))
-    if not dids:
+    sanitized = _strip_quoted_heredocs(_strip_non_exec_prose_flags(cmd))
+    if "worker-release" not in sanitized or not re.search(
+        r"(?:^|[;&|()\n]|\b(?:do|then|else|elif|env|command|sudo|nohup)\s+)\s*(?:\S*/)?orca\s+orchestration\s+worker-release\b",
+        sanitized,
+    ):
         return
+    dids = sorted(set(re.findall(r"\b((?:ctx|disp)_[A-Za-z0-9_-]{6,64})\b", sanitized)))
     orca_team_bin, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
     if not orca_team_bin:
         return
     try:
-        did_csv = ",".join(dids)
-        py_code = (
-            "import subprocess, sys, time; "
-            "time.sleep(3.0); "
-            "subprocess.run([sys.executable, sys.argv[1], '--path', sys.argv[2], "
-            "'release-workers', '--after-dispatch', sys.argv[3], '--quiet'], "
-            "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25)"
-        )
-        subprocess.Popen(
-            [sys.executable, "-c", py_code, orca_team_bin, cwd, did_csv],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        if dids:
+            did_csv = ",".join(dids)
+            py_code = (
+                "import subprocess, sys, time; "
+                "time.sleep(3.0); "
+                "subprocess.run([sys.executable, sys.argv[1], '--path', sys.argv[2], "
+                "'release-workers', '--after-dispatch', sys.argv[3], '--quiet'], "
+                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25)"
+            )
+            subprocess.Popen(
+                [sys.executable, "-c", py_code, orca_team_bin, cwd, did_csv],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        else:
+            # Executed with a shell variable (e.g. `for d in ...; do orca orchestration worker-release --dispatch "$d"; done`)
+            py_code = (
+                "import subprocess, sys, time; "
+                "time.sleep(3.0); "
+                "subprocess.run([sys.executable, sys.argv[1], '--path', sys.argv[2], "
+                "'release-workers', '--quiet'], "
+                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25)"
+            )
+            subprocess.Popen(
+                [sys.executable, "-c", py_code, orca_team_bin, cwd],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
     except Exception:
         pass
 

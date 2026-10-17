@@ -75,9 +75,9 @@ fi
 ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
 
 if [[ "$REQ_AGENT" =~ $KNOWN_AGENTS_RE ]]; then
-  if [[ "${TASK_TITLE:l}" =~ ^review-pr-[0-9]+$ ]]; then
+  if [[ "${TASK_TITLE:l}" =~ ^review-pr-[0-9]+(-[0-9]+)?$ ]]; then
     ROLE_QUERY="pr"
-  elif [[ "${TASK_TITLE:l}" =~ ^hotfix-issue-[0-9]+$ ]]; then
+  elif [[ "${TASK_TITLE:l}" =~ ^hotfix-issue-[0-9]+(-[0-9]+)?$ ]]; then
     ROLE_QUERY="issue"
   elif [[ "${TASK_TITLE:l}" =~ ^(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker(-[0-9]+)?$ ]]; then
     ROLE_QUERY="${TASK_TITLE:l}"
@@ -169,7 +169,7 @@ if [[ "$ROLE_BASE_KEY" =~ ^([a-z0-9_-]+?)(-worker)?-([0-9]+)$ ]]; then
 elif [[ "$ROLE_BASE_KEY" =~ ^([a-z0-9_-]+?)-worker$ ]]; then
   ROLE_BASE_KEY="${match[1]}"
 fi
-if [[ "${TASK_TITLE:l}" =~ ^(review-pr-[0-9]+|hotfix-issue-[0-9]+|(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker(-[0-9]+)?)$ ]]; then
+if [[ "${TASK_TITLE:l}" =~ ^(review-pr-[0-9]+(-[0-9]+)?|hotfix-issue-[0-9]+(-[0-9]+)?|(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker(-[0-9]+)?)$ ]]; then
   ROLE_WORKTREE="${TASK_TITLE:l}"
   EXPLICIT_SLOT=true
 else
@@ -198,10 +198,10 @@ ROLE_GOAL_MODE="true"
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   RAW_GOAL=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$ROLE_QUERY" --field goal 2>/dev/null || true)
   [[ "$RAW_GOAL" == "false" ]] && ROLE_GOAL_MODE="false"
-  if [[ "$EXPLICIT_SLOT" == false ]]; then
-    CHOSEN_SLOT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" worktree-arg "$ROLE_QUERY" --slot-only 2>/dev/null || true)
-    [[ -n "$CHOSEN_SLOT" ]] && ROLE_WORKTREE="$CHOSEN_SLOT"
-  fi
+  SLOT_QUERY="$ROLE_QUERY"
+  [[ "$EXPLICIT_SLOT" == true ]] && SLOT_QUERY="$ROLE_WORKTREE"
+  CHOSEN_SLOT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" worktree-arg "$SLOT_QUERY" --slot-only 2>/dev/null || true)
+  [[ -n "$CHOSEN_SLOT" ]] && ROLE_WORKTREE="$CHOSEN_SLOT"
 fi
 
 GOAL_MODE_CLAUSE=" CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build & test EXIT_CODE=0, runtime log); khi chạy Jest phải kèm --forceExit để chống treo open handles và khi lệnh chuyển sang background (task-XX) CẤM gọi manage_task(status) lặp liên tục 2-3s mỗi lần (hãy dừng gọi tool để hệ thống tự đánh thức khi xong hoặc dùng schedule >=20s); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ + gộp lệnh gửi bản tin báo cáo && gửi worker-done về Coordinator mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal."
@@ -309,12 +309,12 @@ if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
     /^branch /   { br = substr($0, 8) }
     /^$/ {
       n = length(target)
-      if ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target)) { print wt; wt = ""; br = ""; exit }
+      if ((length(wt) > n && (substr(wt, length(wt) - n) == ("/" target) || substr(wt, length(wt) - n) == ("." target))) || br == ("refs/heads/" target)) { print wt; wt = ""; br = ""; exit }
       wt = ""; br = ""
     }
     END {
       n = length(target)
-      if (wt != "" && ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target))) { print wt }
+      if (wt != "" && ((length(wt) > n && (substr(wt, length(wt) - n) == ("/" target) || substr(wt, length(wt) - n) == ("." target))) || br == ("refs/heads/" target))) { print wt }
     }
   ')
   if [[ -n "$EXISTING_WT_PATH" && -d "$EXISTING_WT_PATH" ]]; then

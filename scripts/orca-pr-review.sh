@@ -93,12 +93,12 @@ EXISTING_WT_PATH=$(git worktree list --porcelain 2>/dev/null | awk -v target="$W
   /^branch /   { br = substr($0, 8) }
   /^$/ {
     n = length(target)
-    if ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target)) { print wt; wt = ""; br = ""; exit }
+    if ((length(wt) > n && (substr(wt, length(wt) - n) == ("/" target) || substr(wt, length(wt) - n) == ("." target))) || br == ("refs/heads/" target)) { print wt; wt = ""; br = ""; exit }
     wt = ""; br = ""
   }
   END {
     n = length(target)
-    if (wt != "" && ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target))) { print wt }
+    if (wt != "" && ((length(wt) > n && (substr(wt, length(wt) - n) == ("/" target) || substr(wt, length(wt) - n) == ("." target))) || br == ("refs/heads/" target))) { print wt }
   }
 ')
 
