@@ -12,7 +12,8 @@
     "orca-dispatch": "./scripts/orca-dispatch-task.sh",
     "orca-hotfix": "./scripts/orca-issue-hotfix.sh",
     "orca-review": "./scripts/orca-pr-review.sh",
-    "orca-review-pr": "./scripts/orca-pr-review.sh"
+    "orca-review-pr": "./scripts/orca-pr-review.sh",
+    "orca-command-guard": "./scripts/orca-command-guard.py"
   },
   "scripts": {
     "init": "./scripts/orca-project-init"

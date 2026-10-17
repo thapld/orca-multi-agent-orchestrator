@@ -14,13 +14,13 @@ Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench
 orca worktree ps --json
 
 # Khởi chạy worker và tự động tái sử dụng worktree định danh hiện có (hoặc tạo mới ở lần đầu)
-orca orchestration worker-start --task <TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\).*\[dev-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name dev-worker") --agent antigravity --json
+orca orchestration worker-start --task <TASK_ID> $(git worktree list | sed -n 's/^\([^ ]*\/dev-worker\) .*/--worktree path:\1/p; s/^\([^ ]*\).*\[dev-worker\].*/--worktree path:\1/p' | head -n 1 | grep . || echo "--worktree new-child --name dev-worker$([ -f package.json ] || echo ' --setup skip')") --agent antigravity --json
 
 # Tạo worktree gắn liền với GitHub Issue (độc lập, không kế thừa context dở dang)
-orca worktree create --repo path:$(git rev-parse --show-toplevel) --name "hotfix-issue-42" --issue 42 --no-parent --agent antigravity --setup run --json
+orca worktree create --repo path:$(git rev-parse --show-toplevel) --name "hotfix-issue-42" --issue 42 --no-parent --agent antigravity --setup skip --json
 
 # Tạo worktree để review GitHub PR (độc lập)
-orca worktree create --repo path:$(git rev-parse --show-toplevel) --name "review-pr-123" --pr 123 --no-parent --agent antigravity --setup run --json
+orca worktree create --repo path:$(git rev-parse --show-toplevel) --name "review-pr-123" --pr 123 --no-parent --agent antigravity --setup skip --json
 
 # Mở toàn bộ diff thay đổi của worktree để review
 orca file open-changed --mode diff --worktree active --json

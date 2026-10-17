@@ -43,6 +43,11 @@ WORKTREE_NAME="review-pr-$PR_NUM"
 
 PR_PROMPT="[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: Thẩm định toàn diện Pull Request #${PR_NUM}. Chuẩn mực: (0) Đồng bộ đúng commit mới nhất của PR trước khi review (worktree có thể đã cũ từ lần review trước): chạy 'gh pr checkout ${PR_NUM} --force' hoặc 'git fetch origin pull/${PR_NUM}/head && git checkout --detach FETCH_HEAD' và ghi rõ commit hash đã review, (1) Đọc toàn bộ line-by-line diff qua 'orca file open-changed --mode diff --worktree active' và 'git diff', (2) Kiểm tra kiến trúc, Clean Code, OWASP Top 10, Race Conditions, Memory/Resource Leaks, (3) BẮT BUỘC chạy thực tế test suite và linter trong worktree PR (CẤM duyệt suông bằng mắt!). CẤM VƯỢT RÀO: Không tự ý sửa code tính năng của PR khi chưa được yêu cầu. BẰNG CHỨNG BẮT BUỘC: Xuất báo cáo review chi tiết từng file:line, kết quả chạy test thực tế (EXIT_CODE, số test pass/fail) và chốt PR_VERDICT: APPROVE hoặc REQUEST_CHANGES."
 
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "❌ Thư mục hiện tại không nằm trong Git repository." >&2
+  exit 1
+fi
+
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
 GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
 if [[ -n "$GIT_COMMON_DIR" && "${GIT_COMMON_DIR:t}" == ".git" ]]; then
@@ -52,7 +57,19 @@ else
 fi
 
 # Kiểm tra xem worktree định danh review-pr-<PR_NUM> đã tồn tại trong repo chưa (tránh đẻ worktree trùng lặp -2, -3 kể cả khi đang ở detached HEAD hoặc nhánh PR)
-EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\/${WORKTREE_NAME}\) .*/\1/p; s/^\([^ ]*\).*\[${WORKTREE_NAME}\].*/\1/p" | head -n 1)
+EXISTING_WT_PATH=$(git worktree list --porcelain 2>/dev/null | awk -v target="$WORKTREE_NAME" '
+  /^worktree / { wt = substr($0, 10) }
+  /^branch /   { br = substr($0, 8) }
+  /^$/ {
+    n = length(target)
+    if ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target)) { print wt; exit }
+    wt = ""; br = ""
+  }
+  END {
+    n = length(target)
+    if (wt != "" && ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target))) { print wt }
+  }
+')
 
 if [[ -n "$EXISTING_WT_PATH" ]]; then
   echo "♻️  [Orca PR Review] Tái sử dụng worktree định danh hiện có: $WORKTREE_NAME ($EXISTING_WT_PATH)..."

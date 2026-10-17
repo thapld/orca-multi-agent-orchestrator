@@ -167,10 +167,10 @@ def _looks_like_agent(args_str: str) -> bool:
 
 _INTERP_INLINE_RE = re.compile(
     r"(?:^|[\s;&|(])(?:\S*/)?(?P<interp>python3?(?:\.\d+)?|node|ruby|perl|bash|zsh|sh)"
-    r"(?P<opts>(?:\s+--?[a-zA-Z0-9_=.-]+)*)\s+(?P<flag>-(?:[a-zA-Z0-9]*[ce]|p)|--eval)\s+\""
+    r"(?P<opts>(?:\s+--?[a-zA-Z0-9_=.-]+)*)\s+(?P<flag>-(?:[a-zA-Z0-9]*[ce]|p)|--eval)(?:\s+|=)?\""
 )
 _UNQUOTED_HEREDOC_RE = re.compile(
-    r"(?:^|[\s;&|(])(?:\S*/)?(?:python3?(?:\.\d+)?|node|ruby|perl|bash|zsh|sh)\b[^\n<]*<<-?\s*(?P<delim>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\n"
+    r"(?:^|[\s;&|(])(?:\S*/)?(?:python3?(?:\.\d+)?|node|ruby|perl|bash|zsh|sh)\b[^\n<]*<<-?\s*(?P<delim>[A-Za-z_][A-Za-z0-9_-]*)[ \t]*\n"
 )
 _SAFE_TEXT_PATH_RE = re.compile(
     r"(?:/|^)(?:\.[a-zA-Z0-9_.-]+|"
@@ -184,67 +184,75 @@ _SAFE_TEXT_PATH_RE = re.compile(
 _PROSE_FLAG_PREFIX_RE = re.compile(
     r"(?:--(?:spec|body|question|objective|task-title|display-name|comment|resolution|result|subject|message|notes|title)|-m)(?:\s+|=)"
 )
+_WHILE_TRUE_RE = re.compile(r"\bwhile\s*(?:\(\s*)?(?:True|1)(?:\s*\))?\s*:")
 
 
 def _find_double_quote_end(s: str, quote_idx: int) -> int:
     """Given s[quote_idx] == '\"', find the matching closing '\"' while respecting backslash escapes
-    and nested $(...) command substitutions (which create a new quoting context in POSIX shells)."""
+    and arbitrarily nested $(...) command substitutions and inner quotes in POSIX shells."""
     i = quote_idx + 1
     n = len(s)
-    cmd_sub_depth = 0
-    in_sub_sq = False
-    in_sub_dq = False
+    stack: list[str] = ["dq"]
     while i < n:
         ch = s[i]
-        if ch == "\\" and not in_sub_sq:
+        top = stack[-1]
+        if ch == "\\":
             i += 2
             continue
-        if cmd_sub_depth == 0:
+        if top == "dq":
             if ch == '"':
-                return i
-            if ch == "$" and i + 1 < n and s[i + 1] == "(":
-                cmd_sub_depth = 1
+                stack.pop()
+                if not stack:
+                    return i
+            elif ch == "$" and i + 1 < n and s[i + 1] == "(":
+                stack.append("cmd_sub")
                 i += 2
                 continue
-        else:
-            if in_sub_sq:
-                if ch == "'":
-                    in_sub_sq = False
-            elif in_sub_dq:
-                if ch == '"':
-                    in_sub_dq = False
-                elif ch == "$" and i + 1 < n and s[i + 1] == "(":
-                    cmd_sub_depth += 1
-                    i += 2
-                    continue
-            else:
-                if ch == "'":
-                    in_sub_sq = True
-                elif ch == '"':
-                    in_sub_dq = True
-                elif ch == "$" and i + 1 < n and s[i + 1] == "(":
-                    cmd_sub_depth += 1
-                    i += 2
-                    continue
-                elif ch == "(":
-                    cmd_sub_depth += 1
-                elif ch == ")":
-                    cmd_sub_depth -= 1
+        else:  # top == "cmd_sub"
+            if ch == "'":
+                end_sq = s.find("'", i + 1)
+                if end_sq == -1:
+                    return -1
+                i = end_sq + 1
+                continue
+            elif ch == '"':
+                stack.append("dq")
+            elif ch == "$" and i + 1 < n and s[i + 1] == "(":
+                stack.append("cmd_sub")
+                i += 2
+                continue
+            elif ch == "(":
+                stack.append("cmd_sub")
+            elif ch == ")":
+                stack.pop()
+            elif ch == "#" and (i == 0 or s[i - 1] in " \t\n;(&|"):
+                nl = s.find("\n", i + 1)
+                if nl == -1:
+                    return -1
+                i = nl + 1
+                continue
         i += 1
     return -1
 
 
 def _strip_quoted_heredocs(cmd: str) -> str:
-    """Strip quoted heredoc bodies: << 'EOF' ... EOF or << "EOF" ... EOF."""
+    """Strip quoted heredoc bodies: << 'EOF' ... EOF, << "EOF" ... EOF, or << \\EOF ... EOF."""
     def _heredoc_repl(m: re.Match) -> str:
         return m.group(1) + "\n" + m.group(3)
 
-    return re.sub(
-        r"(<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"][^\n]*)\n.*?\n([ \t]*\2[ \t]*(?=\n|$))",
+    out = re.sub(
+        r"(<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"][^\n]*)\n(?:.*?\n)?([ \t]*\2[ \t]*(?=\n|$))",
         _heredoc_repl,
         cmd,
         flags=re.DOTALL,
     )
+    out = re.sub(
+        r"(<<-?\s*\\([A-Za-z_][A-Za-z0-9_-]*)[^\n]*)\n(?:.*?\n)?([ \t]*\2[ \t]*(?=\n|$))",
+        _heredoc_repl,
+        out,
+        flags=re.DOTALL,
+    )
+    return out
 
 
 def _blank_single_quotes(cmd: str) -> str:
@@ -287,15 +295,70 @@ def _strip_single_quotes_and_quoted_heredocs(cmd: str) -> str:
     return _blank_single_quotes(_strip_quoted_heredocs(cmd))
 
 
+def _is_safe_orca_spec_substitution(dq_body: str) -> bool:
+    """Return True if dq_body has no shell expansion, or is purely a single `$(orca-team spec ...)` call
+    without unescaped backticks, extra command substitutions, or chained commands."""
+    # Scan dq_body using our quote/cmd_sub state machine
+    if not dq_body:
+        return True
+    stripped = dq_body.strip()
+    if "$(" not in stripped and "`" not in stripped:
+        return True
+    if not re.match(r"^\$\(\s*(?:\S*/)?orca-team\s+spec\b", stripped) or not stripped.endswith(")"):
+        return False
+    inner = stripped[2:-1]
+    i = 0
+    n = len(inner)
+    while i < n:
+        ch = inner[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "'":
+            end_sq = inner.find("'", i + 1)
+            if end_sq == -1:
+                return False
+            i = end_sq + 1
+            continue
+        if ch == '"':
+            end_dq = _find_double_quote_end(inner, i)
+            if end_dq == -1:
+                return False
+            # Inside inner "...", neither unescaped ` nor $( is safe in a static spec string
+            sub_dq = inner[i + 1 : end_dq]
+            j = 0
+            while j < len(sub_dq):
+                c2 = sub_dq[j]
+                if c2 == "\\":
+                    j += 2
+                    continue
+                if c2 == "`" or (c2 == "$" and j + 1 < len(sub_dq) and sub_dq[j + 1] == "("):
+                    return False
+                j += 1
+            i = end_dq + 1
+            continue
+        # Outside quotes inside $(orca-team spec ...): forbid backticks, nested $(), subshells, or command chaining
+        if ch in "`;&|\n()" or (ch == "$" and i + 1 < n and inner[i + 1] == "("):
+            return False
+        i += 1
+    return True
+
+
 def _strip_non_exec_prose_flags(cmd: str) -> str:
     """Strip non-executable prose flag values (--spec, --body, --question, -m, etc.)
     and non-executed cat/tee quoted heredocs (`cat << 'EOF' > file`),
     only matching flags at top-level (outside single/double quotes) and properly handling
     nested quotes inside `--spec "$(orca-team spec ...)"`."""
     cleaned = re.sub(
-        r"\b(?:cat|tee)\b[^\n<]*<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"][^\n]*\n.*?\n[ \t]*\1[ \t]*(?=\n|$)",
+        r"\b(?:cat|tee)\b[^\n<;|&]*<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"][^\n]*\n(?:.*?\n)?[ \t]*\1[ \t]*(?=\n|$)",
         "",
         cmd,
+        flags=re.DOTALL,
+    )
+    cleaned = re.sub(
+        r"\b(?:cat|tee)\b[^\n<;|&]*<<-?\s*\\([A-Za-z_][A-Za-z0-9_-]*)[^\n]*\n(?:.*?\n)?[ \t]*\1[ \t]*(?=\n|$)",
+        "",
+        cleaned,
         flags=re.DOTALL,
     )
     out: list[str] = []
@@ -347,12 +410,7 @@ def _strip_non_exec_prose_flags(cmd: str) -> str:
                     end_dq = _find_double_quote_end(cleaned, val_start)
                     if end_dq != -1:
                         dq_body = cleaned[val_start + 1 : end_dq]
-                        unescaped_subs = re.findall(r"(?<!\\)\$\(", dq_body)
-                        keep_value = False
-                        if unescaped_subs:
-                            if not re.match(r"^\s*\$\(\s*(?:\S*/)?orca-team\s+spec\b", dq_body) or len(unescaped_subs) > 1:
-                                keep_value = True
-                        if not keep_value:
+                        if _is_safe_orca_spec_substitution(dq_body):
                             out.append(cleaned[i:val_start] + '""')
                             i = end_dq + 1
                             continue
@@ -363,35 +421,56 @@ def _strip_non_exec_prose_flags(cmd: str) -> str:
 
 def _double_quoted_arg_has_backtick(cmd: str, start: int) -> bool:
     """cmd[start] is the opening double quote; scan to the matching closing quote honoring backslash escapes
-    and ignoring backticks inside single-quoted literals ONLY within $(...) command substitutions."""
+    and ignoring backticks inside single-quoted literals ONLY when directly inside $(...) command substitutions."""
     end_dq = _find_double_quote_end(cmd, start)
     if end_dq == -1:
         return False
     body = cmd[start + 1 : end_dq]
     i = 0
     n = len(body)
-    cmd_sub_depth = 0
+    stack: list[str] = ["dq"]
     while i < n:
         ch = body[i]
+        top = stack[-1]
         if ch == "\\":
             i += 2
             continue
-        if ch == "$" and i + 1 < n and body[i + 1] == "(":
-            cmd_sub_depth += 1
-            i += 2
-            continue
-        if cmd_sub_depth > 0 and ch == "'":
-            end_sq = body.find("'", i + 1)
-            if end_sq == -1:
-                break
-            i = end_sq + 1
-            continue
-        if cmd_sub_depth > 0 and ch == ")":
-            cmd_sub_depth -= 1
-            i += 1
-            continue
-        if ch == "`":
-            return True
+        if top == "dq":
+            if ch == "`":
+                return True
+            if ch == '"':
+                stack.pop()
+                if not stack:
+                    break
+            elif ch == "$" and i + 1 < n and body[i + 1] == "(":
+                stack.append("cmd_sub")
+                i += 2
+                continue
+        else:  # top == "cmd_sub"
+            if ch == "'":
+                end_sq = body.find("'", i + 1)
+                if end_sq == -1:
+                    break
+                i = end_sq + 1
+                continue
+            if ch == "`":
+                return True
+            if ch == '"':
+                stack.append("dq")
+            elif ch == "$" and i + 1 < n and body[i + 1] == "(":
+                stack.append("cmd_sub")
+                i += 2
+                continue
+            elif ch == "(":
+                stack.append("cmd_sub")
+            elif ch == ")":
+                stack.pop()
+            elif ch == "#" and (i == 0 or body[i - 1] in " \t\n;(&|"):
+                nl = body.find("\n", i + 1)
+                if nl == -1:
+                    break
+                i = nl + 1
+                continue
         i += 1
     return False
 
@@ -410,7 +489,7 @@ def _inline_script_backtick_risk(cmd: str) -> bool:
             return True
     # 2. Check single-quoted shell -c wrappers (e.g. `docker exec c sh -c 'python3 -c "x = `key`"'`)
     for m in re.finditer(
-        r"(?:^|[\s;&|(])(?:\S*/)?(?:bash|zsh|sh)(?:\s+--?[a-zA-Z0-9_=.-]+)*\s+-[a-zA-Z0-9]*c\s+'([^']*)'",
+        r"(?:^|[\s;&|(])(?:\S*/)?(?:bash|zsh|sh)(?:\s+--?[a-zA-Z0-9_=.-]+)*\s+-[a-zA-Z0-9]*c(?:\s+|=)?'([^']*)'",
         pre_sanitized,
     ):
         if _inline_script_backtick_risk(m.group(1)):
@@ -430,52 +509,82 @@ def _strip_non_shell_quoted_heredocs(cmd: str) -> str:
     """Strip quoted heredoc bodies when the command before `<<` is not a shell or docker (e.g. `python3 - <<'PY'`)."""
     def _repl(m: re.Match[str]) -> str:
         prefix = m.group(1)
-        if re.search(r"\b(?:sh|bash|zsh|dash|ksh|docker)\b", prefix):
+        last_cmd = re.split(r"[;&|]+", prefix)[-1]
+        if re.search(r"(?:^|[\s(])(?:\S*/)?(?:sh|bash|zsh|dash|ksh|docker)\b", last_cmd):
             return m.group(0)
         return prefix + m.group(2) + "\n" + m.group(4)
 
-    return re.sub(
-        r"([^\n]*?)(<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"][^\n]*)\n.*?\n([ \t]*\3[ \t]*(?=\n|$))",
+    out = re.sub(
+        r"([^\n]*?)(<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"][^\n]*)\n(?:.*?\n)?([ \t]*\3[ \t]*(?=\n|$))",
         _repl,
         cmd,
         flags=re.DOTALL,
     )
+    out = re.sub(
+        r"([^\n]*?)(<<-?\s*\\([A-Za-z_][A-Za-z0-9_-]*)[^\n]*)\n(?:.*?\n)?([ \t]*\3[ \t]*(?=\n|$))",
+        _repl,
+        out,
+        flags=re.DOTALL,
+    )
+    return out
 
 
 def _is_raw_binary_cat_risk(cmd: str) -> bool:
     """Detect unbounded `cat` of compiled container/system binaries while allowing text/script/config files."""
     sanitized = _strip_non_exec_prose_flags(cmd)
     for m in re.finditer(
-        r"(?:check_output|subprocess\.(?:run|Popen))\([^)]*['\"]cat['\"]\s*,\s*['\"](/(?:app|usr|bin|sbin|opt)/[^'\"]+)['\"]",
+        r"(?:check_output|subprocess\.(?:run|Popen))\([^)]*['\"]cat['\"]([^)\]]*)",
         sanitized,
     ):
-        target_path = m.group(1)
-        if not _SAFE_TEXT_PATH_RE.search(target_path):
-            return True
+        for path_m in re.finditer(r"['\"](/(?:app|usr|bin|sbin|opt)/[^'\"]+)['\"]", m.group(1)):
+            if not _SAFE_TEXT_PATH_RE.search(path_m.group(1)):
+                return True
     shell_sanitized = _strip_non_shell_quoted_heredocs(sanitized)
     for m in re.finditer(
         r"(?:^|[;&|()\n]|\b(?:sudo|env|time|nohup|command)\s+|-[a-zA-Z]*c\s+['\"])\s*"
-        r"docker\s+exec\s+[^\n|>;]+?\bcat(?:\s+-[a-zA-Z]+)*\s+(/(?:app|bin|sbin|opt|usr/bin|usr/sbin|usr/local/bin|usr/local/sbin)/[^\s|>;\"')]+)"
+        r"docker\s+exec\s+[^\n|>&;]+?\bcat(?:\s+--?[a-zA-Z0-9_-]*)*((?:\s+[^\s|>&;\"')]+)+)"
         r"(?:\s+2>(?:/dev/null|&1))*\s*(?:[\"')](?!\s*[,:])|\s*(?:;|&&|\|\|)|\s*$)",
         shell_sanitized,
         re.MULTILINE,
     ):
-        target_path = m.group(1)
-        if not _SAFE_TEXT_PATH_RE.search(target_path):
-            return True
+        for raw_arg in m.group(1).split():
+            arg = raw_arg.strip("'\"")
+            if re.match(r"^/(?:app|bin|sbin|opt|usr/bin|usr/sbin|usr/local/bin|usr/local/sbin)/", arg):
+                if not _SAFE_TEXT_PATH_RE.search(arg):
+                    return True
     return False
 
 
 def _is_unbounded_find_loop_risk(cmd: str) -> bool:
-    """Detect unbounded `while True:` + `.find(` loops in inline Python scripts."""
+    """Detect unbounded `while True:` / `while 1:` + `.find(` loops in inline Python scripts."""
     sanitized = _strip_non_shell_quoted_heredocs(_strip_non_exec_prose_flags(cmd))
-    if "while True:" not in sanitized or not re.search(
+    if not _WHILE_TRUE_RE.search(sanitized) or not re.search(
         r"\bpython3?(?:\.\d+)?(?:\s+--?[a-zA-Z0-9_=.-]+)*\s+-[a-zA-Z0-9]*c\b",
         sanitized,
     ):
         return False
-    parts = sanitized.split("while True:")
-    for loop_body in parts[1:]:
+    matches = list(_WHILE_TRUE_RE.finditer(sanitized))
+    for idx, m in enumerate(matches):
+        next_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(sanitized)
+        raw_segment = sanitized[m.end() : next_start]
+        # Bound multiline while-loop body by indentation so trailing statements after the loop cannot exempt it
+        line_start = sanitized.rfind("\n", 0, m.start()) + 1
+        while_prefix = sanitized[line_start : m.start()]
+        base_indent = len(while_prefix) - len(while_prefix.lstrip(" \t"))
+        seg_lines = raw_segment.splitlines(keepends=True)
+        bounded_lines: list[str] = []
+        if seg_lines:
+            bounded_lines.append(seg_lines[0])
+            for ln in seg_lines[1:]:
+                stripped_ln = ln.strip()
+                if stripped_ln and not stripped_ln.startswith("#"):
+                    indent = len(ln) - len(ln.lstrip(" \t"))
+                    if indent <= base_indent and not while_prefix.strip():
+                        break
+                bounded_lines.append(ln)
+        loop_body = "".join(bounded_lines)
+        # Also stop at chained shell commands outside Python (`&&`, `||`)
+        loop_body = re.split(r"\s+(?:&&|\|\|)\s+", loop_body, maxsplit=1)[0]
         if ".find(" not in loop_body:
             continue
         if re.search(r"\bfor\s+[^:\n]+\s+in\s+range\s*\(", loop_body):
@@ -725,7 +834,9 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
 
         my_pid = os.getpid()
         my_pgid = os.getpgrp()
-        agent_pids = _load_agent_pids(tasks_dir)
+        agent_pids = _load_agent_pids(tasks_dir) | {
+            pid for pid, (_, _, a_str) in proc_table.items() if _looks_like_agent(a_str)
+        }
         agent_pgids = {proc_table[p][1] for p in agent_pids if p in proc_table}
 
         # Check if we recorded command snippets for this task log during PreToolUse
@@ -793,7 +904,12 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
                     # Exclude MCP servers that share process group with language_server and don't run a shell command
                     if ch_pgid == h_pgid and not re.search(r"\b(?:zsh|bash|sh|python3?|node|docker)\b", ch_low):
                         continue
-                    candidate_children.append((ch_pid, ch_pgid, ch_args))
+                    tree_args = " ; ".join(
+                        proc_table[dp][2]
+                        for dp in _collect_descendants(ch_pid, children_map)
+                        if dp in proc_table
+                    )
+                    candidate_children.append((ch_pid, ch_pgid, tree_args or ch_args))
 
                 # Chỉ kill khi xác định ĐƠN NHẤT được tiến trình chạy lệnh của log này.
                 # Mơ hồ (0 hoặc >1 ứng viên) ➔ KHÔNG kill gì (chỉ cắt log) để không giết nhầm dev server / MCP server / lệnh song song.
@@ -854,34 +970,44 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
             if sz <= MAX_TASK_LOG_BYTES:
                 continue
 
-            # 1. Read head + any previously saved tail (before a sparse \x00 hole) + latest non-NUL tail
+            # 1. Terminate ONLY the runaway child command writing to this log file first (never the Agent CLI)
+            #    so the PTY buffer drains into log_file BEFORE we sample new_tail and truncate.
+            killed = _kill_runaway_process_for_log(log_file, tasks_dir)
+            if killed:
+                time.sleep(0.25)
+                try:
+                    sz = log_file.stat().st_size
+                except Exception:
+                    pass
+
+            # 2. Read head + any previously saved tail (when a sparse \x00 hole occurred) + latest non-NUL tail
             head_bytes = b""
             prev_tail = b""
             new_tail = b""
+            had_sparse_hole = False
             try:
                 with open(log_file, "rb") as f:
                     prefix_buf = f.read(HEAD_KEEP_BYTES + TAIL_KEEP_BYTES + 8192)
                     if marker in prefix_buf:
                         raw_head, after_marker = prefix_buf.split(marker, 1)
-                        head_bytes = _trim_utf8_tail(raw_head[:HEAD_KEEP_BYTES])
+                        head_bytes = raw_head
                         if b"]\n\n" in after_marker:
-                            prev_tail = after_marker.split(b"]\n\n", 1)[1].replace(b"\x00", b"")
+                            after_notice = after_marker.split(b"]\n\n", 1)[1]
+                            if b"\x00" in after_notice:
+                                had_sparse_hole = True
+                            prev_tail = after_notice.split(b"\x00", 1)[0][:TAIL_KEEP_BYTES]
                     else:
                         head_bytes = _trim_utf8_tail(prefix_buf[:HEAD_KEEP_BYTES])
                     f.seek(max(HEAD_KEEP_BYTES, sz - TAIL_KEEP_BYTES))
-                    new_tail = f.read(TAIL_KEEP_BYTES).replace(b"\x00", b"")
+                    raw_new_tail = f.read(TAIL_KEEP_BYTES)
+                    if b"\x00" in raw_new_tail:
+                        had_sparse_hole = True
+                    new_tail = raw_new_tail.replace(b"\x00", b"")
             except Exception:
                 pass
 
-            combined_tail = (prev_tail + new_tail) if prev_tail else new_tail
+            combined_tail = (prev_tail + new_tail) if (prev_tail and (had_sparse_hole or not new_tail)) else new_tail
             tail_bytes = _trim_utf8_head(combined_tail[-TAIL_KEEP_BYTES:]) if len(combined_tail) > TAIL_KEEP_BYTES else _trim_utf8_head(combined_tail)
-
-            # 2. Terminate ONLY the runaway child command writing to this log file (never the Agent CLI)
-            killed = _kill_runaway_process_for_log(log_file, tasks_dir)
-            if killed:
-                # Wait briefly for PTY buffer to drain and parent Agent CLI to close its write FD
-                # so POSIX non-O_APPEND offset doesn't create a sparse \x00 hole after truncation.
-                time.sleep(0.25)
 
             # 3. Ensure every line has newline breaks <= 4096 bytes and zero \x00 sparse holes
             try:
@@ -997,7 +1123,12 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
                 for ln in cmd.splitlines()
                 if ln.strip() and not ln.strip().startswith("#")
             ]
-            first_line_cmd = non_comment_lines[0][:160] if non_comment_lines else ""
+            meaningful_lines = [
+                ln
+                for ln in non_comment_lines
+                if not re.match(r"^(?:set\s+-[a-zA-Z]+|cd\s+\S+|export\s+\w+=.*)$", ln)
+            ] or non_comment_lines
+            first_line_cmd = meaningful_lines[0][:160] if meaningful_lines else ""
             if str(step_idx).isdigit() and first_line_cmd:
                 for key in (f"task-{step_idx}.log", f"task-{int(step_idx) + 1}.log"):
                     prev = cmap.get(key)
@@ -1021,9 +1152,16 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
                 if old_pid_str.isdigit() and lock_age < 600:
                     old_pid = int(old_pid_str)
                     os.kill(old_pid, 0)
-                    # Existing watcher is alive — touch lockfile to extend its window and return
-                    os.utime(lock_file, None)
-                    return
+                    ps_chk = subprocess.run(
+                        ["ps", "-p", str(old_pid), "-o", "args="],
+                        capture_output=True,
+                        text=True,
+                        timeout=1,
+                    )
+                    if ps_chk.returncode == 0 and "--watch-dir" in ps_chk.stdout:
+                        # Existing watcher is alive — touch lockfile to extend its window and return
+                        os.utime(lock_file, None)
+                        return
             except Exception:
                 pass
 

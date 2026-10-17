@@ -228,28 +228,75 @@ def build_role_spec(role_input: str, task_desc: str) -> str:
 
 
 def cmd_spec(args: list):
-    clean_args = list(args or [])
-    if clean_args and clean_args[0] == "--":
-        clean_args = clean_args[1:]
-    if not clean_args or clean_args[0] in ("-h", "--help", "help"):
+    raw_list = list(args or [])
+    if raw_list and raw_list[0] == "--":
+        raw_list = raw_list[1:]
+    if not raw_list or raw_list[0] in ("-h", "--help", "help"):
         print("Sử dụng: orca-team spec <role> \"<mô-tả-nhiệm-vụ>\"")
         print("Các role hỗ trợ: dev, devops, critic, sec, qa, bench, re, ui, pr, issue")
         return
-    if clean_args[0] == "--list":
+    if raw_list[0] == "--list":
         for alias_k, canon_v in sorted(ROLE_ALIASES.items()):
             if canon_v in ROLE_SPEC_TEMPLATES:
                 print(f"{alias_k:<18} -> {canon_v}")
         return
-    first_tok = clean_args[0].strip().lower()
-    if first_tok in ROLE_ALIASES:
-        role_arg = clean_args[0]
-        task_parts = clean_args[1:]
-    elif len(clean_args) == 1 and not clean_args[0].startswith("-"):
+    clean_args = []
+    explicit_role = None
+    explicit_task = None
+    idx = 0
+    after_dd = False
+    while idx < len(raw_list):
+        tok = raw_list[idx]
+        if not after_dd:
+            if tok == "--":
+                after_dd = True
+                idx += 1
+                continue
+            if tok in ("--path", "-C") and idx + 1 < len(raw_list):
+                idx += 2
+                continue
+            if tok.startswith("--path="):
+                idx += 1
+                continue
+            if tok in ("--role", "-r") and idx + 1 < len(raw_list):
+                explicit_role = raw_list[idx + 1]
+                idx += 2
+                continue
+            if tok.startswith("--role="):
+                explicit_role = tok.split("=", 1)[1]
+                idx += 1
+                continue
+            if tok in ("--task", "-t") and idx + 1 < len(raw_list):
+                explicit_task = raw_list[idx + 1]
+                idx += 2
+                continue
+            if tok.startswith("--task="):
+                explicit_task = tok.split("=", 1)[1]
+                idx += 1
+                continue
+        clean_args.append(tok)
+        idx += 1
+
+    if explicit_role is not None:
+        role_arg = explicit_role
+        task_parts = [explicit_task] if explicit_task is not None else clean_args
+    elif not clean_args:
         role_arg = "dev"
-        task_parts = [clean_args[0]]
+        task_parts = [explicit_task] if explicit_task is not None else []
     else:
-        role_arg = clean_args[0]
-        task_parts = clean_args[1:]
+        first_tok = clean_args[0].strip().lower()
+        if first_tok in ROLE_ALIASES:
+            role_arg = clean_args[0]
+            task_parts = [explicit_task] if explicit_task is not None else clean_args[1:]
+        elif len(clean_args) == 1 and not clean_args[0].startswith("-"):
+            role_arg = "dev"
+            task_parts = [explicit_task if explicit_task is not None else clean_args[0]]
+        elif not first_tok.isascii() or " " in first_tok:
+            role_arg = "dev"
+            task_parts = [explicit_task] if explicit_task is not None else clean_args
+        else:
+            role_arg = clean_args[0]
+            task_parts = [explicit_task] if explicit_task is not None else clean_args[1:]
     if task_parts and task_parts[0] == "--":
         task_parts = task_parts[1:]
     if task_parts and task_parts != ["-"]:
@@ -654,7 +701,7 @@ def sync_gemini_directive(root: Path, config: dict):
         content = pattern.sub(lambda m: m.group(1) + table_text + "\n", content)
 
     def _wt_expr(w_name):
-        return f"$(git worktree list | sed -n 's/^\\([^ ]*\\/{w_name}\\) .*/--worktree path:\\1/p; s/^\\([^ ]*\\).*\\[{w_name}\\].*/--worktree path:\\1/p' | head -n 1 | grep . || echo \"--worktree new-child --name {w_name}\")"
+        return f"$(git worktree list | sed -n 's/^\\([^ ]*\\/{w_name}\\) .*/--worktree path:\\1/p; s/^\\([^ ]*\\).*\\[{w_name}\\].*/--worktree path:\\1/p' | head -n 1 | grep . || echo \"--worktree new-child --name {w_name}$([ -f package.json ] || echo ' --setup skip')\")"
 
     # Bước 1: Chỉ chứa lệnh gọi `$(orca-team spec <role> '...')` ngắn gọn — Sổ tay Hiến pháp của từng Worker được tiêm tự động khi tạo task,
     # giải phóng ~2,500 tokens/turn khỏi bộ nhớ tĩnh của Leader!
@@ -862,12 +909,12 @@ def sync_gemini_directive(root: Path, config: dict):
             continue
         # Nâng cấp dòng worker-start cũ sang biểu thức tái sử dụng worktree path:<abs_path>
         old_wt_pat = re.compile(
-            rf"(orca orchestration worker-start\s+--task\s+<[^>]+>\s+)(?:--worktree\s+new-child\s+--name\s+{re.escape(w_name)}|\$\(git worktree list[^\n]*--name\s+{re.escape(w_name)}\"\))(?=\s+--agent)",
+            rf"(orca orchestration worker-start\s+--task\s+<[^>]+>\s+)(?:--worktree\s+new-child\s+--name\s+{re.escape(w_name)}|\$\(git worktree list[^\n]*--name\s+{re.escape(w_name)}[^\n]*\"\))(?=\s+--agent)",
             re.MULTILINE
         )
         content = old_wt_pat.sub(lambda m, wn=w_name: m.group(1) + _wt_expr(wn), content)
         w_pat = re.compile(
-            rf"(--name\s+{re.escape(w_name)}\"?\)?\s+)--agent\s+\S+(?:\s+--model\s+(?:\"[^\"]*\"|\S+))?(?:\s+--effort\s+\S+)?",
+            rf"(--name\s+{re.escape(w_name)}(?:\$\(\[\s+-f\s+package\.json\s+\][^\n]*?\))?\"?\)?\s+)--agent\s+\S+(?:\s+--model\s+(?:\"[^\"]*\"|\S+))?(?:\s+--effort\s+\S+)?",
             re.MULTILINE
         )
         formatted_args = _fmt_worker_args_py(w_ag, w_mod, w_eff)
@@ -912,7 +959,7 @@ def _strip_ansi_and_spinners(line: str) -> str:
     return line.strip()
 
 def _extract_baked_effort(model_id: str) -> str:
-    m = re.search(r"-(low|medium|high|xhigh|max)$", model_id, re.IGNORECASE)
+    m = re.search(r"-(minimal|low|medium|high|xhigh|max|ultra)$", model_id, re.IGNORECASE)
     return m.group(1).lower() if m else ""
 
 def _load_orca_cached_models(agent: str) -> list:
@@ -1087,6 +1134,8 @@ def discover_models_for_agent(agent: str, refresh: bool = False) -> tuple:
                     val = c_env.get(k)
                     if val and isinstance(val, str):
                         add_model(val, f"{val} (từ ~/.claude/settings.json {k})", src="~/.claude/settings.json")
+                if models and source_label == "provider-cli":
+                    source_label = "~/.claude/settings.json"
             except Exception:
                 pass
 
@@ -1370,11 +1419,14 @@ def cmd_models(args: list):
         # Dạng TSV gọn nhẹ cho shell script (orca-project-init):
         # Dòng 1: META\t<source_label>\t<rec_idx>
         # Các dòng sau: MODEL\t<id>\t<label>\t<bakedEffort>\t<efforts_csv>
-        print(f"META\t{source_label}\t{rec_idx if models else 0}")
+        clean_src = str(source_label or "provider-cli").replace("\t", " ").replace("\n", " ")
+        print(f"META\t{clean_src}\t{rec_idx if models else 0}")
         for m in models:
-            baked_val = m.get("bakedEffort") or "-"
-            eff_csv = ",".join(m.get("efforts") or []) or "-"
-            print(f"MODEL\t{m['id']}\t{m['label']}\t{baked_val}\t{eff_csv}")
+            mid_val = str(m.get("id") or "").replace("\t", " ").replace("\n", " ").strip()
+            lbl_val = str(m.get("label") or mid_val).replace("\t", " ").replace("\n", " ").strip()
+            baked_val = str(m.get("bakedEffort") or "-").replace("\t", " ").replace("\n", " ").strip()
+            eff_csv = ",".join(str(x).strip() for x in (m.get("efforts") or []) if str(x).strip()) or "-"
+            print(f"MODEL\t{mid_val}\t{lbl_val}\t{baked_val}\t{eff_csv}")
         return
 
     print(f"\n🔍 Danh sách Model truy vấn động cho agent '{agent}' (Nguồn: {source_label}):")
@@ -1696,24 +1748,39 @@ def cmd_set(root: Path, config: dict, args: list):
     idx = 1
     while idx < len(args):
         opt = args[idx]
-        if opt == "--agent" and idx + 1 < len(args):
+        if opt == "--agent":
+            if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+                print("❌ Thiếu giá trị cho '--agent'. Dùng: orca-team set <role> --agent <agent_id>", file=sys.stderr)
+                sys.exit(1)
             new_agent = args[idx + 1].strip().lower()
             idx += 2
-        elif opt == "--model" and idx + 1 < len(args):
+        elif opt == "--model":
+            if idx + 1 >= len(args):
+                print("❌ Thiếu giá trị cho '--model'. Dùng: orca-team set <role> --model <model_id>", file=sys.stderr)
+                sys.exit(1)
             m_val = args[idx + 1].strip()
             new_model = "" if m_val.lower() in ("none", "null", "default", "(default)", "-") else m_val
             idx += 2
-        elif opt == "--effort" and idx + 1 < len(args):
+        elif opt == "--effort":
+            if idx + 1 >= len(args):
+                print("❌ Thiếu giá trị cho '--effort'. Dùng: orca-team set <role> --effort <low|medium|high>", file=sys.stderr)
+                sys.exit(1)
             e_val = args[idx + 1].strip().lower()
             new_effort = "" if e_val in ("none", "null", "off", "-") else e_val
             idx += 2
-        elif opt == "--concurrency" and idx + 1 < len(args):
+        elif opt == "--concurrency":
+            if idx + 1 >= len(args):
+                print("❌ Thiếu giá trị cho '--concurrency'. Dùng: orca-team set <role> --concurrency <1..10>", file=sys.stderr)
+                sys.exit(1)
+            if role_key == "coordinator":
+                print("❌ Lead Coordinator luôn chạy đơn luồng (concurrency = 1), không thể thay đổi.", file=sys.stderr)
+                sys.exit(1)
             try:
                 new_concurrency = int(args[idx + 1])
             except ValueError:
                 new_concurrency = -1
-            if new_concurrency < 1:
-                print(f"❌ --concurrency phải là số nguyên >= 1 (nhận được: '{args[idx + 1]}').", file=sys.stderr)
+            if new_concurrency < 1 or new_concurrency > 10:
+                print(f"❌ --concurrency phải là số nguyên từ 1 đến 10 (nhận được: '{args[idx + 1]}').", file=sys.stderr)
                 sys.exit(1)
             idx += 2
         elif opt == "--enable":
@@ -1735,8 +1802,8 @@ def cmd_set(root: Path, config: dict, args: list):
         elif opt in ("--force", "-f"):
             idx += 1
         else:
-            print(f"⚠️ Cảnh báo: Tùy chọn không nhận diện: {opt}", file=sys.stderr)
-            idx += 1
+            print(f"❌ Tùy chọn không hợp lệ: '{opt}'. Dùng 'orca-team --help' để xem danh sách cờ hỗ trợ.", file=sys.stderr)
+            sys.exit(1)
 
     if new_agent is not None and new_agent not in KNOWN_AGENTS and not force_flag:
         print(f"❌ Agent không hợp lệ: '{new_agent}'. Hợp lệ: {', '.join(KNOWN_AGENTS)} (dùng --force để bỏ qua kiểm tra).", file=sys.stderr)
@@ -1754,6 +1821,13 @@ def cmd_set(root: Path, config: dict, args: list):
 
     # Interactive prompt if no flags provided
     if new_agent is None and new_model is None and new_effort is None and new_concurrency is None and toggle_enable is None:
+        if not (sys.stdin.isatty() and sys.stderr.isatty()):
+            print(
+                "❌ Môi trường không có TTY tương tác. Hãy truyền cờ tường minh: "
+                "orca-team set <role> [--agent <id>] [--model <id>] [--effort <low|medium|high>]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         role_label = ROLE_LABELS.get(role_key, role_key)
         print(f"\n⚙️  Cấu hình tương tác cho vai trò: {role_label}")
         current = (config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key)) or {}
@@ -1868,6 +1942,11 @@ def cmd_set(root: Path, config: dict, args: list):
         target = config.setdefault("roles", {}).setdefault(role_key, {})
 
     changes = []
+    old_agent_val = (target.get("agent") or "").strip().lower()
+    if new_agent and new_agent != old_agent_val and new_model is None and target.get("model"):
+        # Khi đổi sang provider khác mà không truyền --model, xóa model cũ của provider trước để tránh xung đột
+        if not ({old_agent_val, new_agent} <= {"antigravity", "gemini"}):
+            new_model = ""
     if new_agent and new_agent == target.get("agent"):
         new_agent = None
     if new_model is not None and (None if new_model == "" else new_model) == target.get("model"):
@@ -1888,8 +1967,13 @@ def cmd_set(root: Path, config: dict, args: list):
     if new_effort is None and (new_agent or new_model is not None):
         eff_ag = target.get("agent") or ""
         eff_mod = target.get("model") or ""
-        if not _supports_effort_py(eff_ag, eff_mod) and target.get("effort"):
-            new_effort = ""
+        if not _supports_effort_py(eff_ag, eff_mod):
+            if target.get("effort"):
+                new_effort = ""
+        elif new_model:
+            baked_from_mod = _extract_baked_effort(new_model)
+            if baked_from_mod and baked_from_mod != target.get("effort"):
+                new_effort = baked_from_mod
 
     if new_effort is not None:
         old_eff = target.get("effort") or "-"
@@ -2043,21 +2127,23 @@ def cmd_uninstall_project(root: Path, args: list):
             root = cand
             break
 
-    if not (root / "orca-team.json").is_file():
-        print(f"❌ '{root}' không phải project Orca Orchestrator (không có orca-team.json). Hủy để tránh xóa nhầm file của bạn.", file=sys.stderr)
-        sys.exit(1)
-
-    # Bảo vệ: Không bao giờ tự gỡ bỏ chính kho mã nguồn của framework
+    # Bảo vệ: Không bao giờ tự gỡ bỏ chính kho mã nguồn của framework (kiểm tra TRƯỚC orca-team.json)
     if (root / "templates").is_dir() and (root / "package.json").is_file():
         try:
             pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
             if pkg.get("name") == "orca-multi-agent-orchestrator":
-                print("\n🚫 Đây là thư mục gốc của bộ công cụ 'orca-multi-agent-orchestrator'.")
-                print("   Không thể tự gỡ bỏ chính kho mã nguồn framework!")
-                print("   Để gỡ bỏ các CLI khỏi máy: hãy chạy './uninstall.sh'.\n")
-                return
+                print("\n🚫 Đây là thư mục gốc của bộ công cụ 'orca-multi-agent-orchestrator'.", file=sys.stderr)
+                print("   Không thể tự gỡ bỏ chính kho mã nguồn framework!", file=sys.stderr)
+                print("   Để gỡ bỏ các CLI khỏi máy: hãy chạy './uninstall.sh'.\n", file=sys.stderr)
+                sys.exit(1)
+        except SystemExit:
+            raise
         except Exception:
             pass
+
+    if not (root / "orca-team.json").is_file():
+        print(f"❌ '{root}' không phải project Orca Orchestrator (không có orca-team.json). Hủy để tránh xóa nhầm file của bạn.", file=sys.stderr)
+        sys.exit(1)
 
     print(f"\n⚠️  [ORCA UNINSTALL PROJECT] Bạn sắp gỡ bỏ cấu hình Multi-Agent Orchestrator khỏi:")
     print(f"   📁 {root}")
@@ -2158,11 +2244,11 @@ def cmd_get(root: Path, config: dict, args: list):
 
     role_raw = args[0].lower()
     role_key = ROLE_ALIASES.get(role_raw, role_raw)
-    _ensure_critic_defaults(config)
-    target = config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key, {})
-    if not target:
+    if role_key not in ROLE_LABELS:
         print(f"❌ Không có cấu hình cho role '{args[0]}'.", file=sys.stderr)
         sys.exit(1)
+    _ensure_critic_defaults(config)
+    target = (config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key, {})) or {}
 
     field = "agent"
     if "--field" in args:
@@ -2173,6 +2259,9 @@ def cmd_get(root: Path, config: dict, args: list):
         field = args[1]
 
     is_opt = role_key in ("uiSpecialist", "devopsSpecialist", "benchSpecialist", "reSpecialist", "criticSpecialist")
+    if not target and not is_opt:
+        print(f"❌ Không có cấu hình cho role '{args[0]}'.", file=sys.stderr)
+        sys.exit(1)
     if field == "json":
         print(json.dumps(target))
     elif field == "agent" and not _is_role_enabled(target, is_optional=is_opt):
@@ -2349,8 +2438,11 @@ def cmd_watchdog(root: Path, args: list = None):
                         s_data = json.loads(show_res.stdout)
                         s_res = s_data.get("result", s_data) if isinstance(s_data, dict) else {}
                         w_info = s_res.get("worker") or {}
+                        d_info = s_res.get("dispatch") or {}
                         if w_info.get("state"):
                             w_state = str(w_info.get("state"))
+                        elif d_info.get("status") in ("succeeded", "failed", "stopped", "timed_out"):
+                            w_state = str(d_info.get("status"))
                         obs = s_res.get("observation", {})
                         if obs.get("agentWait"):
                             if auto_unblock and term != "-":
@@ -2425,7 +2517,7 @@ def cmd_watchdog(root: Path, args: list = None):
 
             if not note:
                 idle_s = t_metrics.get("idle_since_last_secs", 0.0) if t_metrics else 0.0
-                if w_state not in ("succeeded", "failed", "stopped") and idle_s > 180:
+                if w_state not in ("succeeded", "failed", "stopped", "timed_out") and idle_s > 180:
                     note = f"⚠️ KHÔNG PHẢN HỒI {_fmt_dur(idle_s)} (last_tool={t_metrics.get('last_tool', '-')})"
                     hung_count += 1
                 elif state == "active":
@@ -2642,7 +2734,7 @@ def _load_normalized_transcript_steps(tf_path: Path) -> list:
                     cj = mj.get("content")
                     has_more_same_mid = False
                     if mid and isinstance(cj, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in cj):
-                        for k_look in range(j + 1, min(n, j + 8)):
+                        for k_look in range(j + 1, min(n, j + 30)):
                             if raw_objs[k_look].get("type") == "assistant" and (raw_objs[k_look].get("message") or {}).get("id") == mid:
                                 has_more_same_mid = True
                                 break
@@ -2670,6 +2762,7 @@ def _load_normalized_transcript_steps(tf_path: Path) -> list:
                 steps.append({
                     "type": "PLANNER_RESPONSE",
                     "created_at": t_start,
+                    "completed_at": t_end,
                     "input_tokens": it,
                     "cache_read_tokens": ct,
                     "output_tokens": ot,
@@ -2857,14 +2950,20 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
     measured_llm_secs = 0.0
     measured_out_tok = 0
     for i, s in enumerate(steps):
-        if s.get("type") == "PLANNER_RESPONSE" and i + 1 < len(steps) and steps[i + 1].get("type") == "GENERIC":
+        if s.get("type") == "PLANNER_RESPONSE":
             t_s = _parse_iso_utc(s.get("created_at"))
-            t_e = _parse_iso_utc(steps[i + 1].get("created_at"))
+            t_comp = _parse_iso_utc(s.get("completed_at"))
             ot = int(s.get("output_tokens") or 0)
-            if t_s and t_e:
-                dt = max(0.5, (t_e - t_s).total_seconds())
+            if t_s and t_comp:
+                dt = max(0.5, (t_comp - t_s).total_seconds())
                 measured_llm_secs += dt
                 measured_out_tok += ot
+            elif i + 1 < len(steps) and steps[i + 1].get("type") == "GENERIC":
+                t_e = _parse_iso_utc(steps[i + 1].get("created_at"))
+                if t_s and t_e:
+                    dt = max(0.5, (t_e - t_s).total_seconds())
+                    measured_llm_secs += dt
+                    measured_out_tok += ot
     avg_rate = (measured_out_tok / measured_llm_secs) if measured_llm_secs > 0 else 50.0
 
     llm_secs = 0.0
@@ -2898,8 +2997,9 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                 last_tool_name = str(tcs[-1].get("name") or "-")
 
             t_start = _parse_iso_utc(s.get("created_at"))
+            t_comp = _parse_iso_utc(s.get("completed_at"))
             if i + 1 < len(steps):
-                t_end = _parse_iso_utc(steps[i + 1].get("created_at"))
+                t_end = t_comp or _parse_iso_utc(steps[i + 1].get("created_at"))
                 if steps[i + 1].get("type") == "GENERIC" and t_start and t_end:
                     dt = max(0.5, (t_end - t_start).total_seconds())
                     llm_secs += dt
@@ -2920,22 +3020,39 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                         j += 1
                     if j < len(steps) and steps[j].get("type") == "PLANNER_RESPONSE":
                         ts_next_p = _parse_iso_utc(steps[j].get("created_at"))
-                        if ts_next_p and t_tool_start and ts_next_p > t_tool_start:
+                        if ts_next_p and t_tool_start and ts_next_p > t_tool_start and (not t_tool_end or t_tool_end == t_tool_start):
                             t_tool_end = ts_next_p
                     if t_tool_start and t_tool_end and t_tool_end > t_tool_start:
                         tool_secs += (t_tool_end - t_tool_start).total_seconds()
+                elif t_start and t_comp:
+                    dt = max(0.5, (t_comp - t_start).total_seconds())
+                    llm_secs += dt
+                    t_next = _parse_iso_utc(steps[i + 1].get("created_at"))
+                    if t_next and (t_next - t_comp).total_seconds() > 0:
+                        idle_wait_secs += (t_next - t_comp).total_seconds()
                 else:
                     est_dt = max(0.8, ot / max(10.0, avg_rate))
                     llm_secs += est_dt
                     if t_start and t_end and (t_end - t_start).total_seconds() > est_dt:
                         idle_wait_secs += (t_end - t_start).total_seconds() - est_dt
             else:
-                llm_secs += max(0.8, ot / max(10.0, avg_rate))
+                if t_start and t_comp:
+                    llm_secs += max(0.5, (t_comp - t_start).total_seconds())
+                else:
+                    llm_secs += max(0.8, ot / max(10.0, avg_rate))
 
     t0 = _parse_iso_utc(steps[0].get("created_at"))
-    tN = _parse_iso_utc(steps[-1].get("created_at"))
-    wall_secs = max(0.0, (tN - t0).total_seconds()) if (t0 and tN) else 0.0
+    tN_cands = [
+        _parse_iso_utc(steps[-1].get("completed_at")),
+        _parse_iso_utc(steps[-1].get("created_at")),
+    ]
+    m_last_comp = re.search(r"Completed At:\s*([^\n\r]+)", str(steps[-1].get("content") or ""))
+    if m_last_comp:
+        tN_cands.append(_parse_iso_utc(m_last_comp.group(1).strip()))
+    tN_valid = [tc_dt for tc_dt in tN_cands if tc_dt is not None]
+    tN = max(tN_valid) if tN_valid else None
     active_secs = llm_secs + tool_secs
+    wall_secs = max(active_secs, (tN - t0).total_seconds()) if (t0 and tN) else active_secs
     from datetime import datetime, timezone
     now_utc = datetime.now(timezone.utc)
     idle_since_last = max(0.0, (now_utc - tN).total_seconds()) if tN else 0.0
@@ -2974,7 +3091,7 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
         "cache_hit_pct": (cache_tok / max(1, in_tok + cache_tok)) * 100.0,
         "avg_turn_s": llm_secs / max(1, turns),
         "last_tool": last_tool_name,
-        "last_step_at": steps[-1].get("created_at") or "",
+        "last_step_at": steps[-1].get("completed_at") or steps[-1].get("created_at") or "",
         "bloated_logs": bloated_logs,
     }
 
@@ -2997,9 +3114,15 @@ def _index_cli_transcripts() -> dict:
         is_dispatched_worker = any("You are a dispatched worker" in u for u in user_inputs[:2])
         if is_dispatched_worker:
             blob = "\n".join(u for u in user_inputs if "ctx_" in u or "task_" in u or "term_" in u or "You are a dispatched worker" in u)
-            for cid_match in re.findall(r"\bctx_[a-f0-9]{12}\b", blob):
+            cids = re.findall(r"--dispatch(?:-id)?\s+(ctx_[a-f0-9]{12})\b", blob)
+            if not cids:
+                cids = re.findall(r"\bctx_[a-f0-9]{12}\b", blob)
+            for cid_match in cids:
                 by_dispatch[cid_match] = tf
-            for tid_match in re.findall(r"\btask_[a-f0-9]{12}\b", blob):
+            tids = re.findall(r"--task(?:-id)?\s+(task_[a-f0-9]{12})\b", blob)
+            if not tids:
+                tids = re.findall(r"\btask_[a-f0-9]{12}\b", blob)
+            for tid_match in tids:
                 by_task[tid_match] = tf
             worker_terms = re.findall(r"--(?:from|terminal)\s+(term_[a-f0-9-]+)", blob)
             if not worker_terms:
@@ -3106,42 +3229,81 @@ def _index_cli_transcripts() -> dict:
     }
 
 
-
-def _collect_git_diff_stats(wt_path: str, wt_name: str) -> dict:
+def _collect_git_diff_stats(wt_path: str, wt_name: str, root: Path = None, start_dt=None, comp_dt=None, is_active: bool = False) -> dict:
     res = {"files": 0, "ins": 0, "del": 0, "commits": 0}
-    if not wt_path or not os.path.isdir(wt_path):
+    has_wt_dir = bool(wt_path and os.path.isdir(wt_path))
+    git_dir = wt_path if has_wt_dir else (str(root) if root and root.is_dir() else "")
+    if not git_dir:
         return res
     import subprocess
     try:
         def _git(*a, t=2):
-            r = subprocess.run(["git", "-C", wt_path, *a], capture_output=True, text=True, timeout=t)
+            r = subprocess.run(["git", "-C", git_dir, *a], capture_output=True, text=True, timeout=t)
             return r.stdout.strip() if r.returncode == 0 else ""
 
+        # Nếu có cửa sổ thời gian thực thi của dispatch (start_dt .. comp_dt), ưu tiên đo đúng các commit phát sinh trong khoảng đó
+        if start_dt and comp_dt:
+            since_ts = max(0, int(start_dt.timestamp()))
+            until_ts = int(comp_dt.timestamp()) + 15
+            target_ref = "HEAD" if has_wt_dir else (wt_name if (wt_name and wt_name != "-" and _git("rev-parse", "--verify", "-q", wt_name)) else "HEAD")
+            rev_args = ["rev-list", "--first-parent", "--no-merges", f"--since=@{since_ts}", f"--until=@{until_ts}", target_ref]
+            shas = [s.strip() for s in _git(*rev_args, t=3).splitlines() if s.strip()]
+            seen_files = set()
+            if shas:
+                res["commits"] = len(shas)
+                for sha in shas:
+                    ns = _git("show", "--numstat", "--format=", sha, t=3)
+                    for ln in ns.splitlines():
+                        parts = ln.strip().split("\t")
+                        if len(parts) >= 3:
+                            seen_files.add(parts[2])
+                            if parts[0].isdigit():
+                                res["ins"] += int(parts[0])
+                            if parts[1].isdigit():
+                                res["del"] += int(parts[1])
+            if is_active and has_wt_dir:
+                dirty_ns = _git("diff", "--numstat", "HEAD", t=3)
+                for ln in dirty_ns.splitlines():
+                    parts = ln.strip().split("\t")
+                    if len(parts) >= 3:
+                        seen_files.add(parts[2])
+                        if parts[0].isdigit():
+                            res["ins"] += int(parts[0])
+                        if parts[1].isdigit():
+                            res["del"] += int(parts[1])
+            res["files"] = len(seen_files)
+            return res
+
+        if not has_wt_dir:
+            return res
+
         head_sha = _git("rev-parse", "HEAD")
-        main_sha = _git("rev-parse", "--verify", "-q", "main") or _git("rev-parse", "--verify", "-q", "master")
+        main_sha = (
+            _git("rev-parse", "--verify", "-q", "main")
+            or _git("rev-parse", "--verify", "-q", "master")
+            or _git("rev-parse", "--verify", "-q", "develop")
+        )
         head_p2 = _git("rev-parse", "--verify", "-q", "HEAD^2")
         base_ref = None
         if head_sha and main_sha and head_sha != main_sha:
-            # Mặc định: so với điểm rẽ nhánh khỏi main (giống `git diff main...HEAD`), không phải two-dot
             base_ref = _git("merge-base", "HEAD", main_sha) or main_sha
-            # QA/Sec/DevOps/Bench đã merge dev-worker hoặc ui-worker: chỉ tiến base_ref lên nếu cand_sha mới hơn base_ref hoặc là nhánh vừa merge vào HEAD^2
             if wt_name not in ("dev-worker", "ui-worker"):
                 for src_br in ("dev-worker", "ui-worker"):
                     cand_sha = _git("rev-parse", "--verify", "-q", src_br)
                     if not cand_sha:
                         continue
-                    anc = subprocess.run(["git", "-C", wt_path, "merge-base", "--is-ancestor", cand_sha, "HEAD"], capture_output=True, timeout=2)
+                    anc = subprocess.run(["git", "-C", git_dir, "merge-base", "--is-ancestor", cand_sha, "HEAD"], capture_output=True, timeout=2)
                     if anc.returncode == 0:
-                        fwd = subprocess.run(["git", "-C", wt_path, "merge-base", "--is-ancestor", base_ref, cand_sha], capture_output=True, timeout=2)
+                        fwd = subprocess.run(["git", "-C", git_dir, "merge-base", "--is-ancestor", base_ref, cand_sha], capture_output=True, timeout=2)
                         if fwd.returncode == 0 or head_p2 == cand_sha:
                             base_ref = cand_sha
         if base_ref:
-            c_cnt = subprocess.run(["git", "-C", wt_path, "rev-list", "--no-merges", "--count", f"{base_ref}..HEAD"], capture_output=True, text=True, timeout=2).stdout.strip()
+            c_cnt = subprocess.run(["git", "-C", git_dir, "rev-list", "--no-merges", "--count", f"{base_ref}..HEAD"], capture_output=True, text=True, timeout=2).stdout.strip()
             if c_cnt.isdigit():
                 res["commits"] = int(c_cnt)
-            numstat = subprocess.run(["git", "-C", wt_path, "diff", "--numstat", f"{base_ref}..HEAD"], capture_output=True, text=True, timeout=3)
+            numstat = subprocess.run(["git", "-C", git_dir, "diff", "--numstat", f"{base_ref}..HEAD"], capture_output=True, text=True, timeout=3)
         else:
-            numstat = subprocess.run(["git", "-C", wt_path, "diff", "--numstat", "HEAD"], capture_output=True, text=True, timeout=3)
+            numstat = subprocess.run(["git", "-C", git_dir, "diff", "--numstat", "HEAD"], capture_output=True, text=True, timeout=3)
         if numstat.returncode == 0:
             for ln in numstat.stdout.splitlines():
                 parts = ln.strip().split("\t")
@@ -3320,8 +3482,11 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
         except Exception:
             continue
 
+        seen_in_file = set()
         raw_matches = re.findall(r'(?:[\s\(\[\`\"\'\:]|^)([a-zA-Z0-9_\-\./]+\.[a-zA-Z0-9]{1,5})(?:[\s\)\]\`\"\'\:]|$)', content)
         for p_str in raw_matches:
+            if p_str in seen_in_file:
+                continue
             if p_str.startswith(('http://', 'https://', 'git://', 'ssh://')):
                 continue
             if re.match(r'^\d+\.\d+$', p_str):
@@ -3329,11 +3494,14 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             if p_str in ['e.g.', 'i.e.', 'etc.', 'example.com']:
                 continue
             if '/' in p_str or p_str.endswith(('.md', '.json', '.sh', '.py', '.ts', '.js', '.yml', '.yaml', '.txt')):
-                if p_str in ["plan.md", "orca-team.json"]:
+                if p_str in ("plan.md", "orca-team.json", "package.json", "pnpm-lock.yaml", "yarn.lock", "setup-runner.sh"):
+                    continue
+                if f"-f {p_str}" in content or f'-f "{p_str}"' in content:
                     continue
                 if "github.com" in content[max(0, content.find(p_str)-30):content.find(p_str)+len(p_str)+30]:
                     continue
 
+                seen_in_file.add(p_str)
                 target_p = root / p_str
                 if not target_p.exists():
                     dead_refs_found.append((p_str, path.name))
@@ -3548,6 +3716,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 md_name = "-"
                 duration_secs = 0.0
                 last_out_idle_secs = None
+                start_dt = None
+                comp_dt = None
 
                 ws_id = str((w.get("resource") or {}).get("worktreeId") or "")
                 if "::" in ws_id:
@@ -3636,7 +3806,10 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     total_spec_tokens += spec_tok
                     total_report_tokens += rep_tok
 
-                git_stats = _collect_git_diff_stats(wt_path, wt_name)
+                is_w_active = w_state not in ("succeeded", "failed", "stopped", "timed_out")
+                git_stats = _collect_git_diff_stats(
+                    wt_path, wt_name, root=root, start_dt=start_dt, comp_dt=comp_dt, is_active=is_w_active
+                )
                 if files_mod_count == 0 and git_stats["files"] > 0:
                     files_mod_count = git_stats["files"]
 
@@ -3645,7 +3818,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 model_col = md_name[:26]
                 wall_s = duration_secs if duration_secs > 0 else t_metrics.get("wall_secs", 0.0)
                 idle_s = t_metrics.get("idle_since_last_secs") if t_metrics else last_out_idle_secs
-                if w_state in ("succeeded", "failed", "stopped"):
+                if w_state in ("succeeded", "failed", "stopped", "timed_out"):
                     wall_idle_col = f"{_fmt_dur(wall_s)} / done"
                 elif idle_s is not None:
                     wall_idle_col = f"{_fmt_dur(wall_s)} / {_fmt_dur(idle_s)}"
@@ -3683,11 +3856,11 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 print(f"      ↳ Task: \"{t_title}\" | spec={spec_tok} tok -> report={rep_tok} tok | {git_str}")
                 print(f"      ↳ Perf: {lat_str}")
 
-                if t_metrics and w_state not in ("succeeded", "failed", "stopped") and (idle_s or 0) > 180:
+                if t_metrics and w_state not in ("succeeded", "failed", "stopped", "timed_out") and (idle_s or 0) > 180:
                     warning_issues.append(
                         f"Worker {wt_name} ({d_id}) đang active nhưng không có bước thực thi mới trong {_fmt_dur(idle_s)} (last_tool={t_metrics['last_tool']})."
                     )
-                if w_state in ("stopped", "failed") and rep_tok == 0:
+                if w_state in ("stopped", "failed", "timed_out") and rep_tok == 0:
                     warning_issues.append(
                         f"Worker {wt_name} ({d_id}) đã dừng ({w_state}/{w_phase}) sau {t_metrics.get('turns', 0)} turns nhưng chưa gửi báo cáo hoàn tất (report=0 tok)."
                     )
@@ -3867,8 +4040,10 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         "PostToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": expected_post, "timeout": 5}]}],
                     }
                     os.makedirs(os.path.dirname(agy_hooks_path), exist_ok=True)
-                    with open(agy_hooks_path, "w", encoding="utf-8") as hf:
+                    tmp_hooks_path = f"{agy_hooks_path}.{os.getpid()}.orca-tmp"
+                    with open(tmp_hooks_path, "w", encoding="utf-8") as hf:
                         json.dump(agy_hooks, hf, indent=2)
+                    os.replace(tmp_hooks_path, agy_hooks_path)
                     actions_taken.append("Kích hoạt Orca Command & Stdout Flood Guard (16MB Circuit-Breaker) trong ~/.gemini/config/hooks.json")
                 if isinstance(agy_hooks, dict) and (curr_pre == expected_pre or auto_fix):
                     passed_items.append("Orca Command & Stdout Flood Guard (Backtick/Find Blocker + 16MB Log Circuit-Breaker + Stream Filter) active.")
@@ -3941,6 +4116,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                             existing_hooks = repo_obj.get("hookSettings") if isinstance(repo_obj.get("hookSettings"), dict) else {}
                             existing_scripts = existing_hooks.get("scripts") if isinstance(existing_hooks.get("scripts"), dict) else {}
                             merged_hooks = {
+                                **existing_hooks,
                                 "mode": existing_hooks.get("mode") or "auto",
                                 "setupRunPolicy": existing_hooks.get("setupRunPolicy") or "run-by-default",
                                 "setupAgentStartupPolicy": existing_hooks.get("setupAgentStartupPolicy") or "start-immediately",
@@ -3997,7 +4173,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 hb_count = sum(1 for m in run_msgs if m.get("type") == "heartbeat")
                 done_count = sum(1 for m in run_msgs if m.get("type") == "worker_done")
                 esc_count = sum(1 for m in run_msgs if m.get("type") in ["escalation", "question"])
-                handoff_count = sum(1 for m in run_msgs if m.get("type") in ["handoff", "dispatch", "status"])
+                handoff_count = sum(1 for m in run_msgs if m.get("type") == "handoff")
                 done_tokens = sum(estimate_tokens(str(m.get("body") or "") + str(m.get("subject") or "")) for m in run_msgs if m.get("type") in ["worker_done", "handoff", "escalation", "question"])
 
                 print(f"\n📬 4.2 MAILBOX IPC TELEMETRY:")
@@ -4192,23 +4368,30 @@ def _resolve_monitor_root(default_root: Path, default_config: dict, sub_args: li
 
 def main():
     raw_args = sys.argv[1:]
-    if raw_args and raw_args[0] in ("spec", "role-spec", "prompt"):
-        cmd_spec(raw_args[1:])
-        return
 
     explicit_root = None
     args = []
     i = 0
-    subcommand_seen = False
+    after_dd = False
     while i < len(raw_args):
-        if not subcommand_seen and raw_args[i] in ("--path", "-C") and i + 1 < len(raw_args):
+        if raw_args[i] == "--":
+            after_dd = True
+            args.append(raw_args[i])
+            i += 1
+            continue
+        if not after_dd and raw_args[i] in ("--task", "-t") and i + 1 < len(raw_args):
+            args.append(raw_args[i])
+            args.append(raw_args[i + 1])
+            i += 2
+            continue
+        if not after_dd and raw_args[i] in ("--path", "-C") and i + 1 < len(raw_args):
             cand = Path(raw_args[i + 1]).expanduser()
             if not cand.is_dir():
                 print(f"❌ Đường dẫn không tồn tại: '{raw_args[i + 1]}'.", file=sys.stderr)
                 sys.exit(1)
             explicit_root = cand.resolve()
             i += 2
-        elif not subcommand_seen and raw_args[i].startswith("--path="):
+        elif not after_dd and raw_args[i].startswith("--path="):
             p_val = raw_args[i].split("=", 1)[1]
             cand = Path(p_val).expanduser()
             if not cand.is_dir():
@@ -4217,8 +4400,6 @@ def main():
             explicit_root = cand.resolve()
             i += 1
         else:
-            if not raw_args[i].startswith("-"):
-                subcommand_seen = True
             args.append(raw_args[i])
             i += 1
 

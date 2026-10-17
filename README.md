@@ -12,7 +12,7 @@ Framework này cho phép biến bất kỳ kho mã nguồn (repository) nào th�
    * Tự do lựa chọn bất kỳ model/agent nào Orca hỗ trợ cho từng vị trí: **Lead Coordinator**, **Research & Adversarial Critic (`critic-worker`)**, **Full-Stack Devs**, **QA & SDET**, **Security & Bug Hunter**, **PR Reviewer**, **Git Issue Resolver**, **UI/UX Specialist**, **DevOps & SRE**, **Bench & Perf Specialist** và **Reverse Eng Specialist (REA)**.
 2. **Cơ Chế Phản Biện & Đồng Thuận Biện Chứng Chống Leader Độc Đoán (Anti-Autocracy & Dialectical Consensus):**
    * Vai trò **Principal Research & Adversarial Critic (`critic-worker`)** điều tra độc lập (`file:line` + git blame + runtime log, lập giả thuyết riêng trước khi đọc giả thuyết Leader) và tranh biện 2 chiều với Leader qua `orca orchestration ask`/`reply` (tối đa 3 vòng). Bắt buộc khi gặp 1 trong 4 trigger: bug tái phát sau fix, escalation quy lỗi liên role/liên tầng, thay đổi schema/API/auth/payment hoặc ≥2 tầng, worker báo cáo mâu thuẫn. Bế tắc ➔ Human Gate trình cả 2 phương án, Leader không được tự phán quyết.
-   * *Lưu ý trung thực:* đây là ràng buộc ở tầng chỉ dẫn (directive) + kiểm tra Zero-Trust, không phải cơ chế chặn cứng — Orca CLI không ngăn Leader bỏ qua Critic. Chi phí trên mỗi turn của Leader chỉ ~650 tokens (do toàn bộ Hiến pháp `[ROLE: PRINCIPAL ...]` của cả 8 worker đã được offload sang `orca-team spec <role> "<nhiệm vụ>"`, chỉ nạp vào task của Worker khi khởi tạo, giúp tổng directive của Leader giảm ~2.500 tokens/turn từ ~6.808 xuống ~4.327 tokens; có thể tắt hẳn Critic bằng `orca-team set critic --disable` xuống còn ~3.634 tokens).
+   * *Lưu ý trung thực:* đây là ràng buộc ở tầng chỉ dẫn (directive) + kiểm tra Zero-Trust, không phải cơ chế chặn cứng — Orca CLI không ngăn Leader bỏ qua Critic. Chi phí trên mỗi turn của Leader chỉ ~650 tokens (do toàn bộ Hiến pháp `[ROLE: PRINCIPAL ...]` của cả 10 vai trò worker đã được offload sang `orca-team spec <role> "<nhiệm vụ>"`, chỉ nạp vào task của Worker khi khởi tạo, giúp tổng directive của Leader giảm ~2.500 tokens/turn từ ~6.808 xuống ~4.327 tokens; có thể tắt hẳn Critic bằng `orca-team set critic --disable` xuống còn ~3.634 tokens).
 3. **Cấu Hình Concurrency (Song Song Hóa Tác Vụ):**
    * Cho phép chỉ định số lượng agent song song (1–5 workers) cho nhóm Developer, QA hoặc Security.
 4. **Khai Thác 100% Tiện Ích Độc Quyền Của Orca & REA:**
@@ -48,8 +48,9 @@ orca-multi-agent-orchestrator/
 │   ├── roles.md                   # Ma trận vai trò, nhiệm vụ & prompt templates
 │   └── orca-utilities.md          # Hướng dẫn chi tiết từng tiện ích độc quyền của Orca
 ├── scripts/
-│   ├── orca-team                  # CLI quản lý, chuyển đổi model/agent cho từng role
+│   ├── orca-team                  # CLI quản lý, chuyển đổi model/agent & forensic monitor
 │   ├── orca-project-init          # Wizard tương tác cài đặt framework vào bất kỳ project nào
+│   ├── orca-command-guard.py      # PreToolUse/PostToolUse guard & 16MB log circuit-breaker
 │   ├── orca-dispatch-task.sh      # Script tiện ích giao nhanh task vào Orca DAG
 │   ├── orca-issue-hotfix.sh       # Script tiện ích fork nhánh fix issue song song
 │   └── orca-pr-review.sh          # Script tiện ích mở worktree review PR

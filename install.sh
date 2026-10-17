@@ -87,7 +87,7 @@ data["orca-command-guard"] = {
         }
     ]
 }
-tmp_path = hooks_path.with_suffix(".json.orca-tmp")
+tmp_path = hooks_path.with_name(f"{hooks_path.name}.{os.getpid()}.orca-tmp")
 tmp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 os.replace(tmp_path, hooks_path)
 PY
@@ -99,7 +99,7 @@ fi
 
 # Đảm bảo ~/.zshenv có ~/.local/bin trong PATH cho cả non-interactive zsh -c (Claude Code / Codex / Antigravity)
 if [[ -f "$HOME/.zshenv" ]]; then
-  if ! grep -q '\.local/bin' "$HOME/.zshenv" 2>/dev/null; then
+  if ! grep -Eq '(^|[/:])\.local/bin([/:"'\''[:space:]]|$)' "$HOME/.zshenv" 2>/dev/null; then
     printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.zshenv"
   fi
 else

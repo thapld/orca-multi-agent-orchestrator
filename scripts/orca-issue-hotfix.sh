@@ -43,6 +43,11 @@ WORKTREE_NAME="hotfix-issue-$ISSUE_NUM"
 
 ISSUE_PROMPT="[ROLE: PRINCIPAL ISSUE RESOLVER & BUGFIX ENGINEER] Nhiệm vụ: Xử lý triệt để GitHub Issue #${ISSUE_NUM}. Chuẩn mực bắt buộc: (1) Đọc kỹ mô tả Issue và tìm đúng nguyên nhân gốc rễ (Root Cause Analysis), (2) BẮT BUỘC viết Reproduction Test tái hiện đúng lỗi (chạy test xác nhận FAIL trước khi sửa), (3) Sửa mã nguồn tối thiểu, chuẩn kiến trúc cho đến khi Reproduction Test chuyển sang PASS, (4) Chạy toàn bộ regression test suite đảm bảo EXIT_CODE=0 và không làm vỡ tính năng cũ. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ để lách lỗi; CẤM refactor lan man ngoài phạm vi Issue. BẰNG CHỨNG BẮT BUỘC: Commit sạch với thông điệp 'fix(#${ISSUE_NUM}): <mô tả>' và xuất đầy đủ Commit Hash + log chạy test."
 
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "❌ Thư mục hiện tại không nằm trong Git repository." >&2
+  exit 1
+fi
+
 ORCA_BIN="${ORCA_BIN:-$(command -v orca 2>/dev/null || echo "/usr/local/bin/orca")}"
 GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
 if [[ -n "$GIT_COMMON_DIR" && "${GIT_COMMON_DIR:t}" == ".git" ]]; then
@@ -52,7 +57,19 @@ else
 fi
 
 # Kiểm tra xem worktree định danh hotfix-issue-<ISSUE_NUM> đã tồn tại trong repo chưa (tránh đẻ worktree trùng lặp -2, -3)
-EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\/${WORKTREE_NAME}\) .*/\1/p; s/^\([^ ]*\).*\[${WORKTREE_NAME}\].*/\1/p" | head -n 1)
+EXISTING_WT_PATH=$(git worktree list --porcelain 2>/dev/null | awk -v target="$WORKTREE_NAME" '
+  /^worktree / { wt = substr($0, 10) }
+  /^branch /   { br = substr($0, 8) }
+  /^$/ {
+    n = length(target)
+    if ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target)) { print wt; exit }
+    wt = ""; br = ""
+  }
+  END {
+    n = length(target)
+    if (wt != "" && ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target))) { print wt }
+  }
+')
 
 if [[ -n "$EXISTING_WT_PATH" ]]; then
   echo "♻️  [Orca Hotfix] Tái sử dụng worktree định danh hiện có: $WORKTREE_NAME ($EXISTING_WT_PATH)..."

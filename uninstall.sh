@@ -58,7 +58,7 @@ if hooks_path.exists():
         data = json.loads(hooks_path.read_text(encoding="utf-8"))
         if isinstance(data, dict) and "orca-command-guard" in data:
             del data["orca-command-guard"]
-            tmp_path = hooks_path.with_suffix(".json.orca-tmp")
+            tmp_path = hooks_path.with_name(f"{hooks_path.name}.{os.getpid()}.orca-tmp")
             tmp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp_path, hooks_path)
     except Exception:

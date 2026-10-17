@@ -26,6 +26,11 @@ else
   SPEC="$3"
 fi
 
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "❌ Thư mục hiện tại không nằm trong Git repository." >&2
+  exit 1
+fi
+
 # Tự động lấy agent của dev/qa/sec/devops/bench/re/critic từ orca-team
 ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
 if [[ "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$ ]]; then
@@ -33,7 +38,7 @@ if [[ "$REQ_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goos
     ROLE_QUERY="pr"
   elif [[ "$TASK_TITLE" =~ ^hotfix-issue-[0-9]+$ ]]; then
     ROLE_QUERY="issue"
-  elif [[ "$TASK_TITLE" =~ ^([a-z]+)-worker$ ]]; then
+  elif [[ "$TASK_TITLE" =~ ^(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker$ ]]; then
     ROLE_QUERY="${match[1]}"
   else
     ROLE_QUERY="dev"
@@ -93,7 +98,7 @@ echo "🐋 [Orca Dispatch] Đang khởi tạo task: '$TASK_TITLE' cho agent: $AG
 
 # Xác định định danh worktree cố định theo từng vai trò (1 Role = 1 Worktree định danh duy nhất, gom nhóm các Terminal Tabs bên trong)
 ROLE_WORKTREE="dev-worker"
-if [[ "$TASK_TITLE" =~ ^(review-pr-[0-9]+|hotfix-issue-[0-9]+|[a-z]+-worker)$ ]]; then
+if [[ "$TASK_TITLE" =~ ^(review-pr-[0-9]+|hotfix-issue-[0-9]+|(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker)$ ]]; then
   ROLE_WORKTREE="$TASK_TITLE"
 else
   case "${ROLE_QUERY:l}" in
@@ -152,10 +157,13 @@ if [[ "$SPEC" != "[ROLE:"* ]]; then
 fi
 
 # 0. Đảm bảo có Run đang bound trong Orca
-CHECK_RUN=$("$ORCA_BIN" orchestration task-list --json 2>&1 || true)
+CHECK_RUN=$("$ORCA_BIN" orchestration task-list --brief --json 2>&1 || true)
 if [[ "$CHECK_RUN" == *"No Run is bound"* ]]; then
   echo "ℹ️  Chưa có Run orchestration active. Đang tự động tạo Run..."
-  "$ORCA_BIN" orchestration run-create --objective "Orchestration Run: $TASK_TITLE" >/dev/null 2>&1 || true
+  if ! "$ORCA_BIN" orchestration run-create --objective "Orchestration Run: $TASK_TITLE" >/dev/null 2>&1; then
+    echo "❌ Không thể tạo Run trong Orca." >&2
+    exit 1
+  fi
 fi
 
 # 1. Tạo task trong Orca
@@ -192,7 +200,19 @@ fi
 
 if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
   WORKTREE_NAME="$ROLE_WORKTREE"
-  EXISTING_WT_PATH=$(git worktree list 2>/dev/null | sed -n "s/^\([^ ]*\/${ROLE_WORKTREE}\) .*/\1/p; s/^\([^ ]*\).*\[${ROLE_WORKTREE}\].*/\1/p" | head -n 1)
+  EXISTING_WT_PATH=$(git worktree list --porcelain 2>/dev/null | awk -v target="$ROLE_WORKTREE" '
+    /^worktree / { wt = substr($0, 10) }
+    /^branch /   { br = substr($0, 8) }
+    /^$/ {
+      n = length(target)
+      if ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target)) { print wt; exit }
+      wt = ""; br = ""
+    }
+    END {
+      n = length(target)
+      if (wt != "" && ((length(wt) > n && substr(wt, length(wt) - n) == ("/" target)) || br == ("refs/heads/" target))) { print wt }
+    }
+  ')
   if [[ -n "$EXISTING_WT_PATH" ]]; then
     echo "🚀 Tái sử dụng worktree định danh '$ROLE_WORKTREE' ($EXISTING_WT_PATH) — Mở & gom nhóm Terminal Tab mới..."
     START_RECEIPT=$("$ORCA_BIN" orchestration worker-start \
@@ -203,7 +223,12 @@ if [[ "$HAS_GIT_COMMIT" == "true" ]]; then
       --timeout-ms "$TIMEOUT_MS" \
       --json 2>&1) || true
   else
-    REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [[ -n "$GIT_COMMON_DIR" && "${GIT_COMMON_DIR:t}" == ".git" ]]; then
+      REPO_ROOT="${GIT_COMMON_DIR:h}"
+    else
+      REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    fi
     SETUP_POLICY="skip"
     [[ -f "$REPO_ROOT/package.json" ]] && SETUP_POLICY="run"
     echo "🚀 Khởi tạo worktree định danh lần đầu cho role: '$ROLE_WORKTREE'..."
