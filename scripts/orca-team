@@ -1629,34 +1629,70 @@ def cmd_models(args: list):
     print("")
 
 def read_terminal_key(fd: int) -> str:
-    """Đọc 1 phím hoặc escape sequence từ terminal raw mode."""
-    ch = sys.stdin.read(1)
-    if ch == '\x1b':
-        r, _, _ = select.select([sys.stdin], [], [], 0.05)
-        if r:
-            ch2 = sys.stdin.read(1)
-            if ch2 == '[':
-                r2, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if r2:
-                    ch3 = sys.stdin.read(1)
-                    if ch3 in ('A', 'B', 'C', 'D', 'H', 'F'):
-                        return f'\x1b[{ch3}'
-                    elif ch3 in ('1', '2', '3', '4', '5', '6', '7', '8'):
-                        r3, _, _ = select.select([sys.stdin], [], [], 0.05)
-                        if r3:
-                            ch4 = sys.stdin.read(1)
-                            return f'\x1b[{ch3}{ch4}'
-                    return f'\x1b[{ch3}'
+    """Đọc 1 phím hoặc escape sequence từ terminal raw mode (unbuffered os.read trên fd).
+
+    LƯU Ý QUAN TRỌNG: Tuyệt đối KHÔNG dùng `sys.stdin.read(1)` kết hợp `select.select`,
+    vì `sys.stdin` (BufferedReader) sẽ hút toàn bộ 3 byte `\\x1b[A` từ kernel buffer vào
+    user-space buffer trong lần đọc đầu tiên, khiến `select.select` báo rỗng và trả về
+    nhầm phím `\\x1b` (ESC -> hủy cài đặt) khi người dùng bấm mũi tên Lên/Xuống!
+    """
+    b1 = os.read(fd, 1)
+    if not b1:
+        return '\x04'
+    if b1 == b'\x1b':
+        r, _, _ = select.select([fd], [], [], 0.10)
+        if not r:
+            return '\x1b'
+        b2 = os.read(fd, 1)
+        if not b2:
+            return '\x1b'
+        if b2 == b'[':
+            # Chuỗi CSI: ESC [ <params> <final byte trong khoảng 0x40..0x7E (@..~)>
+            seq = bytearray()
+            for _ in range(16):
+                r2, _, _ = select.select([fd], [], [], 0.05)
+                if not r2:
+                    break
+                b_next = os.read(fd, 1)
+                if not b_next:
+                    break
+                seq.extend(b_next)
+                if 0x40 <= b_next[0] <= 0x7E:
+                    break
+            if not seq:
                 return '\x1b['
-            elif ch2 == 'O':
-                r2, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if r2:
-                    ch3 = sys.stdin.read(1)
-                    return f'\x1bO{ch3}'
-                return '\x1bO'
-            return '\x1b' + ch2
-        return '\x1b'
-    return ch
+            csi_body = seq.decode('latin1', errors='ignore')
+            final_ch = csi_body[-1]
+            # Chuẩn hóa các phím điều hướng (kể cả khi kèm modifier như \x1b[1;2A)
+            if final_ch in ('A', 'B', 'C', 'D', 'H', 'F'):
+                return f'\x1b[{final_ch}'
+            return f'\x1b[{csi_body}'
+        elif b2 == b'O':
+            # Chuỗi SS3 (Application Cursor Mode): ESC O A/B/C/D/H/F
+            r2, _, _ = select.select([fd], [], [], 0.05)
+            if r2:
+                b3 = os.read(fd, 1)
+                if b3:
+                    return '\x1bO' + b3.decode('latin1', errors='ignore')
+            return '\x1bO'
+        elif b2 == b'\x1b':
+            return '\x1b'
+        return '\x1b' + b2.decode('latin1', errors='ignore')
+
+    # Nếu là byte đầu của ký tự UTF-8 đa byte (ví dụ bộ gõ tiếng Việt đang bật), đọc nốt các byte tiếp theo
+    if b1[0] >= 0x80:
+        buf = bytearray(b1)
+        for _ in range(3):
+            r_utf, _, _ = select.select([fd], [], [], 0.01)
+            if not r_utf:
+                break
+            b_more = os.read(fd, 1)
+            if not b_more:
+                break
+            buf.extend(b_more)
+        return buf.decode('utf-8', errors='replace')
+
+    return b1.decode('latin1', errors='ignore')
 
 def interactive_select(
     title: str,
@@ -1723,6 +1759,7 @@ def interactive_select(
     try:
         prev_sigterm = signal.signal(signal.SIGTERM, _sig_restore)
         prev_sighup = signal.signal(signal.SIGHUP, _sig_restore)
+        tty.setraw(fd, when=termios.TCSANOW)
         # Ẩn con trỏ terminal trong lúc tương tác
         sys.stderr.write("\033[?25l")
         sys.stderr.write(f"\r\n\033[1m{title}\033[0m\r\n")
@@ -1730,16 +1767,15 @@ def interactive_select(
         sys.stderr.flush()
         last_rendered_lines = render_menu(start_idx, current_idx)
 
-        tty.setraw(fd)
         while True:
             k = read_terminal_key(fd)
             if k in ('\x1b[A', '\x1bOA', 'k', 'K'):  # Mũi tên Lên / k
                 current_idx = (current_idx - 1) % len(items)
             elif k in ('\x1b[B', '\x1bOB', 'j', 'J'):  # Mũi tên Xuống / j
                 current_idx = (current_idx + 1) % len(items)
-            elif k in ('\x1b[H', '\x1b[1~', '\x1bOH', 'g'):  # Home
+            elif k in ('\x1b[H', '\x1b[1~', '\x1b[7~', '\x1bOH', 'g'):  # Home
                 current_idx = 0
-            elif k in ('\x1b[F', '\x1b[4~', '\x1bOF', 'G'):  # End
+            elif k in ('\x1b[F', '\x1b[4~', '\x1b[8~', '\x1bOF', 'G'):  # End
                 current_idx = len(items) - 1
             elif k == '\x1b[5~':  # PageUp
                 current_idx = max(0, current_idx - eff_max)
@@ -1747,7 +1783,7 @@ def interactive_select(
                 current_idx = min(len(items) - 1, current_idx + eff_max)
             elif k in ('\r', '\n', ' '):  # Enter hoặc Space để xác nhận
                 break
-            elif k in ('\x03', 'q', 'Q', '\x1b'):  # Ctrl+C / Esc / q -> Hủy thao tác
+            elif k in ('\x03', '\x04', 'q', 'Q', '\x1b'):  # Ctrl+C / Ctrl+D / Esc / q -> Hủy thao tác
                 raise KeyboardInterrupt
             elif k.isascii() and k.isdigit() and 1 <= int(k) <= len(items):  # Phím tắt số nhanh
                 current_idx = int(k) - 1
@@ -1764,7 +1800,13 @@ def interactive_select(
             last_rendered_lines = render_menu(start_idx, current_idx)
 
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        # Xóa khối menu vừa hiển thị để giữ màn hình gọn đẹp
+        if last_rendered_lines > 0:
+            sys.stderr.write(f"\033[{last_rendered_lines}A\033[0J")
+        # Hiện lại con trỏ terminal
+        sys.stderr.write("\033[?25h")
+        sys.stderr.flush()
+        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
         if prev_sigterm is not None:
             try:
                 signal.signal(signal.SIGTERM, prev_sigterm)
@@ -1775,12 +1817,6 @@ def interactive_select(
                 signal.signal(signal.SIGHUP, prev_sighup)
             except Exception:
                 pass
-        # Xóa khối menu vừa hiển thị để giữ màn hình gọn đẹp
-        if last_rendered_lines > 0:
-            sys.stderr.write(f"\033[{last_rendered_lines}A\033[0J")
-        # Hiện lại con trỏ terminal
-        sys.stderr.write("\033[?25h")
-        sys.stderr.flush()
 
     selected_val = items[current_idx]
     clean_val = re.sub(r"\s*⭐.*$", "", selected_val).strip()
