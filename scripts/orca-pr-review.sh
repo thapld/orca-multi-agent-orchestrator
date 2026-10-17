@@ -66,13 +66,12 @@ WORKTREE_NAME="review-pr-$PR_NUM"
 
 GOAL_ENABLED="true"
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
-  GOAL_CFG=$("$ORCA_TEAM_BIN" get pr --field goal 2>/dev/null || true)
+  GOAL_ROLE_QUERY="pr"
+  [[ "$ROLE_OR_AGENT" =~ $KNOWN_ROLES_RE ]] && GOAL_ROLE_QUERY="$ROLE_OR_AGENT"
+  GOAL_CFG=$("$ORCA_TEAM_BIN" get "$GOAL_ROLE_QUERY" --field goal 2>/dev/null || true)
   [[ "$GOAL_CFG" == "false" ]] && GOAL_ENABLED="false"
 fi
 PR_PROMPT="[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: Thẩm định toàn diện Pull Request #${PR_NUM}. Chuẩn mực: (0) Đồng bộ đúng commit mới nhất của PR trước khi review (worktree có thể đã cũ từ lần review trước): chạy 'gh pr checkout ${PR_NUM} --force' hoặc 'git fetch origin pull/${PR_NUM}/head && git checkout --detach FETCH_HEAD' và ghi rõ commit hash đã review, (1) Đọc toàn bộ line-by-line diff qua 'orca file open-changed --mode diff --worktree active' và 'git diff', (2) Kiểm tra kiến trúc, Clean Code, OWASP Top 10, Race Conditions, Memory/Resource Leaks, (3) BẮT BUỘC chạy thực tế test suite và linter trong worktree PR (CẤM duyệt suông bằng mắt!). CẤM VƯỢT RÀO: Không tự ý sửa code tính năng của PR khi chưa được yêu cầu. BẰNG CHỨNG BẮT BUỘC: Xuất báo cáo review chi tiết từng file:line, kết quả chạy test thực tế (EXIT_CODE, số test pass/fail) và chốt PR_VERDICT: APPROVE hoặc REQUEST_CHANGES."
-if [[ "$GOAL_ENABLED" != "false" ]]; then
-  PR_PROMPT="${PR_PROMPT} CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal. /goal"
-fi
 
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   echo "❌ Thư mục hiện tại không nằm trong Git repository." >&2
@@ -112,6 +111,10 @@ if [[ -n "$EXISTING_WT_PATH" ]]; then
     echo "❌ Không tìm thấy 'orca-dispatch-task.sh' (hoặc 'orca-dispatch') để tái sử dụng worktree '$WORKTREE_NAME'." >&2
     exit 1
   fi
+fi
+
+if [[ "$GOAL_ENABLED" != "false" ]]; then
+  PR_PROMPT="${PR_PROMPT} CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal. /goal"
 fi
 
 echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_NUM bằng agent: $AGENT..."

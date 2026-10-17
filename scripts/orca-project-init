@@ -284,6 +284,13 @@ choose_model() {
   local role_title="$2"
   local default_eff="${3:-high}"
   local role_tier="${4:-tier2}"
+
+  if [[ "$PRESET_MODE" =~ ^(cost|minimal)$ && "$role_title" != "Lead Coordinator" ]]; then
+    role_tier="tier3"
+    [[ "$default_eff" == "high" ]] && default_eff="medium"
+  elif [[ "$PRESET_MODE" =~ ^(high|full)$ && "$role_tier" == "tier3" ]]; then
+    default_eff="high"
+  fi
   
   SELECTED_MODEL=""
   SELECTED_EFFORT=""
@@ -371,7 +378,24 @@ choose_model() {
     else
       SELECTED_MODEL=""
     fi
-  elif [[ "$AUTO_YES" != true ]]; then
+  elif [[ "$AUTO_YES" == true ]]; then
+    case "${agent:l}" in
+      antigravity)
+        if [[ "$role_tier" == "tier3" ]]; then
+          SELECTED_MODEL="gemini-3-flash"
+        else
+          SELECTED_MODEL="gemini-3.1-pro"
+        fi
+        ;;
+      claude)
+        if [[ "$role_tier" == "tier1" ]]; then
+          SELECTED_MODEL="claude-opus-4-6"
+        else
+          SELECTED_MODEL="claude-sonnet-4-6"
+        fi
+        ;;
+    esac
+  else
     printf "   ⚠️ Không tìm thấy danh sách model động từ CLI của '$agent'. Nhập model ID (Enter = mặc định): "
     read -r custom_model || true
     SELECTED_MODEL="$custom_model"
@@ -507,18 +531,28 @@ fmt_worker_args() {
 choose_count() {
   local role_title="$1"
   local default_count="${2:-1}"
+  if [[ "$PRESET_MODE" =~ ^(cost|minimal)$ && "$role_title" == "Developer" ]]; then
+    default_count=1
+  fi
   if [[ "$AUTO_YES" == true ]]; then
     SELECTED_COUNT="$default_count"
     echo "   ➔ Số lượng ($role_title): $SELECTED_COUNT agent(s) (--yes)"
     return
   fi
-  local count_options=(
-    "1 agent"
-    "2 agents (khuyến nghị song song)"
-    "3 agents"
-    "4 agents"
-    "5 agents"
-  )
+  local count_options=()
+  for idx_c in 1 2 3 4 5; do
+    local unit="agents"
+    [[ $idx_c -eq 1 ]] && unit="agent"
+    local marker=""
+    if [[ $idx_c -eq $default_count ]]; then
+      if [[ $idx_c -ge 2 ]]; then
+        marker=" ⭐ (khuyến nghị song song)"
+      else
+        marker=" ⭐ (khuyến nghị)"
+      fi
+    fi
+    count_options+=("${idx_c} ${unit}${marker}")
+  done
   local def_i=$(( default_count - 1 ))
   [[ $def_i -lt 0 || $def_i -gt 4 ]] && def_i=0
 
@@ -666,10 +700,10 @@ echo "╚═══════════════════════�
 echo ""
 echo "📍 Thư mục dự án: $PROJECT_PATH"
 
-if [[ -f "$TARGET_RULE" && "$AUTO_YES" != true ]]; then
+if [[ ( -f "$TARGET_RULE" || -f "$TARGET_CONFIG" ) && "$AUTO_YES" != true ]]; then
   if [[ -x "$ORCA_TEAM_BIN" ]]; then
     ow_choice=$(python3 "$ORCA_TEAM_BIN" select \
-      --title "⚠️ Đã tồn tại cấu hình $TARGET_RULE. Bạn muốn làm gì?" \
+      --title "⚠️ Đã tồn tại cấu hình Orchestrator tại $PROJECT_PATH. Bạn muốn làm gì?" \
       --options "Cấu hình lại và ghi đè" "Hủy bỏ và giữ nguyên cấu hình cũ" \
       --default-idx 0 \
       --return-idx) || exit $?
@@ -1177,6 +1211,7 @@ cat > "$TARGET_RULE" << RULE
 > - Tuyệt đối **KHÔNG** tự chạy lệnh build, test, benchmark, dịch ngược, đóng gói hay hạ tầng (\`docker\`, \`kubectl\`, \`helm\`, \`mvn\`, \`gradle\`, \`npm/pytest\`, \`k6\`, \`wrk\`, \`rea\`, \`psql\`, \`curl\` test...) trực tiếp trên terminal của Leader!
 > - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** ${ROUTING_LINE}.
 ${C_RULE_LINE}
+> - **CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH (\`/goal\` MODE ON ALL ROLES):** Toàn bộ các vai trò (Lead Coordinator & mọi Worker) đều bật sẵn chế độ \`/goal\` (\`goalMode: true\` trong \`orca-team.json\`). Mọi spec tạo qua \`orca-team spec <role> '...'\` tự động đính kèm chỉ dẫn \`/goal\` và hậu tố \` /goal\` để kích hoạt bộ kiểm chứng \`GoalStopHook\` trên từng Worker. Bản thân Lead Coordinator cũng vận hành theo kỷ luật \`/goal\` (tự đối chiếu 100% yêu cầu của sếp với bằng chứng thực tế từ các Worker, tuyệt đối không dừng giữa chừng khi chưa qua đủ các bước); khi tạm dừng tại **Human Gate (\`gate-create\`)** chờ sếp phản hồi trên chat hoặc sau khi hoàn tất trọn vẹn **BƯỚC 4** (\`git merge\` + \`worker-release\`), nếu phiên của Leader được kích hoạt \`/goal\`, hãy xuất thẻ \`<!-- GOAL_COMPLETE -->\` ở cuối câu trả lời để trả quyền điều khiển về cho sếp.
 > - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy lệnh \`orca orchestration ...\` và \`git merge\` (sau khi qua Human Gate).
 
 ---
@@ -1247,16 +1282,17 @@ ${C_STEP4_COND}
   \`\`\`bash
 ${C_GATE_LINE}
   \`\`\`
+- Khi tạm dừng tại **Human Gate** chờ sếp phản hồi trên chat (vì \`gate-create\` trả kết quả ngay không tạo background task nên \`GoalStopHook\` sẽ kích hoạt nếu đang bật \`/goal\`), nếu phiên của Leader đang ở chế độ \`/goal\`, hãy đính kèm \`<!-- GOAL_COMPLETE -->\` ở cuối tin nhắn xin phép merge để dừng chờ sếp.
 - Chỉ khi người dùng phản hồi \`"yes"\`:
   1. Đóng Gate và khôi phục trạng thái \`completed\` cho \`<FINAL_TASK_ID>\` (vì \`gate-create\` chuyển task sang \`blocked\` và \`gate-resolve\` trong Orca đưa task về \`ready\`):
      \`\`\`bash
      orca orchestration gate-resolve --id <GATE_ID> --resolution "yes"
      orca orchestration task-update --id <FINAL_TASK_ID> --status completed
      \`\`\`
-  2. Thực hiện \`git merge\` vào nhánh chính, sau đó chạy \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\` để giải phóng retention và đóng các terminal worker.
+  2. Thực hiện \`git merge\` toàn bộ các nhánh worktree đã tham gia vào nhánh chính, sau đó chạy \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\` để giải phóng retention và đóng các terminal worker; cuối cùng báo cáo tổng kết và xuất thẻ \`<!-- GOAL_COMPLETE -->\` ở câu trả lời cuối cùng để đóng Goal (\`goalMode: true\` trên \`coordinator\`).
 RULE
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
-  python3 "$ORCA_TEAM_BIN" sync "$PROJECT_PATH" >/dev/null 2>&1 || true
+  python3 "$ORCA_TEAM_BIN" --path "$PROJECT_PATH" sync >/dev/null 2>&1 || true
 fi
 
 # ── Quản lý symlink thông minh: Tránh nạp trùng lặp context & bảo vệ file/symlink riêng của người dùng ──

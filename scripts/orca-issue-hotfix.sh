@@ -66,13 +66,12 @@ WORKTREE_NAME="hotfix-issue-$ISSUE_NUM"
 
 GOAL_ENABLED="true"
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
-  GOAL_CFG=$("$ORCA_TEAM_BIN" get issue --field goal 2>/dev/null || true)
+  GOAL_ROLE_QUERY="issue"
+  [[ "$ROLE_OR_AGENT" =~ $KNOWN_ROLES_RE ]] && GOAL_ROLE_QUERY="$ROLE_OR_AGENT"
+  GOAL_CFG=$("$ORCA_TEAM_BIN" get "$GOAL_ROLE_QUERY" --field goal 2>/dev/null || true)
   [[ "$GOAL_CFG" == "false" ]] && GOAL_ENABLED="false"
 fi
 ISSUE_PROMPT="[ROLE: PRINCIPAL ISSUE RESOLVER & BUGFIX ENGINEER] Nhiệm vụ: Xử lý triệt để GitHub Issue #${ISSUE_NUM}. Chuẩn mực bắt buộc: (1) Đọc kỹ mô tả Issue và tìm đúng nguyên nhân gốc rễ (Root Cause Analysis), (2) BẮT BUỘC viết Reproduction Test tái hiện đúng lỗi (chạy test xác nhận FAIL trước khi sửa), (3) Sửa mã nguồn tối thiểu, chuẩn kiến trúc cho đến khi Reproduction Test chuyển sang PASS, (4) Chạy toàn bộ regression test suite đảm bảo EXIT_CODE=0 và không làm vỡ tính năng cũ. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ để lách lỗi; CẤM refactor lan man ngoài phạm vi Issue. BẰNG CHỨNG BẮT BUỘC: Commit sạch với thông điệp 'fix(#${ISSUE_NUM}): <mô tả>' và xuất đầy đủ Commit Hash + log chạy test."
-if [[ "$GOAL_ENABLED" != "false" ]]; then
-  ISSUE_PROMPT="${ISSUE_PROMPT} CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal. /goal"
-fi
 
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   echo "❌ Thư mục hiện tại không nằm trong Git repository." >&2
@@ -112,6 +111,10 @@ if [[ -n "$EXISTING_WT_PATH" ]]; then
     echo "❌ Không tìm thấy 'orca-dispatch-task.sh' (hoặc 'orca-dispatch') để tái sử dụng worktree '$WORKTREE_NAME'." >&2
     exit 1
   fi
+fi
+
+if [[ "$GOAL_ENABLED" != "false" ]]; then
+  ISSUE_PROMPT="${ISSUE_PROMPT} CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal. /goal"
 fi
 
 echo "🐋 [Orca Hotfix] Đang khởi tạo worktree song song cho Issue #$ISSUE_NUM bằng agent: $AGENT..."

@@ -33,10 +33,12 @@ from pathlib import Path
 ROLE_ALIASES = {
     "coord": "coordinator",
     "coordinator": "coordinator",
+    "orchestrator": "coordinator",
     "lead": "coordinator",
     "leader": "coordinator",
     "architect": "coordinator",
     "dev": "developer",
+    "coder": "developer",
     "developer": "developer",
     "developers": "developer",
     "fullstack": "developer",
@@ -200,7 +202,7 @@ ROLE_SPEC_TEMPLATES = {
     "uiSpecialist": (
         "[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: {task}. "
         "Chuẩn: CSS/DOM chuẩn xác, Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. "
-        "CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend core/DB schema. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Build/typecheck EXIT_CODE=0, không lỗi Console, "
+        "CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend core/DB schema. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Đồng bộ nhánh mới nhất (git merge --no-edit main), Build/typecheck EXIT_CODE=0, không lỗi Console, "
         "kiểm tra snapshot/screenshot Mobile/Desktop, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready' "
         "--body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit kèm Commit Hash."
     ),
@@ -236,35 +238,68 @@ def _is_goal_mode_enabled(role_cfg: dict = None, config: dict = None) -> bool:
     return True
 
 
+def _infer_canonical_from_role_header(raw_task: str) -> str:
+    """Suy diễn canonical role key từ tiền tố '[ROLE: PRINCIPAL ...]' khi người dùng truyền thẳng spec đã render."""
+    m = re.match(r"^\[ROLE:\s*([^\]]+)\]", raw_task, flags=re.IGNORECASE)
+    if not m:
+        return "developer"
+    hdr = m.group(1).upper()
+    if "DEVOPS" in hdr or "SRE" in hdr:
+        return "devopsSpecialist"
+    if "CRITIC" in hdr or "RESEARCH" in hdr:
+        return "criticSpecialist"
+    if "SECURITY" in hdr:
+        return "security"
+    if "QA" in hdr or "SDET" in hdr:
+        return "qa"
+    if "BENCHMARK" in hdr or "PERF" in hdr:
+        return "benchSpecialist"
+    if "REVERSE" in hdr or "REA" in hdr:
+        return "reSpecialist"
+    if "UI" in hdr or "UX" in hdr:
+        return "uiSpecialist"
+    if "PR REVIEWER" in hdr:
+        return "prReviewer"
+    if "ISSUE RESOLVER" in hdr:
+        return "issueResolver"
+    return "developer"
+
+
 def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_override: bool = None) -> str:
     """Tiêm Sổ tay Hiến pháp, Cấm vượt rào & Chế độ /goal của từng Worker vào task spec."""
-    canonical = ROLE_ALIASES.get((role_input or "dev").strip().lower(), "developer")
-    if canonical == "coordinator":
-        canonical = "developer"
+    raw_task = (task_desc or "").strip()
+    if not role_input and raw_task.startswith("[ROLE:"):
+        canonical = _infer_canonical_from_role_header(raw_task)
+    else:
+        canonical = ROLE_ALIASES.get((role_input or "dev").strip().lower(), "developer")
+        if canonical == "coordinator":
+            canonical = "developer"
     roles = (config.get("roles") if isinstance(config, dict) else None) or {}
     role_cfg = roles.get(canonical) if isinstance(roles, dict) else {}
     goal_on = goal_override if goal_override is not None else _is_goal_mode_enabled(role_cfg, config)
 
-    raw_task = (task_desc or "").strip()
     if raw_task.startswith("[ROLE:"):
         if goal_on:
-            if not raw_task.endswith(" /goal"):
-                if "CHẾ ĐỘ /goal" in raw_task:
-                    return re.sub(r"(?:\s+/goal)?[.\s]*$", "", raw_task) + " /goal"
-                return raw_task.rstrip(".") + "." + GOAL_MODE_CLAUSE
+            if "CHẾ ĐỘ /goal" in raw_task:
+                if raw_task.endswith(" /goal"):
+                    return raw_task
+                return re.sub(r"(?:\s+/goal)?[.\s]*$", "", raw_task, flags=re.IGNORECASE) + " /goal"
+            base_task = re.sub(r"(?:^|\s+)/goal\s*$", "", raw_task, flags=re.IGNORECASE).strip()
+            if not base_task.endswith((".", "!", "?")):
+                base_task += "."
+            return base_task + GOAL_MODE_CLAUSE
         else:
-            raw_task = re.sub(r"\s*CHẾ ĐỘ /goal[\s\S]*?/goal\s*$", "", raw_task)
-            raw_task = re.sub(r"\s+/goal\s*$", "", raw_task)
+            raw_task = re.sub(r"\s*CHẾ ĐỘ /goal[\s\S]*$", "", raw_task)
+            raw_task = re.sub(r"(?:^|\s+)/goal[.\s]*$", "", raw_task, flags=re.IGNORECASE)
         return raw_task
 
     clean_task = re.sub(r"(?:^|\s+)/goal\s*$", "", raw_task, flags=re.IGNORECASE).strip().rstrip(".")
     if not clean_task:
         clean_task = "[Xem chi tiết nhiệm vụ]"
     tpl = ROLE_SPEC_TEMPLATES.get(canonical, ROLE_SPEC_TEMPLATES["developer"])
-    rendered = tpl.replace("{task}", clean_task)
     if isinstance(config, dict):
         if not _is_role_enabled(roles.get("reSpecialist", {}), is_optional=True):
-            rendered = rendered.replace(
+            tpl = tpl.replace(
                 " (nếu cần giải phẫu binary phải báo Coordinator giao re-worker)",
                 " (nếu cần giải phẫu binary phải báo Coordinator)",
             )
@@ -272,24 +307,27 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_o
         if _is_role_enabled(roles.get("devopsSpecialist", {}), is_optional=True):
             downstream.append("DevOps")
         else:
-            rendered = rendered.replace("; CẤM sửa K8s/Docker của DevOps", "")
+            tpl = tpl.replace("; CẤM sửa K8s/Docker của DevOps", "")
         downstream.extend(["QA", "Sec"])
         if _is_role_enabled(roles.get("benchSpecialist", {}), is_optional=True):
             downstream.append("Bench")
-        rendered = rendered.replace("điều phối cho DevOps/QA/Sec/Bench", f"điều phối cho {'/'.join(downstream)}")
+        tpl = tpl.replace("điều phối cho DevOps/QA/Sec/Bench", f"điều phối cho {'/'.join(downstream)}")
         try:
             dev_conc = max(1, min(10, int(((roles.get("developer") or {}).get("concurrency")) or 1)))
         except (ValueError, TypeError):
             dev_conc = 1
         if dev_conc >= 2:
+            # Dùng (! git rev-parse ... || git merge ...) thay vì (git rev-parse ... && git merge ... || true)
+            # để nếu nhánh tồn tại nhưng bị xung đột merge (merge conflict), mã lỗi khác 0 vẫn được giữ nguyên!
             extra_merges = " && ".join(
-                f"(git rev-parse --verify --quiet dev-worker-{k} >/dev/null && git merge --no-edit dev-worker-{k} || true)"
+                f"(! git rev-parse --verify --quiet dev-worker-{k} >/dev/null || git merge --no-edit dev-worker-{k})"
                 for k in range(2, dev_conc + 1)
             )
-            rendered = rendered.replace(
+            tpl = tpl.replace(
                 "git merge --no-edit main && git merge --no-edit dev-worker",
                 f"git merge --no-edit main && git merge --no-edit dev-worker && {extra_merges}",
             )
+    rendered = tpl.replace("{task}", clean_task)
     if goal_on:
         rendered = rendered + GOAL_MODE_CLAUSE
     return rendered
@@ -395,11 +433,9 @@ def cmd_spec(args: list, explicit_root: Path = None):
             role_arg = clean_args[0]
             task_parts = [explicit_task] if explicit_task is not None else clean_args[1:]
         else:
-            role_arg = "dev"
+            role_arg = "" if clean_args[0].strip().startswith("[ROLE:") else "dev"
             task_parts = [explicit_task] if explicit_task is not None else clean_args
-    if task_parts and task_parts[0] == "--":
-        task_parts = task_parts[1:]
-    if task_parts and task_parts != ["-"]:
+    if task_parts and (after_dd or explicit_task is not None or task_parts != ["-"]):
         task_text = " ".join(task_parts)
     elif not sys.stdin.isatty():
         task_text = sys.stdin.read()
@@ -894,16 +930,36 @@ def sync_gemini_directive(root: Path, config: dict):
             "> - **LUẬT CHỐNG ĐỘC ĐOÁN & QUY KẾT VỘI VÀNG:** Leader **CẤM** quy kết lỗi cho bất kỳ role nào "
             "hoặc khóa thiết kế/root-cause khi chưa có bằng chứng `file:line` + log."
         )
-    goal_rule_line = (
-        "> - **CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH (`/goal` MODE ON ALL ROLES):** Toàn bộ các vai trò (Lead Coordinator & mọi Worker) "
-        "đều bật sẵn chế độ **`/goal` (`goalMode: true`)**. Mọi Task Spec sinh qua `orca-team spec` đều tự động đính kèm hậu tố kích hoạt `/goal` "
-        "(`GoalStopHook` + checklist nghiệm thu) buộc Worker làm triệt để 100% yêu cầu và gửi `worker_done` trước khi xuất `<!-- GOAL_COMPLETE -->`. "
-        "Bản thân **Lead Coordinator** cũng vận hành ở chế độ `/goal`: phải tự lập checklist theo dõi toàn bộ DAG từ Bước 1 đến Bước 4, "
-        "tuyệt đối không dừng nửa chừng khi còn task/gate/lỗi chưa xử lý, và chỉ xuất `<!-- GOAL_COMPLETE -->` sau khi đã hoàn tất Bước 4."
+    coord_goal = _is_goal_mode_enabled(coord, config)
+    any_worker_goal = any(
+        _is_goal_mode_enabled(r_cfg, config)
+        for r_cfg, en in [
+            (dev, True), (qa, True), (sec, True), (pr, True), (issue, True),
+            (devops, devops_enabled), (bench, bench_enabled), (re_spec, re_enabled),
+            (ui, ui_enabled), (critic_spec, critic_enabled),
+        ]
+        if en
     )
+    if coord_goal:
+        goal_rule_line = (
+            "> - **CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH (`/goal` MODE ON ALL ROLES):** Toàn bộ các vai trò (Lead Coordinator & mọi Worker) "
+            "đều bật sẵn chế độ **`/goal` (`goalMode: true`)**. Mọi Task Spec sinh qua `orca-team spec` đều tự động đính kèm hậu tố kích hoạt `/goal` "
+            "(`GoalStopHook` + checklist nghiệm thu) buộc Worker làm triệt để 100% yêu cầu và gửi `worker_done` trước khi xuất `<!-- GOAL_COMPLETE -->`. "
+            "Bản thân **Lead Coordinator** cũng vận hành ở chế độ `/goal`: phải tự lập checklist theo dõi toàn bộ DAG từ Bước 1 đến Bước 4, "
+            "tuyệt đối không dừng nửa chừng khi còn worker đang chạy hoặc còn lỗi chưa xử lý (`check --wait` tự giữ background task để chờ worker), "
+            "và chỉ xuất `<!-- GOAL_COMPLETE -->` khi tạm dừng xin quyết định của sếp tại **Human Gate (`gate-create`)** hoặc sau khi đã hoàn tất **Bước 4 (`git merge` + `worker-release`)**."
+        )
+    elif any_worker_goal:
+        goal_rule_line = (
+            "> - **CHẾ ĐỘ LÀM TRIỆT ĐỂ TRÊN WORKER (`/goal` MODE):** Các Worker bật `goalMode: true` sẽ tự động được `orca-team spec` "
+            "đính kèm hậu tố kích hoạt `/goal` (`GoalStopHook` + checklist nghiệm thu) buộc hoàn tất 100% yêu cầu và gửi `worker_done` trước khi xuất `<!-- GOAL_COMPLETE -->`."
+        )
+    else:
+        goal_rule_line = ""
+    header_rules_block = routing_line + "\n" + anti_autocracy_line + ("\n" + goal_rule_line if goal_rule_line else "")
     content = re.sub(
         r"^> - \*\*BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:\*\*.*(?:\n> - \*\*LUẬT CHỐNG ĐỘC ĐOÁN[^\n]*)?(?:\n> - \*\*CHẾ ĐỘ LÀM TRIỆT ĐỂ[^\n]*)?$",
-        routing_line + "\n" + anti_autocracy_line + "\n" + goal_rule_line,
+        header_rules_block,
         content,
         flags=re.M
     )
@@ -1047,7 +1103,7 @@ def sync_gemini_directive(root: Path, config: dict):
 
     step2_lines = [
         "### BƯỚC 2: PARALLEL FAN-OUT THEO CONCURRENCY & GOM NHÓM TERMINAL TABS TRÊN CÁC SLOT CỐ ĐỊNH",
-        f'- 🔴 **QUY TẮC FIXED-POOL WORKTREE SLOTS THEO CONCURRENCY (CHẠY SONG SONG ĐỦ `N` AGENTS & GOM NHÓM TERMINAL TABS):** Mỗi vai trò sử dụng **đúng `N` Worktree Slots cố định theo cấu hình `Concurrency`** ({", ".join(active_wt_names)}). Với vai trò có `N parallel` (như `Full-Stack Devs: {d_count} parallel`), Leader **BẮT BUỘC khởi chạy đồng thời đủ `N` workers vào `N` worktree slots riêng biệt (`dev-worker`, `dev-worker-2`...) ngay trong cùng lượt Fan-out** để các agent thực thi song song 100% mà không xung đột `git index.lock`! Nếu worktree của slot đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree slot đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <slot_name>` ở lần chạy đầu tiên khi slot chưa tồn tại (CẤM đẻ thêm worktree vượt quá số slot `Concurrency` đã cấu hình):',
+        f'- 🔴 **QUY TẮC FIXED-POOL WORKTREE SLOTS THEO CONCURRENCY (CHẠY SONG SONG ĐỦ `N` AGENTS & GOM NHÓM TERMINAL TABS):** Mỗi vai trò sử dụng **đúng `N` Worktree Slots cố định theo cấu hình `Concurrency`** ({", ".join(active_wt_names)}). Với vai trò có `N parallel` (như `Full-Stack Devs: {max(2, d_count)} parallel`), Leader **BẮT BUỘC khởi chạy đồng thời đủ `N` workers vào `N` worktree slots riêng biệt (`dev-worker`, `dev-worker-2`...) ngay trong cùng lượt Fan-out** để các agent thực thi song song 100% mà không xung đột `git index.lock`! Nếu worktree của slot đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree slot đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <slot_name>` ở lần chạy đầu tiên khi slot chưa tồn tại (CẤM đẻ thêm worktree vượt quá số slot `Concurrency` đã cấu hình):',
         "  ```bash",
     ]
     _append_step2_role(
@@ -1120,17 +1176,21 @@ def sync_gemini_directive(root: Path, config: dict):
         flags=re.M
     )
 
-    # Bước 3 & Bước 4: Tự động lọc bỏ các vai trò tùy chọn đang tắt (disabled)
+    # Bước 3 & Bước 4: Tự động lọc bỏ các vai trò tùy chọn đang tắt (disabled) & mở rộng đầy đủ các slot song song
     handoff_roles = "/".join([r for r, en in [("Critic", critic_enabled), ("RE", re_enabled), ("Dev", True), ("DevOps", devops_enabled), ("UI", ui_enabled)] if en])
     handoff_ev = ", ".join([e for e, en in [("`CONSENSUS_REACHED`", critic_enabled), ("Commit Hash", True), ("Clean-Room Spec", re_enabled), ("Pod/Port/Log sạch", devops_enabled)] if en])
     esc_roles = "/".join([r for r, en in [("DevOps", devops_enabled), ("QA", True), ("Sec", True), ("Bench", bench_enabled)] if en])
-    reverify_w = " & ".join([w for w, en in [("`devops-worker`", devops_enabled), ("`qa-worker`", True)] if en])
+    devops_slots_label = "/".join(f"`{s}`" for s in _slot_names("devops-worker", do_count))
+    qa_slots_label = "/".join(f"`{s}`" for s in _slot_names("qa-worker", q_count))
+    sec_slots_label = "/".join(f"`{s}`" for s in _slot_names("sec-worker", s_count))
+    bench_slots_label = "/".join(f"`{s}`" for s in _slot_names("bench-worker", b_count))
+    reverify_w = " & ".join([w for w, en in [(devops_slots_label, devops_enabled), (qa_slots_label, True)] if en])
     qa_branch_roles = "/".join([r for r, en in [("QA", True), ("DevOps", devops_enabled), ("Sec", True), ("Bench", bench_enabled)] if en])
     log_blind_roles = "/".join([r for r, en in [("DevOps", devops_enabled), ("QA", True)] if en])
     zt4_ro_roles = "/".join([r for r, en in [("Critic", critic_enabled), ("QA", True), ("Bench", bench_enabled), ("RE", re_enabled)] if en])
     dev_slots_label = "/".join(f"`{s}`" for s in _slot_names("dev-worker", d_count))
-    self_heal_fixers = "/".join([w for w, en in [(dev_slots_label, True), ("`devops-worker`", devops_enabled)] if en])
-    self_heal_verifiers = "/".join([w for w, en in [("`qa-worker`", True), ("`sec-worker`", True), ("`bench-worker`", bench_enabled)] if en])
+    self_heal_fixers = "/".join([w for w, en in [(dev_slots_label, True), (devops_slots_label, devops_enabled)] if en])
+    self_heal_verifiers = "/".join([w for w, en in [(qa_slots_label, True), (sec_slots_label, True), (bench_slots_label, bench_enabled)] if en])
     dev_branches_desc = "tất cả các nhánh Dev (`" + "`, `".join(_slot_names("dev-worker", d_count)) + "`)" if d_count >= 2 else "nhánh `dev-worker` của Dev"
 
     step3_full = (
@@ -1206,15 +1266,25 @@ def sync_gemini_directive(root: Path, config: dict):
         gate_q_items.append(tail_opt)
     gate_q_str = ", ".join(gate_q_items[:-1]) + " và " + gate_q_items[-1]
 
-    merge_branches_hint = ", ".join(f"`{s}`" for s in _slot_names("dev-worker", d_count))
+    merge_slot_list = list(_slot_names("dev-worker", d_count))
     if devops_enabled:
-        merge_branches_hint += ", `devops-worker`"
+        merge_slot_list += _slot_names("devops-worker", do_count)
     if ui_enabled:
-        merge_branches_hint += ", `ui-worker`"
+        merge_slot_list += _slot_names("ui-worker", u_count)
+    merge_branches_hint = ", ".join(f"`{s}`" for s in merge_slot_list)
+
+    goal_gate_hint = (
+        " (khi tạm dừng chờ sếp trả lời Gate trên chat, kèm thẻ `<!-- GOAL_COMPLETE -->` ở cuối tin nhắn để nhường quyền điều khiển cho sếp)"
+        if coord_goal else ""
+    )
+    goal_final_hint = (
+        ", đóng các terminal worker và xuất thẻ `<!-- GOAL_COMPLETE -->` ở câu trả lời cuối cùng để đóng Goal."
+        if coord_goal else " và đóng các terminal worker."
+    )
 
     step4_full = (
         '### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)\n'
-        f'- Chỉ khi {"đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` khi có trigger Anti-Autocracy) và " if critic_enabled else ""}đủ bằng chứng thép của {step4_ev_str}, mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):\n'
+        f'- Chỉ khi {"đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` khi có trigger Anti-Autocracy) và " if critic_enabled else ""}đủ bằng chứng thép của {step4_ev_str}, mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge){goal_gate_hint}:\n'
         '  ```bash\n'
         f'  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng {"Đồng thuận (Critic), " if critic_enabled else ""}{gate_q_str}. Merge code vào nhánh chính chứ sếp?" --options \'["yes","wait"]\' --json\n'
         '  ```\n'
@@ -1224,7 +1294,7 @@ def sync_gemini_directive(root: Path, config: dict):
         '     orca orchestration gate-resolve --id <GATE_ID> --resolution "yes"\n'
         '     orca orchestration task-update --id <FINAL_TASK_ID> --status completed\n'
         '     ```\n'
-        f'  2. Thực hiện `git merge` đầy đủ tất cả các nhánh worker có thay đổi ({merge_branches_hint}) vào nhánh chính, sau đó chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention, đóng các terminal worker và xuất thẻ `<!-- GOAL_COMPLETE -->` ở câu trả lời cuối cùng để đóng Goal.\n'
+        f'  2. Thực hiện `git merge` đầy đủ tất cả các nhánh worker có thay đổi ({merge_branches_hint}) vào nhánh chính, sau đó chạy `orca orchestration worker-release --dispatch <DISPATCH_ID> --json` để giải phóng retention{goal_final_hint}\n'
     )
     content = re.sub(
         r"### BƯỚC 4:[^\n]*\n[\s\S]*$",
@@ -1822,6 +1892,14 @@ def read_terminal_key(fd: int) -> str:
         b2 = os.read(fd, 1)
         if not b2:
             return '\x1b'
+        if b2 == b'\x1b':
+            # Một số terminal gửi Alt+Arrow dưới dạng ESC ESC [ A hoặc ESC ESC O A
+            r_alt, _, _ = select.select([fd], [], [], 0.05)
+            if not r_alt:
+                return '\x1b'
+            b2 = os.read(fd, 1)
+            if not b2:
+                return '\x1b'
         if b2 == b'[':
             # Chuỗi CSI: ESC [ <params> <final byte trong khoảng 0x40..0x7E (@..~)>
             seq = bytearray()
@@ -1837,6 +1915,13 @@ def read_terminal_key(fd: int) -> str:
                     break
             if not seq:
                 return '\x1b['
+            if seq == bytearray(b'M'):
+                # Chuỗi X10 mouse (\x1b[M + 3 byte tọa độ): hút bỏ 3 byte tọa độ để không rò rỉ vào phím kế tiếp
+                for _ in range(3):
+                    rm, _, _ = select.select([fd], [], [], 0.02)
+                    if not rm or not os.read(fd, 1):
+                        break
+                return '\x1b[M'
             csi_body = seq.decode('latin1', errors='ignore')
             final_ch = csi_body[-1]
             # Chuẩn hóa các phím điều hướng (kể cả khi kèm modifier như \x1b[1;2A)
@@ -1851,8 +1936,6 @@ def read_terminal_key(fd: int) -> str:
                 if b3:
                     return '\x1bO' + b3.decode('latin1', errors='ignore')
             return '\x1bO'
-        elif b2 == b'\x1b':
-            return '\x1b'
         return '\x1b' + b2.decode('latin1', errors='ignore')
 
     # Nếu là byte đầu của ký tự UTF-8 đa byte (ví dụ bộ gõ tiếng Việt đang bật), đọc nốt các byte tiếp theo
@@ -1887,13 +1970,27 @@ def interactive_select(
 
     current_idx = max(0, min(default_idx, len(items) - 1))
 
-    # Kiểm tra stdin / stderr tương tác
-    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+    # Kiểm tra stderr tương tác & lấy fd đọc bàn phím (hỗ trợ cả khi stdin là pipe bằng cách mở /dev/tty)
+    if not sys.stderr.isatty():
         return current_idx, items[current_idx]
 
     import signal
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
+    opened_tty_fd = None
+    if sys.stdin.isatty():
+        fd = sys.stdin.fileno()
+    else:
+        try:
+            opened_tty_fd = os.open("/dev/tty", os.O_RDONLY)
+            fd = opened_tty_fd
+        except OSError:
+            return current_idx, items[current_idx]
+
+    try:
+        old_settings = termios.tcgetattr(fd)
+    except Exception:
+        if opened_tty_fd is not None:
+            os.close(opened_tty_fd)
+        return current_idx, items[current_idx]
 
     try:
         t_rows = shutil.get_terminal_size().lines
@@ -1982,7 +2079,15 @@ def interactive_select(
         # Hiện lại con trỏ terminal
         sys.stderr.write("\033[?25h")
         sys.stderr.flush()
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
+        try:
+            termios.tcsetattr(fd, termios.TCSANOW, old_settings)
+        except Exception:
+            pass
+        if opened_tty_fd is not None:
+            try:
+                os.close(opened_tty_fd)
+            except Exception:
+                pass
         if prev_sigterm is not None:
             try:
                 signal.signal(signal.SIGTERM, prev_sigterm)
@@ -2111,7 +2216,16 @@ def cmd_status(root: Path, config: dict):
         agent = data.get("agent") or "kimi"
         model = data.get("model") or "(default)"
         effort = data.get("effort") or "-"
-        conc = str(data.get("concurrency", "On-demand"))
+        is_on_demand = is_opt or key in ("prReviewer", "issueResolver")
+        raw_c = data.get("concurrency")
+        if raw_c is None:
+            conc = "2" if key == "developer" else ("On-demand" if is_on_demand else "1")
+        else:
+            try:
+                c_int = int(raw_c)
+                conc = "On-demand" if (is_on_demand and c_int <= 1) else str(max(1, c_int))
+            except (ValueError, TypeError):
+                conc = str(raw_c)
         r_goal = "🎯 /goal" if _is_goal_mode_enabled(data, config) else "OFF"
         print(f"{label:<24} | {agent:<12} | {model:<26} | {effort:<8} | {conc:<10} | {r_goal}")
 
@@ -2279,9 +2393,12 @@ def cmd_set(root: Path, config: dict, args: list):
                 if isinstance(r_obj, dict):
                     r_obj["goalMode"] = new_goal_mode
             save_config(root, config)
-        sync_gemini_directive(root, config)
-        state_lbl = "BẬT (🎯 /goal)" if new_goal_mode else "TẮT (OFF)"
-        print(f"\n✅ Đã cập nhật Chế độ /goal = {state_lbl} cho TOÀN BỘ 11 vai trò trong 'orca-team.json' và '.agents/GEMINI.md'.\n")
+            sync_gemini_directive(root, config)
+            state_lbl = "BẬT (🎯 /goal)" if new_goal_mode else "TẮT (OFF)"
+            print(f"\n✅ Đã cập nhật Chế độ /goal = {state_lbl} cho TOÀN BỘ 11 vai trò trong 'orca-team.json' và '.agents/GEMINI.md'.\n")
+        else:
+            sync_gemini_directive(root, config)
+            print("📁 Đã đồng bộ lại '.agents/GEMINI.md' từ 'orca-team.json'.")
         return
 
     if sync_only and new_agent is None and new_model is None and new_effort is None and new_concurrency is None and new_goal_mode is None and toggle_enable is None:
@@ -2311,121 +2428,119 @@ def cmd_set(root: Path, config: dict, args: list):
         else:
             print(f"   Hiện tại: Agent={curr_agent} | Model={curr_model} | Effort={curr_effort}")
 
-        agent_list = list(KNOWN_AGENTS) if curr_agent in KNOWN_AGENTS else [curr_agent] + list(KNOWN_AGENTS)
-        agent_options = [ag + (" (hiện tại)" if ag == curr_agent else "") for ag in agent_list]
-        def_agent_idx = agent_list.index(curr_agent)
-        ag_i, _ = interactive_select(
-            f"👉 Chọn Agent cho vai trò [{role_label}]:",
-            agent_options,
-            default_idx=def_agent_idx
-        )
-        target_agent = agent_list[ag_i]
-        if target_agent != raw_curr_agent:
-            new_agent = target_agent
-
-        # Truy vấn động danh sách model từ CLI của provider target_agent
-        role_tier, def_eff = ROLE_TIER_MAP.get(role_key, ("tier2", "high"))
-        print(f"   ⏳ Đang truy vấn danh sách model từ CLI của '{target_agent}'...")
-        models, src_label = discover_models_for_agent(target_agent)
-        if models:
-            rec_idx = recommend_model_index(models, role_tier, def_eff)
-            model_menu = []
-            for i, m in enumerate(models, 1):
-                rec_str = f" ⭐ (khuyến nghị cho {role_label})" if i == rec_idx else ""
-                lbl_str = f" — {m['label']}" if m["label"] != m["id"] else ""
-                eff_str = f" [{m['bakedEffort']}]" if m.get("bakedEffort") else ""
-                model_menu.append(f"{m['id']}{lbl_str}{eff_str}{rec_str}")
-            model_menu.append("Nhập model ID tùy chỉnh...")
-            model_menu.append(f"Giữ nguyên ({curr_model})")
-            model_menu.append("Bỏ chọn model (mặc định Orca ADE)")
-
-            def_m_idx = rec_idx - 1
-            for idx_chk, m in enumerate(models):
-                if m["id"] == curr_model:
-                    def_m_idx = idx_chk
-                    break
-
-            m_i, _ = interactive_select(
-                f"👉 Chọn Model cho agent '{target_agent}' ({role_label}) — Nguồn: {src_label}:",
-                model_menu,
-                default_idx=def_m_idx
+        try:
+            agent_list = list(KNOWN_AGENTS) if curr_agent in KNOWN_AGENTS else [curr_agent] + list(KNOWN_AGENTS)
+            agent_options = [ag + (" (hiện tại)" if ag == curr_agent else "") for ag in agent_list]
+            def_agent_idx = agent_list.index(curr_agent)
+            ag_i, _ = interactive_select(
+                f"👉 Chọn Agent cho vai trò [{role_label}]:",
+                agent_options,
+                default_idx=def_agent_idx
             )
-            if m_i < len(models):
-                chosen = models[m_i]
-                new_model = chosen["id"]
-                if chosen.get("bakedEffort"):
-                    new_effort = chosen["bakedEffort"]
-            elif m_i == len(models):  # Nhập tùy chỉnh
-                try:
+            target_agent = agent_list[ag_i]
+            if target_agent != raw_curr_agent:
+                new_agent = target_agent
+
+            # Truy vấn động danh sách model từ CLI của provider target_agent
+            role_tier, def_eff = ROLE_TIER_MAP.get(role_key, ("tier2", "high"))
+            print(f"   ⏳ Đang truy vấn danh sách model từ CLI của '{target_agent}'...")
+            models, src_label = discover_models_for_agent(target_agent)
+            if models:
+                rec_idx = recommend_model_index(models, role_tier, def_eff)
+                model_menu = []
+                for i, m in enumerate(models, 1):
+                    rec_str = f" ⭐ (khuyến nghị cho {role_label})" if i == rec_idx else ""
+                    lbl_str = f" — {m['label']}" if m["label"] != m["id"] else ""
+                    eff_str = f" [{m['bakedEffort']}]" if m.get("bakedEffort") else ""
+                    model_menu.append(f"{m['id']}{lbl_str}{eff_str}{rec_str}")
+                model_menu.append("Nhập model ID tùy chỉnh...")
+                model_menu.append(f"Giữ nguyên ({curr_model})")
+                model_menu.append("Bỏ chọn model (mặc định Orca ADE)")
+
+                def_m_idx = rec_idx - 1
+                for idx_chk, m in enumerate(models):
+                    if m["id"] == curr_model:
+                        def_m_idx = idx_chk
+                        break
+
+                m_i, _ = interactive_select(
+                    f"👉 Chọn Model cho agent '{target_agent}' ({role_label}) — Nguồn: {src_label}:",
+                    model_menu,
+                    default_idx=def_m_idx
+                )
+                if m_i < len(models):
+                    chosen = models[m_i]
+                    new_model = chosen["id"]
+                    if chosen.get("bakedEffort"):
+                        new_effort = chosen["bakedEffort"]
+                elif m_i == len(models):  # Nhập tùy chỉnh
                     c_in = input("   Nhập model ID tùy chỉnh: ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    print("\n🚫 Không có input (stdin đã đóng) — hủy, không lưu thay đổi.", file=sys.stderr)
-                    sys.exit(1)
-                if c_in:
-                    new_model = c_in
-            elif m_i == len(models) + 1:  # Giữ nguyên
-                pass
-            else:  # Bỏ chọn model
-                new_model = ""
-        else:
-            try:
-                model_input = input(f"   Nhập model ID mới (Enter = giữ nguyên, 'none' = bỏ chọn model): ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n🚫 Không có input (stdin đã đóng) — hủy, không lưu thay đổi.", file=sys.stderr)
-                sys.exit(1)
-            if model_input.lower() == "none":
-                new_model = ""
-            elif model_input:
-                new_model = model_input
-
-        # Nếu model đã chọn chưa tích hợp sẵn effort trong ID và agent/model hỗ trợ --effort thì mới hỏi tiếp effort
-        final_model_id = new_model if new_model is not None else (current.get("model") or "")
-        baked_eff = _extract_baked_effort(final_model_id) if final_model_id else ""
-        if not _supports_effort_py(target_agent, final_model_id):
-            new_effort = ""
-            print(f"   ➔ Agent '{target_agent}' / model '{final_model_id or 'default'}' không dùng cờ --effort riêng (tự động đặt effort = -)")
-        elif baked_eff:
-            new_effort = baked_eff
-            print(f"   ➔ Reasoning Effort tự động theo model: {new_effort}")
-        else:
-            effort_choices = ["high (khuyến nghị suy luận cao)", "medium", "low", "none (tắt reasoning)"]
-            eff_def_idx = 0 if def_eff == "high" else (1 if def_eff == "medium" else 2)
-            eff_i, _ = interactive_select(
-                f"👉 Chọn Reasoning Effort cho model '{final_model_id or 'mặc định'}':",
-                effort_choices,
-                default_idx=eff_def_idx
-            )
-            if eff_i == 0:
-                new_effort = "high"
-            elif eff_i == 1:
-                new_effort = "medium"
-            elif eff_i == 2:
-                new_effort = "low"
+                    if c_in:
+                        new_model = c_in
+                elif m_i == len(models) + 1:  # Giữ nguyên
+                    pass
+                else:  # Bỏ chọn model
+                    new_model = ""
             else:
-                new_effort = ""
+                model_input = input(f"   Nhập model ID mới (Enter = giữ nguyên, 'none' = bỏ chọn model): ").strip()
+                if model_input.lower() == "none":
+                    new_model = ""
+                elif model_input:
+                    new_model = model_input
 
-        # Chọn số lượng agent song song (Concurrency) cho các vai trò Worker
-        if role_key != "coordinator":
-            default_conc_val = 2 if role_key == "developer" else 1
-            try:
-                curr_conc_val = max(1, min(5, int(current.get("concurrency") or default_conc_val)))
-            except (ValueError, TypeError):
-                curr_conc_val = default_conc_val
-            conc_choices = [
-                "1 agent",
-                "2 agents (khuyến nghị chạy song song 2 nhánh)" if role_key == "developer" else "2 agents (chạy song song 2 nhánh)",
-                "3 agents (chạy song song 3 nhánh)",
-                "4 agents (chạy song song 4 nhánh)",
-                "5 agents (chạy song song 5 nhánh)",
-            ]
-            c_i, _ = interactive_select(
-                f"👉 Chọn số lượng agent song song (Concurrency) cho vai trò [{role_label}]:",
-                conc_choices,
-                default_idx=curr_conc_val - 1
-            )
-            chosen_conc = c_i + 1
-            if chosen_conc != current.get("concurrency"):
-                new_concurrency = chosen_conc
+            # Nếu model đã chọn chưa tích hợp sẵn effort trong ID và agent/model hỗ trợ --effort thì mới hỏi tiếp effort
+            final_model_id = new_model if new_model is not None else (current.get("model") or "")
+            baked_eff = _extract_baked_effort(final_model_id) if final_model_id else ""
+            if not _supports_effort_py(target_agent, final_model_id):
+                new_effort = ""
+                print(f"   ➔ Agent '{target_agent}' / model '{final_model_id or 'default'}' không dùng cờ --effort riêng (tự động đặt effort = -)")
+            elif baked_eff:
+                new_effort = baked_eff
+                print(f"   ➔ Reasoning Effort tự động theo model: {new_effort}")
+            else:
+                effort_choices = ["high (khuyến nghị suy luận cao)", "medium", "low", "none (tắt reasoning)"]
+                eff_def_idx = 0 if def_eff == "high" else (1 if def_eff == "medium" else 2)
+                eff_i, _ = interactive_select(
+                    f"👉 Chọn Reasoning Effort cho model '{final_model_id or 'mặc định'}':",
+                    effort_choices,
+                    default_idx=eff_def_idx
+                )
+                if eff_i == 0:
+                    new_effort = "high"
+                elif eff_i == 1:
+                    new_effort = "medium"
+                elif eff_i == 2:
+                    new_effort = "low"
+                else:
+                    new_effort = ""
+
+            # Chọn số lượng agent song song (Concurrency) cho các vai trò Worker
+            if role_key != "coordinator":
+                default_conc_val = 2 if role_key == "developer" else 1
+                try:
+                    curr_conc_val = max(1, min(10, int(current.get("concurrency") or default_conc_val)))
+                except (ValueError, TypeError):
+                    curr_conc_val = default_conc_val
+                max_conc_menu = max(5, curr_conc_val)
+                conc_choices = []
+                for c_num in range(1, max_conc_menu + 1):
+                    if c_num == 1:
+                        conc_choices.append("1 agent" + (" ⭐ (khuyến nghị)" if default_conc_val == 1 else ""))
+                    elif c_num == 2 and role_key == "developer":
+                        conc_choices.append("2 agents ⭐ (khuyến nghị chạy song song 2 nhánh)")
+                    else:
+                        conc_choices.append(f"{c_num} agents (chạy song song {c_num} nhánh)")
+                c_i, _ = interactive_select(
+                    f"👉 Chọn số lượng agent song song (Concurrency) cho vai trò [{role_label}]:",
+                    conc_choices,
+                    default_idx=curr_conc_val - 1
+                )
+                chosen_conc = c_i + 1
+                if chosen_conc != current.get("concurrency"):
+                    new_concurrency = chosen_conc
+        except (EOFError, KeyboardInterrupt):
+            sys.stderr.write("\r\n🚫 Đã hủy thao tác cấu hình.\r\n")
+            sys.exit(130)
 
 
     # Apply changes
@@ -3597,8 +3712,6 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
             turn_has_git_commit = any(_GIT_COMMIT_CMD_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
             turn_has_git_amend = any(_GIT_COMMIT_AMEND_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
             turn_has_rev_inspect = any(_GIT_REV_INSPECT_CMD_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
-            if turn_has_git_commit:
-                ran_git_commit = True
 
             t_start = _parse_iso_utc(s.get("created_at"))
             t_comp = _parse_iso_utc(s.get("completed_at"))
@@ -3611,6 +3724,7 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                     t_tool_start = t_end
                     t_tool_end = t_end
                     matched_commit_in_turn = False
+                    saw_merge_header_in_turn = False
                     amend_popped = False
                     while j < len(steps) and steps[j].get("type") == "GENERIC":
                         c = str(steps[j].get("content") or "")
@@ -3621,7 +3735,9 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                         if turn_has_git_commit:
                             for m_c in _GIT_COMMIT_HEADER_RE.finditer(c):
                                 c_sha, c_subj = m_c.group(1), m_c.group(2).strip()
-                                if not _GIT_MERGE_SUBJ_RE.match(c_subj):
+                                if _GIT_MERGE_SUBJ_RE.match(c_subj):
+                                    saw_merge_header_in_turn = True
+                                else:
                                     if turn_has_git_amend and not amend_popped and commit_shas:
                                         commit_shas.pop()
                                         amend_popped = True
@@ -3629,8 +3745,10 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                                         commit_shas.append(c_sha)
                                     matched_commit_in_turn = True
                                     pending_truncated_commit = False
+                                    ran_git_commit = True
                             if (
                                 not matched_commit_in_turn
+                                and not saw_merge_header_in_turn
                                 and ("exited with code 0" in c or steps[j].get("status") != "ERROR")
                                 and ("<truncated" in c or "create mode " in c or "files changed" in c or "file changed" in c)
                             ):
@@ -3638,6 +3756,7 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                                     commit_shas.pop()
                                     amend_popped = True
                                 pending_truncated_commit = True
+                                ran_git_commit = True
                         elif pending_truncated_commit and turn_has_rev_inspect:
                             m_rev = re.search(r"(?m)^(?:commit\s+)?([0-9a-f]{7,40})\b", c)
                             if m_rev:
@@ -3982,16 +4101,31 @@ def _collect_git_diff_stats(
             until_ts = int(comp_dt.timestamp()) + 15
             target_ref = "HEAD" if has_wt_dir else (wt_name if (wt_name and wt_name != "-" and _git("rev-parse", "--verify", "-q", wt_name)) else "HEAD")
             shas = []
+            reflog_checked = False
             if has_wt_dir or (target_ref != "HEAD"):
-                rf_out = _git("reflog", "show", "--format=%H|%gs", f"--since=@{since_ts}", f"--until=@{until_ts}", target_ref, t=3)
-                for rln in rf_out.splitlines():
-                    if "|" not in rln:
-                        continue
-                    r_sha, r_gs = rln.split("|", 1)
-                    if r_gs.startswith(("commit:", "commit (amend):", "commit (initial):")) and r_sha.strip() not in shas:
-                        shas.append(r_sha.strip())
-            if not shas:
+                rf_chk = subprocess.run(
+                    ["git", "-C", git_dir, "reflog", "show", "--format=%H|%gs", f"--since=@{since_ts}", f"--until=@{until_ts}", target_ref],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if rf_chk.returncode == 0:
+                    reflog_checked = True
+                    for rln in rf_chk.stdout.splitlines():
+                        if "|" not in rln:
+                            continue
+                        r_sha, r_gs = rln.split("|", 1)
+                        if r_gs.startswith(("commit:", "commit (amend):", "commit (initial):")) and r_sha.strip() not in shas:
+                            shas.append(r_sha.strip())
+            if not shas and not reflog_checked:
                 rev_args = ["rev-list", "--no-merges", f"--since=@{since_ts}", f"--until=@{until_ts}", target_ref]
+                if wt_name and not wt_name.startswith(("dev-worker", "devops-worker", "ui-worker")):
+                    for excl_cand in ("main", "master", "develop", "dev-worker", "devops-worker", "ui-worker"):
+                        if _git("rev-parse", "--verify", "-q", excl_cand):
+                            rev_args.append(f"^{excl_cand}")
+                    for extra_k in range(2, 11):
+                        for pfx in ("dev-worker", "devops-worker", "ui-worker"):
+                            cand_br = f"{pfx}-{extra_k}"
+                            if _git("rev-parse", "--verify", "-q", cand_br):
+                                rev_args.append(f"^{cand_br}")
                 shas = [s.strip() for s in _git(*rev_args, t=3).splitlines() if s.strip()]
             if shas:
                 res["commits"] = len(shas)
@@ -4031,8 +4165,12 @@ def _collect_git_diff_stats(
         base_ref = None
         if head_sha and main_sha and head_sha != main_sha:
             base_ref = _git("merge-base", "HEAD", main_sha) or main_sha
-            if wt_name not in ("dev-worker", "ui-worker"):
-                for src_br in ("dev-worker", "ui-worker"):
+            if not wt_name.startswith(("dev-worker", "devops-worker", "ui-worker")):
+                upstream_brs = ["dev-worker", "devops-worker", "ui-worker"]
+                for extra_k in range(2, 11):
+                    for pfx in ("dev-worker", "devops-worker", "ui-worker"):
+                        upstream_brs.append(f"{pfx}-{extra_k}")
+                for src_br in upstream_brs:
                     cand_sha = _git("rev-parse", "--verify", "-q", src_br)
                     if not cand_sha:
                         continue
@@ -4232,9 +4370,15 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         slot_wt = f"{base_wt}-{k_slot}"
                         if slot_wt not in g_txt:
                             missing_slot_wts.append(slot_wt)
+            coord_goal_cfg = _is_goal_mode_enabled(config.get("coordinator") or {}, config)
+            any_worker_goal_cfg = any(
+                _is_goal_mode_enabled(roles_cfg_chk.get(rk) or {}, config)
+                for rk, _, _ in role_wt_map_chk
+            )
             missing_goal_directive = (
-                _is_goal_mode_enabled(config.get("coordinator") or {}, config)
-                and "CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH" not in g_txt
+                (coord_goal_cfg and "CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH" not in g_txt)
+                or (not coord_goal_cfg and not any_worker_goal_cfg and "CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH" in g_txt)
+                or (not coord_goal_cfg and "(`goalMode: true` trên `coordinator`)" in g_txt)
             )
             if missing_slot_wts or missing_goal_directive:
                 if auto_fix:
@@ -4680,7 +4824,12 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 files_mod_count = git_stats["files"] if (git_stats["files"] > 0 or t_metrics) else reported_files_count
 
                 # Chuẩn bị các cột hiển thị
-                role_col = f"{d_id[:10]}.. ({wt_name})"[:27]
+                raw_role_col = f"{d_id[:10]}.. ({wt_name})"
+                if len(raw_role_col) > 27:
+                    prefix_len = max(4, 27 - len(wt_name) - 5)
+                    role_col = f"{d_id[:prefix_len]}.. ({wt_name})"[:27]
+                else:
+                    role_col = raw_role_col
                 model_col = md_name[:26]
                 wall_s = duration_secs if duration_secs > 0 else t_metrics.get("wall_secs", 0.0)
                 idle_s = t_metrics.get("idle_since_last_secs") if t_metrics else last_out_idle_secs
