@@ -27,7 +27,7 @@ if [[ $# -gt 3 ]]; then
 fi
 
 KNOWN_AGENTS_RE='^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$'
-KNOWN_ROLES_RE='^(coord|coordinator|leader|lead|architect|orchestrator|dev|developer|developers|coder|fullstack|backend|doc|docs|fix|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|reviewer|issue|issueresolver|hotfix)$'
+KNOWN_ROLES_RE='^((coord|coordinator|leader|lead|architect|orchestrator|dev|developer|developers|coder|fullstack|backend|doc|docs|fix|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|pr-review|reviewer|issue|issueresolver|issue-fix|hotfix)(-worker)?(-[0-9]+)?)$'
 
 TASK_TITLE="$1"
 if [[ $# -eq 2 ]]; then
@@ -41,7 +41,7 @@ if [[ $# -eq 2 ]]; then
   elif [[ "${TASK_TITLE:l}" =~ ^hotfix-issue-[0-9]+$ ]]; then
     REQ_AGENT="issue"
   elif [[ "${TASK_TITLE:l}" =~ ^(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker(-[0-9]+)?$ ]]; then
-    REQ_AGENT="${match[1]}"
+    REQ_AGENT="${TASK_TITLE:l}"
   else
     REQ_AGENT="dev"
   fi
@@ -80,7 +80,7 @@ if [[ "$REQ_AGENT" =~ $KNOWN_AGENTS_RE ]]; then
   elif [[ "${TASK_TITLE:l}" =~ ^hotfix-issue-[0-9]+$ ]]; then
     ROLE_QUERY="issue"
   elif [[ "${TASK_TITLE:l}" =~ ^(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker(-[0-9]+)?$ ]]; then
-    ROLE_QUERY="${match[1]}"
+    ROLE_QUERY="${TASK_TITLE:l}"
   else
     ROLE_QUERY="dev"
   fi
@@ -94,7 +94,7 @@ EFF_ROLE_QUERY="$ROLE_QUERY"
 CONFIG_AGENT=""
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   CONFIG_AGENT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$ROLE_QUERY" 2>/dev/null || true)
-  if [[ "$CONFIG_AGENT" == "none" ]] && ! [[ "$REQ_AGENT" =~ $KNOWN_AGENTS_RE ]] && ! [[ "$ROLE_QUERY" =~ ^(pr|prreviewer|reviewer|issue|issueresolver|hotfix|fix)$ ]]; then
+  if [[ "$CONFIG_AGENT" == "none" ]] && ! [[ "$REQ_AGENT" =~ $KNOWN_AGENTS_RE ]] && ! [[ "$ROLE_QUERY" =~ ^(pr|prreviewer|pr-review|pr-worker|pr-review-worker|reviewer|issue|issueresolver|issue-fix|issue-worker|issue-fix-worker|hotfix|fix)(-worker)?(-[0-9]+)?$ ]]; then
     echo "❌ Vai trò '$ROLE_QUERY' hiện đang tắt (disabled) trong orca-team.json. Hãy bật bằng: orca-team set $ROLE_QUERY --enable" >&2
     exit 1
   fi
@@ -161,11 +161,19 @@ fi
 # Xác định định danh worktree cố định theo từng vai trò & số lượng slot song song (Concurrency)
 ROLE_WORKTREE="dev-worker"
 EXPLICIT_SLOT=false
+ROLE_BASE_KEY="${ROLE_QUERY:l}"
+ROLE_EXPLICIT_NUM=""
+if [[ "$ROLE_BASE_KEY" =~ ^([a-z0-9_-]+?)(-worker)?-([0-9]+)$ ]]; then
+  ROLE_BASE_KEY="${match[1]}"
+  ROLE_EXPLICIT_NUM="${match[3]}"
+elif [[ "$ROLE_BASE_KEY" =~ ^([a-z0-9_-]+?)-worker$ ]]; then
+  ROLE_BASE_KEY="${match[1]}"
+fi
 if [[ "${TASK_TITLE:l}" =~ ^(review-pr-[0-9]+|hotfix-issue-[0-9]+|(dev|devops|qa|sec|bench|re|ui|critic|pr|issue)-worker(-[0-9]+)?)$ ]]; then
   ROLE_WORKTREE="${TASK_TITLE:l}"
   EXPLICIT_SLOT=true
 else
-  case "${ROLE_QUERY:l}" in
+  case "$ROLE_BASE_KEY" in
     devops|devopsspecialist|infra|sre|ops) ROLE_WORKTREE="devops-worker" ;;
     sec|security|bughunter|bug|auditor) ROLE_WORKTREE="sec-worker" ;;
     qa|test|tester|sdet) ROLE_WORKTREE="qa-worker" ;;
@@ -173,10 +181,16 @@ else
     bench|benchmark|perf|performance|benchspecialist) ROLE_WORKTREE="bench-worker" ;;
     re|reverse|rea|respecialist) ROLE_WORKTREE="re-worker" ;;
     critic|research|researcher|challenger|advocate|criticspecialist) ROLE_WORKTREE="critic-worker" ;;
-    pr|prreviewer|reviewer) ROLE_WORKTREE="pr-worker" ;;
-    issue|issueresolver|hotfix|fix) ROLE_WORKTREE="issue-worker" ;;
+    pr|prreviewer|pr-review|reviewer) ROLE_WORKTREE="pr-worker" ;;
+    issue|issueresolver|issue-fix|hotfix|fix) ROLE_WORKTREE="issue-worker" ;;
     *) ROLE_WORKTREE="dev-worker" ;;
   esac
+  if [[ -n "$ROLE_EXPLICIT_NUM" ]]; then
+    EXPLICIT_SLOT=true
+    if (( ROLE_EXPLICIT_NUM >= 2 )); then
+      ROLE_WORKTREE="${ROLE_WORKTREE}-${ROLE_EXPLICIT_NUM}"
+    fi
+  fi
 fi
 
 # Tự động chọn Worktree Slot đang rảnh (<role>-worker .. <role>-worker-N) khi role có Concurrency >= 2
@@ -272,21 +286,23 @@ if [[ "$SPEC" != "[ROLE:"* ]]; then
       MERGE_DEV_CMD="${MERGE_DEV_CMD} && (! git rev-parse --verify --quiet dev-worker-${k_slot} >/dev/null || git merge --no-edit dev-worker-${k_slot})"
     done
   fi
-  case "${ROLE_QUERY:l}" in
+  MERGE_DEVOPS_UPSTREAM="${MERGE_DEV_CMD} && (! git rev-parse --verify --quiet ui-worker >/dev/null || git merge --no-edit ui-worker)"
+  MERGE_ALL_CMD="${MERGE_DEV_CMD} && (! git rev-parse --verify --quiet devops-worker >/dev/null || git merge --no-edit devops-worker) && (! git rev-parse --verify --quiet ui-worker >/dev/null || git merge --no-edit ui-worker)"
+  case "$ROLE_BASE_KEY" in
     devops|devopsspecialist|infra|sre|ops)
-      SPEC="[ROLE: PRINCIPAL DEVOPS/SRE] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. CẤM VƯỢT RÀO & CHỐNG TREO (ANTI-RABBIT-HOLE): Chỉ sửa Infra/Docker/K8s/DB/CI; CẤM sửa business logic của Dev; CẤM TUYỆT ĐỐI tự ý dịch ngược hoặc đọc/cat/strings/grep trực tiếp file binary trong container (nếu cần giải phẫu binary phải báo Coordinator giao re-worker); CẤM đặt dấu backtick (\`) bên trong chuỗi nháy kép (\"...\") của bash/zsh/python -c vì shell sẽ thực thi command substitution gây biến rỗng và treo vòng lặp stdout! RÀ SOÁT RUNTIME LOGS & BÁO CÁO COORDINATOR (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): (1) Đầu ca chạy git merge --no-edit main và orca orchestration check --terminal <worker_handle> --json; khi hộp thư có bàn giao nhánh Dev đã được Coordinator duyệt cần build/rollout thì chạy ${MERGE_DEV_CMD}, (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! Bắt buộc chờ qua chu kỳ chạy thật của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start (kubectl logs/docker logs KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) cùng trạng thái DB, (3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, SSLHandshakeException, Auth 401/403 hay health=ERROR nào lúc runtime (hoặc nếu vướng lỗi quá 15 turns chưa xử lý được ở tầng Infra/DB) ➔ BẮT BUỘC dừng đào bới và trình báo ngay lên Coordinator: orca orchestration send --from <worker_handle> --type escalation --subject 'Runtime Log Error' --body '<Chi tiết pod & log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json (KHÔNG dùng --to '@all'!) rồi chờ chỉ đạo hoặc báo worker-done --outcome failed (CẤM báo succeeded khi runtime log còn lỗi!); khi sạch lỗi 100%, gộp gửi handoff và worker-done trong cùng 1 lệnh (&&): orca orchestration send --from <worker_handle> --type handoff --subject 'Infra Ready' --body '<Pod/Port/Log sạch 100%>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json."
+      SPEC="[ROLE: PRINCIPAL DEVOPS/SRE] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Dockerfile multi-stage/non-root, K8s probes/limits, DB migration idempotent có rollback. CẤM VƯỢT RÀO & CHỐNG TREO (ANTI-RABBIT-HOLE): Chỉ sửa Infra/Docker/K8s/DB/CI; CẤM sửa business logic của Dev; CẤM TUYỆT ĐỐI tự ý dịch ngược hoặc đọc/cat/strings/grep trực tiếp file binary trong container (nếu cần giải phẫu binary phải báo Coordinator giao re-worker); CẤM đặt dấu backtick (\`) bên trong chuỗi nháy kép (\"...\") của bash/zsh/python -c vì shell sẽ thực thi command substitution gây biến rỗng và treo vòng lặp stdout! RÀ SOÁT RUNTIME LOGS & BÁO CÁO COORDINATOR (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): (1) Đầu ca chạy git merge --no-edit main và orca orchestration check --terminal <worker_handle> --json; khi hộp thư có bàn giao nhánh Dev đã được Coordinator duyệt cần build/rollout thì chạy ${MERGE_DEVOPS_UPSTREAM}, (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! Bắt buộc chờ qua chu kỳ chạy thật của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start (kubectl logs/docker logs KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) cùng trạng thái DB, (3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, SSLHandshakeException, Auth 401/403 hay health=ERROR nào lúc runtime (hoặc nếu vướng lỗi quá 15 turns chưa xử lý được ở tầng Infra/DB) ➔ BẮT BUỘC dừng đào bới và trình báo ngay lên Coordinator: orca orchestration send --from <worker_handle> --type escalation --subject 'Runtime Log Error' --body '<Chi tiết pod & log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json (KHÔNG dùng --to '@all'!) rồi chờ chỉ đạo hoặc báo worker-done --outcome failed (CẤM báo succeeded khi runtime log còn lỗi!); khi sạch lỗi 100%, gộp gửi handoff và worker-done trong cùng 1 lệnh (&&): orca orchestration send --from <worker_handle> --type handoff --subject 'Infra Ready' --body '<Pod/Port/Log sạch 100%>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json."
       ;;
     sec|security|bughunter|bug|auditor)
-      SPEC="[ROLE: PRINCIPAL SECURITY AUDITOR] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Soi git diff theo OWASP Top 10 (SQLi, Injection, Auth/JWT, IDOR, SSRF, XSS), Race Conditions/Deadlock, Resource/Memory Leaks và Secret Leaks. CẤM VƯỢT RÀO: Read-Only Audit & PoC; CẤM tự sửa code tính năng của Dev. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Chạy ${MERGE_DEV_CMD} để diff đúng commit mới (nếu có xung đột merge chỉ giữ code từ nhánh được kiểm toán, CẤM tạo commit mới sửa code tính năng); nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng orca orchestration send --from <worker_handle> --type escalation --subject 'Security Vulnerability Found' --body '<file:line & PoC trình Coordinator ra quyết định>' --task-id <task_id> --dispatch-id <dispatch_id> --json; liệt kê rõ file:line theo 4 mục [OWASP, Concurrency, Leaks, Secrets] và chốt SECURITY_VERDICT: PASS hoặc BLOCK."
+      SPEC="[ROLE: PRINCIPAL SECURITY AUDITOR] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Soi git diff theo OWASP Top 10 (SQLi, Injection, Auth/JWT, IDOR, SSRF, XSS), Race Conditions/Deadlock, Resource/Memory Leaks và Secret Leaks. CẤM VƯỢT RÀO: Read-Only Audit & PoC; CẤM tự sửa code tính năng của Dev. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Chạy ${MERGE_ALL_CMD} để diff đúng commit mới (nếu có xung đột merge chỉ giữ code từ nhánh được kiểm toán, CẤM tạo commit mới sửa code tính năng); nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng orca orchestration send --from <worker_handle> --type escalation --subject 'Security Vulnerability Found' --body '<file:line & PoC trình Coordinator ra quyết định>' --task-id <task_id> --dispatch-id <dispatch_id> --json; liệt kê rõ file:line theo 4 mục [OWASP, Concurrency, Leaks, Secrets] và chốt SECURITY_VERDICT: PASS hoặc BLOCK."
       ;;
     qa|test|tester|sdet)
-      SPEC="[ROLE: PRINCIPAL QA/SDET] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) và 100% Acceptance Criteria. CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test; CẤM TUYỆT ĐỐI sửa business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót không quét pod DB/Kafka! GIAO TIẾP & BÁO CÁO COORDINATOR (BẮT BUỘC): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận nhánh/môi trường từ Coordinator và chạy ${MERGE_DEV_CMD} trước khi test, (2) Chạy lệnh test thật (Jest kèm --forceExit) VÀ kiểm toán trực tiếp TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, (3) Nếu vướng môi trường phải hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json; nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs hay DB ➔ BẮT BUỘC trình ngay lên Coordinator bằng orca orchestration send --from <worker_handle> --type escalation --subject 'QA Runtime/Test Failure' --body '<Trích xuất log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt QA_VERDICT: FAIL!"
+      SPEC="[ROLE: PRINCIPAL QA/SDET] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) và 100% Acceptance Criteria. CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test; CẤM TUYỆT ĐỐI sửa business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót không quét pod DB/Kafka! GIAO TIẾP & BÁO CÁO COORDINATOR (BẮT BUỘC): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận nhánh/môi trường từ Coordinator và chạy ${MERGE_ALL_CMD} trước khi test, (2) Chạy lệnh test thật (Jest kèm --forceExit) VÀ kiểm toán trực tiếp TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, (3) Nếu vướng môi trường phải hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json; nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs hay DB ➔ BẮT BUỘC trình ngay lên Coordinator bằng orca orchestration send --from <worker_handle> --type escalation --subject 'QA Runtime/Test Failure' --body '<Trích xuất log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt QA_VERDICT: FAIL!"
       ;;
     ui|ux|frontend|uispecialist|design)
       SPEC="[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: CSS/DOM chuẩn xác, Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend core/DB schema. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Đồng bộ nhánh mới nhất (git merge --no-edit main), Build/typecheck EXIT_CODE=0, không lỗi Console, git commit kèm Commit Hash vào nhánh ${ROLE_WORKTREE} và gộp gửi handoff + worker-done trong cùng 1 lệnh (&&): orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready: ${ROLE_WORKTREE} (<commit_hash>)' --body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json."
       ;;
     bench|benchmark|perf|performance|benchspecialist)
-      SPEC="[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và chạy ${MERGE_DEV_CMD} để đo trên code mới nhất, (2) Xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM; nếu phát hiện nghẽn cổ chai, gửi ngay orca orchestration send --from <worker_handle> --type escalation --subject 'Perf Bottleneck Found' --body '<file:line/query gây nghẽn trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND."
+      SPEC="[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và chạy ${MERGE_ALL_CMD} để đo trên code mới nhất, (2) Xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM; nếu phát hiện nghẽn cổ chai, gửi ngay orca orchestration send --from <worker_handle> --type escalation --subject 'Perf Bottleneck Found' --body '<file:line/query gây nghẽn trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt PERF_VERDICT: PASS hoặc BOTTLENECK_FOUND."
       ;;
     re|reverse|rea|respecialist)
       SPEC="[ROLE: PRINCIPAL REVERSE ENGINEER (REA)] Nhiệm vụ: ${CLEAN_SPEC}. Chuẩn: Bắt buộc kích hoạt skill reverse-engineer-anything (morluto/rea) & công cụ rea/rea-agents (open_binary, inspect_artifact, analyze_javascript_application, inspect_web_network_capture...). CẤM VƯỢT RÀO: (1) Read-Only đối với source code dự án (chỉ xuất Đặc tả Kỹ thuật Clean-Room, CẤM copy code decompile rối rắm vào repo), (2) CẤM dùng REA cho source code repo thông thường, (3) CẤM đoán mò hành vi hộp đen khi không có Evidence từ REA! GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Xuất Hồ sơ Evidence thực tế (Target SHA-256/Path, REA tool đã chạy, Symbol/Offset/Decompiled Function/Struct/Protocol contract, Unknowns/Limitations), gộp gửi handoff + worker-done trong cùng 1 lệnh (&&): orca orchestration send --from <worker_handle> --type handoff --subject 'REA Clean-Room Spec' --body '<Tóm tắt Spec trình Coordinator duyệt và giao Dev>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt RE_VERDICT: EVIDENCE_COMPLETE hoặc BLOCKED_BY_UNKNOWN."

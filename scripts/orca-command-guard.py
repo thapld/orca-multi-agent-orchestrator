@@ -60,12 +60,26 @@ EXCLUDED_CHILD_MARKERS = (
 
 AGENT_PIDS_FILE = ".orca-agent-pids.json"
 INTERPRETERS = {"node", "python", "python3", "bun", "deno", "ruby", "perl"}
-AGENT_EXEC_NAMES = {
+LEAF_AGENT_EXEC_NAMES = {
     "agy",
     "antigravity",
     "claude",
     "kimi",
+    "kimi-code",
     "codex",
+    "gemini",
+    "opencode",
+    "opencode2",
+    "cursor-agent",
+    "aider",
+    "goose",
+    "copilot",
+    "codebuddy",
+    "cbc",
+    "muse",
+    "omp",
+}
+AGENT_EXEC_NAMES = LEAF_AGENT_EXEC_NAMES | {
     "orca",
     "electron",
     "orca-team",
@@ -146,15 +160,6 @@ def _load_agent_pids(tasks_dir: Path) -> set[int]:
     return set(_load_agent_pids_ordered(tasks_dir))
 
 
-LEAF_AGENT_EXEC_NAMES = {
-    "agy",
-    "antigravity",
-    "claude",
-    "kimi",
-    "codex",
-}
-
-
 def _looks_like_leaf_agent(args_str: str) -> bool:
     """Return True ONLY for leaf worker CLI / language_server processes that directly spawn tool commands.
     Excludes GUI/PTY host daemons like `Orca Helper.app`, `Orca.app`, `Antigravity.app` (Electron), `orca-team`, etc."""
@@ -172,7 +177,8 @@ def _looks_like_leaf_agent(args_str: str) -> bool:
         for raw_arg in non_flag_args[:2]:
             script_arg = raw_arg.lower().replace("\\", "/")
             script_base = os.path.basename(script_arg)
-            if script_base in LEAF_AGENT_EXEC_NAMES:
+            script_stem = os.path.splitext(script_base)[0]
+            if script_base in LEAF_AGENT_EXEC_NAMES or script_stem in LEAF_AGENT_EXEC_NAMES:
                 return True
             if any(
                 pkg in script_arg
@@ -182,25 +188,33 @@ def _looks_like_leaf_agent(args_str: str) -> bool:
                     "/antigravity-cli/",
                     "/kimi-cli/",
                     "@openai/codex",
+                    "@google/gemini-cli",
+                    "/gemini-cli/",
+                    "@github/copilot",
+                    "/opencode",
+                    "/cursor-agent",
+                    "/codebuddy",
+                    "/aider",
                 )
             ):
                 return True
         return False
-    return exe in LEAF_AGENT_EXEC_NAMES
+    exe_stem = os.path.splitext(exe)[0]
+    return exe in LEAF_AGENT_EXEC_NAMES or exe_stem in LEAF_AGENT_EXEC_NAMES
 
 
 def _load_leaf_agent_pid(tasks_dir: Path, proc_table: dict[int, tuple[int, int, str]]) -> int | None:
-    """Return the innermost leaf agent PID recorded for this conversation (raw[0]) if and only if it is still alive
-    and is a leaf agent process. Never falls back to parent shells or global `Orca Helper.app` / `Orca.app`."""
+    """Return the innermost alive leaf agent PID recorded for this conversation.
+    Never matches parent shells (`-zsh`, `login`) or global GUI/PTY daemons (`Orca Helper.app`, `Orca.app`)."""
     try:
         raw = json.loads((tasks_dir / AGENT_PIDS_FILE).read_text(encoding="utf-8"))
         if not isinstance(raw, list) or not raw:
             return None
-        first = raw[0]
-        if str(first).isdigit():
-            pid = int(first)
-            if pid in proc_table and _looks_like_leaf_agent(proc_table[pid][2]):
-                return pid
+        for item in raw:
+            if str(item).isdigit():
+                pid = int(item)
+                if pid in proc_table and _looks_like_leaf_agent(proc_table[pid][2]):
+                    return pid
     except Exception:
         pass
     return None
@@ -218,7 +232,8 @@ def _looks_like_agent(args_str: str) -> bool:
         for raw_arg in non_flag_args[:2]:
             script_arg = raw_arg.lower().replace("\\", "/")
             script_base = os.path.basename(script_arg)
-            if script_base in AGENT_EXEC_NAMES:
+            script_stem = os.path.splitext(script_base)[0]
+            if script_base in AGENT_EXEC_NAMES or script_stem in AGENT_EXEC_NAMES:
                 return True
             if any(
                 pkg in script_arg
@@ -229,6 +244,13 @@ def _looks_like_agent(args_str: str) -> bool:
                     "/antigravity-cli/",
                     "/kimi-cli/",
                     "@openai/codex",
+                    "@google/gemini-cli",
+                    "/gemini-cli/",
+                    "@github/copilot",
+                    "/opencode",
+                    "/cursor-agent",
+                    "/codebuddy",
+                    "/aider",
                     "/orca.app/",
                 )
             ):
@@ -246,7 +268,8 @@ def _looks_like_agent(args_str: str) -> bool:
 
 _INTERP_INLINE_RE = re.compile(
     r"(?:^|[\s;&|(])(?:\S*/)?(?P<interp>python3?(?:\.\d+)?|node|bun|deno|ruby|perl|bash|zsh|sh|dash|ksh)"
-    r"(?P<opts>(?:\s+(?:-(?:W|X|r|C|I)\s+\S+|--?[a-zA-Z0-9_=./-]+))*)\s+(?P<flag>-(?:[a-zA-Z0-9]*[ce]|p)|--eval)(?:\s+|=)?\""
+    r"(?P<opts>(?:\s+(?:(?:-(?:W|X|r|C|I)|--(?:input-type|require|import|loader|experimental-loader|conditions))\s+\S+|--?[a-zA-Z0-9_=./-]+))*)"
+    r"\s+(?P<flag>-(?:[a-zA-Z0-9]*[ce]|p)|--(?:eval|print))(?:\s+|=)?\""
 )
 _UNQUOTED_HEREDOC_RE = re.compile(
     r"(?:^|[\s;&|(])(?:"
@@ -264,7 +287,7 @@ _SAFE_TEXT_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _PROSE_FLAG_PREFIX_RE = re.compile(
-    r"(?:--(?:spec|body|question|objective|task-title|display-name|comment|resolution|result|subject|message|notes|title|prompt|summary|description|reason)|-m)(?:\s+|=)"
+    r"(?:--(?:spec|body|question|objective|task-title|display-name|comment|resolution|result|subject|message|notes|title|prompt|summary|description|reason)|-[a-zA-Z]*m)(?:\s+|=)"
 )
 _WHILE_TRUE_RE = re.compile(r"\bwhile\s*(?:\(\s*)?(?:True|1)(?:\s*\))?\s*:")
 
@@ -915,11 +938,11 @@ def _is_raw_binary_cat_risk(cmd: str) -> bool:
                 if re.match(r"^/(?:app|bin|sbin|opt|usr/bin|usr/sbin|usr/local/bin|usr/local/sbin)/", arg):
                     if not _SAFE_TEXT_PATH_RE.search(arg):
                         return True
-    # 2. Direct shell `docker exec ... cat /app/binary` (with optional quotes around path args)
+    # 2. Direct shell `docker exec ... cat /app/binary` (including `sh -c "cd /app; cat /app/binary"`)
     shell_sanitized = _strip_non_shell_quoted_heredocs(sanitized)
     for m in re.finditer(
         r"(?:^|[;&|()\n]|\b(?:sudo|env|time|nohup|command)\s+|-[a-zA-Z]*c\s+['\"])\s*"
-        r"docker\s+exec\s+[^\n|>&;]+?\b['\"]?(?:(?:/usr)?/bin/)?cat['\"]?(?:\s+--?[a-zA-Z0-9_-]*)*((?:\s+(?:['\"][^'\n\"|>&;]+['\"]|[^\s|>&;\"')]+))+)"
+        r"docker\s+exec\s+(?:[^\n|>&;]+?|(?:[^\n|>&;]+?\b(?:sh|bash|zsh|dash)\s+-[a-zA-Z]*c\s+['\"][^\n\"']*?[;&]\s*))(?<!-)\b['\"]?(?:(?:/usr)?/bin/)?cat['\"]?(?:\s+--?[a-zA-Z0-9_-]*)*((?:\s+(?:['\"][^'\n\"|>&;]+['\"]|[^\s|>&;\"')]+))+)"
         r"(?:\s+2>(?:/dev/null|&1))*\s*(?:[\"')](?!\s*[,:])|\s*(?:;|&&|\|\|)|\s*$)",
         shell_sanitized,
         re.MULTILINE,
@@ -932,16 +955,34 @@ def _is_raw_binary_cat_risk(cmd: str) -> bool:
     return False
 
 
+_PY_CMD_EXEC_RE = re.compile(
+    r"(?:(?:^|[\s;&|()]|-[a-zA-Z0-9]*c\s+['\"])\s*(?:\S*/)?python3?(?:\.\d+)?(?:\s+(?:-(?:W|X)\s+\S+|--?[a-zA-Z0-9_=.-]+))*(?:\s+-[a-zA-Z0-9]*c\b|[^\n|;&]*<<)|\|\s*(?:\S*/)?python3?(?:\.\d+)?\b)"
+)
+
+
 def _is_unbounded_find_loop_risk(cmd: str) -> bool:
     """Detect unbounded `while True:` / `while 1:` + `.find(` loops in inline/heredoc/piped Python scripts."""
     sanitized = _strip_non_exec_prose_flags(cmd)
-    if not _WHILE_TRUE_RE.search(sanitized) or not re.search(
-        r"(?:\bpython3?(?:\.\d+)?(?:\s+(?:-(?:W|X)\s+\S+|--?[a-zA-Z0-9_=.-]+))*(?:\s+-[a-zA-Z0-9]*c\b|[^\n|;&]*<<)|\bpython3?(?:\.\d+)?\b[^\n|;&]*<<|\|\s*(?:\S*/)?python3?(?:\.\d+)?\b)",
-        sanitized,
-    ):
+    if not _WHILE_TRUE_RE.search(sanitized) or not _PY_CMD_EXEC_RE.search(sanitized):
         return False
     matches = list(_WHILE_TRUE_RE.finditer(sanitized))
     for idx, m in enumerate(matches):
+        # Verify this `while True:` belongs to a python inline/heredoc/piped invocation (not a grep/rg search pattern)
+        prefix_to_m = sanitized[: m.start()]
+        last_cmd_sep = max(
+            prefix_to_m.rfind("&&"),
+            prefix_to_m.rfind("||"),
+            prefix_to_m.rfind(";"),
+        )
+        # If there is no python invocation in the current/enclosing command segment before `m`,
+        # nor a `| python3` after `m` before the next `;`/`&&`/`||`, skip (e.g. `grep "while True:"`)
+        after_to_sep = re.split(r"(?:\s+(?:&&|\|\|)\s+|['\"]\s*(?:;|&&|\|\|))", sanitized[m.start() :], maxsplit=1)[0]
+        in_py_before = bool(_PY_CMD_EXEC_RE.search(prefix_to_m[max(0, last_cmd_sep) :])) or (
+            "\n" in prefix_to_m and bool(re.search(r"(?:\bpython3?(?:\.\d+)?\b[^\n|;&]*<<|\b(?:cat|tee)\b[^\n|;&]*<<[^\n]*\|\s*(?:\S*/)?python3?(?:\.\d+)?\b)", prefix_to_m))
+        )
+        in_py_pipe_after = bool(re.search(r"\|\s*(?:\S*/)?python3?(?:\.\d+)?\b", after_to_sep))
+        if not in_py_before and not in_py_pipe_after:
+            continue
         next_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(sanitized)
         raw_segment = sanitized[m.end() : next_start]
         # Bound multiline while-loop body by indentation so trailing statements after the loop cannot exempt it
@@ -1223,8 +1264,6 @@ def _collect_descendants(root_pid: int, children_map: dict[int, list[int]]) -> l
 
 def _normalize_cmd_hint(raw_cmd: str) -> str:
     s = re.sub(r"\\\r?\n\s*", " ", raw_cmd).strip()
-    if len(s) >= 158 and " " in s:
-        s = s.rsplit(None, 1)[0]
     prev = None
     while s and s != prev:
         prev = s
@@ -1235,17 +1274,18 @@ def _normalize_cmd_hint(raw_cmd: str) -> str:
             s,
         ).strip()
         s = re.sub(
-            r"^(?:\s*(?:set\s+-[a-zA-Z0-9\s-]+|(?:cd|pushd|popd)\s+[^;&|\n]+|export\s+[^;&|\n]+|unset\s+[^;&|\n]+|ulimit\s+[^;&|\n]+|source\s+[^;&|\n]+|\.\s+[^;&|\n]+)\s*(?:&&|;|$)\s*)+",
+            r"^(?:\s*(?:set\s+[+-][a-zA-Z0-9\s+-]+|(?:cd|pushd|popd)\s+[^;&|\n]+|export\s+[^;&|\n]+|unset\s+[^;&|\n]+|ulimit\s+[^;&|\n]+|source\s+[^;&|\n]+|\.\s+[^;&|\n]+)\s*(?:&&|;|$)\s*)+",
             "",
             s,
         ).strip()
         s = re.sub(
-            r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)(?:\s+|(?:\s*;\s*)+|$))+",
+            r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\$\([^)]*\)|\S*)(?:\s+|(?:\s*;\s*)+|$))+",
             "",
             s,
         ).strip()
     s = re.sub(r"<<-?\s*['\"\\]?[A-Za-z0-9_.-]+['\"]?", "", s)
     s = re.sub(r"(?:^|(?<=[\s;&|()]))(?:\d*>&\d+|\d*>>?\s*\S+|&>>?\s*\S+)", "", s)
+    s = re.sub(r"(?:^|(?<=[\s;&|()]))(?:\d*>>?|\d*<|&>>?)\s*$", "", s)
     s = re.sub(r"[\s)};]+$", "", s)
     return s.strip()
 
@@ -1261,7 +1301,15 @@ def _extract_hint_tokens(raw_hint: str) -> list[str]:
             continue
         if "=" in t and not t.startswith("-"):
             continue
-        tokens.append(t)
+        if "$" in t or t.startswith("~") or "\\" in t:
+            for sub in re.split(r"(?:^~|\$\{[^}]*\}|\$\([^)]*\)|\$[A-Za-z0-9_@#?*!-]+|\\[\"'$`\\])", t):
+                sub_clean = sub.strip("'\"`;|&()")
+                if len(sub_clean) > 2 and sub_clean not in tokens:
+                    tokens.append(sub_clean)
+                    if len(tokens) >= 6:
+                        break
+        else:
+            tokens.append(t)
         if len(tokens) >= 6:
             break
     return tokens
@@ -1431,27 +1479,35 @@ def _kill_runaway_process_for_log(
                     matched: list[tuple[int, int, str]] = []
                     has_any_tokens = False
                     for hint in reversed(cmd_hints):
-                        norm_hint = _normalize_cmd_hint(hint)
-                        exact = [
-                            c
-                            for c in candidate_children
-                            if (hint and hint in c[2]) or (norm_hint and norm_hint in c[2])
+                        sub_hints = [hint] + [
+                            seg.strip()
+                            for seg in reversed(re.split(r"(?:\s*&&\s*|\s*\|\|\s*|\s*;\s*)", hint))
+                            if seg.strip() and seg.strip() != hint
                         ]
-                        if len(exact) == 1:
-                            matched = exact
-                            break
-                        hint_tokens = _extract_hint_tokens(hint)
-                        if hint_tokens:
-                            has_any_tokens = True
-                        tok_match = [
-                            c
-                            for c in candidate_children
-                            if (hint and hint in c[2])
-                            or (norm_hint and norm_hint in c[2])
-                            or (hint_tokens and all(t in c[2] for t in hint_tokens))
-                        ]
-                        if len(tok_match) == 1:
-                            matched = tok_match
+                        for shint in sub_hints:
+                            norm_hint = _normalize_cmd_hint(shint)
+                            exact = [
+                                c
+                                for c in candidate_children
+                                if (shint and shint in c[2]) or (norm_hint and norm_hint in c[2])
+                            ]
+                            if len(exact) == 1:
+                                matched = exact
+                                break
+                            hint_tokens = _extract_hint_tokens(shint)
+                            if hint_tokens:
+                                has_any_tokens = True
+                            tok_match = [
+                                c
+                                for c in candidate_children
+                                if (shint and shint in c[2])
+                                or (norm_hint and norm_hint in c[2])
+                                or (hint_tokens and all(t in c[2] for t in hint_tokens))
+                            ]
+                            if len(tok_match) == 1:
+                                matched = tok_match
+                                break
+                        if matched:
                             break
                     if not matched and len(candidate_children) == 1:
                         # Chỉ fallback khi require_jest=True (đã xác nhận trình chạy là jest/vitest và etime khớp log_idle_s)
@@ -1713,7 +1769,9 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
                     cmap = {}
             if len(cmap) > 200:
                 cmap = dict(list(cmap.items())[-120:])
-            joined_cmd = re.sub(r"\\\r?\n\s*", " ", cmd)
+            stripped_cmd = _strip_quoted_heredocs(_strip_non_piped_cat_tee_heredocs(cmd))
+            joined_cmd = re.sub(r"\\\r?\n\s*", " ", stripped_cmd)
+            joined_cmd = re.sub(r"(-[a-zA-Z]*c\s+['\"])\s*\r?\n\s*", r"\1", joined_cmd)
             non_comment_lines: list[str] = []
             for raw_ln in joined_cmd.splitlines():
                 s_ln = raw_ln.strip()
@@ -1722,18 +1780,26 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
                 norm_ln = _normalize_cmd_hint(s_ln)
                 if norm_ln and not norm_ln.startswith("#"):
                     non_comment_lines.append(norm_ln)
-            first_line_cmd = non_comment_lines[0][:160] if non_comment_lines else ""
-            if str(step_idx).isdigit() and first_line_cmd:
+            hint_candidates: list[str] = []
+            if non_comment_lines:
+                hint_candidates.append(non_comment_lines[0][:160])
+                if len(non_comment_lines) > 1 and non_comment_lines[-1][:160] not in hint_candidates:
+                    hint_candidates.append(non_comment_lines[-1][:160])
+            if str(step_idx).isdigit() and hint_candidates:
                 base_idx = int(step_idx)
                 for key in (f"task-{base_idx}.log", f"task-{base_idx + 1}.log", f"task-{base_idx + 2}.log"):
+                    log_p = tasks_dir / key
+                    try:
+                        if event == "PreToolUse" and log_p.exists() and log_p.stat().st_size > 0:
+                            continue
+                    except Exception:
+                        pass
                     prev = cmap.get(key)
-                    if isinstance(prev, list):
-                        if first_line_cmd not in prev:
-                            cmap[key] = (prev + [first_line_cmd])[-4:]
-                    elif isinstance(prev, str) and prev and prev != first_line_cmd:
-                        cmap[key] = [prev, first_line_cmd]
-                    else:
-                        cmap[key] = [first_line_cmd]
+                    cur_list = list(prev) if isinstance(prev, list) else ([prev] if isinstance(prev, str) and prev else [])
+                    for hc in hint_candidates:
+                        if hc and hc not in cur_list:
+                            cur_list.append(hc)
+                    cmap[key] = cur_list[-4:]
             tmp_cmap = cmd_map_file.with_name(f"{cmd_map_file.name}.{os.getpid()}.tmp")
             tmp_cmap.write_text(json.dumps(cmap), encoding="utf-8")
             os.replace(tmp_cmap, cmd_map_file)

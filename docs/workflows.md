@@ -26,8 +26,8 @@ sequenceDiagram
     Lead->>Orca: orca orchestration run-create
     Lead->>Orca: orca orchestration task-create (Tạo Task DAG có dependency)
 
-    par Khởi chạy Workers (1 Role = 1 Worktree định danh, gom nhóm Terminal Tabs)
-        Lead->>Orca: worker-start Dev (path:.../dev-worker hoặc new-child: dev-worker)
+    par Khởi chạy Workers (Fixed-Pool Worktree Slots theo Concurrency, gom nhóm Terminal Tabs)
+        Lead->>Orca: worker-start Dev (path:.../dev-worker, dev-worker-2..N)
         Lead->>Orca: worker-start DevOps (path:.../devops-worker hoặc new-child: devops-worker)
     end
 
@@ -37,8 +37,8 @@ sequenceDiagram
     end
 
     Devs->>Orca: send --from <handle> --type handoff --subject "Dev Handoff" --body "DEV_HANDOFF: branch=dev-worker, commit=..."
-    Devs->>Orca: send --from <handle> --type worker_done --outcome succeeded
-    Lead->>Orca: check --ack <DELIVERY_ID>, worker-read & worker-retain (Kiểm duyệt Commit Hash & Build=0)
+    Devs->>Orca: worker-done --terminal <handle> --outcome succeeded
+    Lead->>Orca: check [--ack <DELIVERY_ID>] --wait, git log -n 1 --stat & worker-retain (Kiểm duyệt Commit Hash & Build=0)
 
     Lead->>Orca: worker-start QA & Security Auditor (Mở tab mới trong worktree qa-worker & sec-worker)
     QA->>Orca: send --from <handle> --type worker_done --outcome succeeded (QA_VERDICT: PASS + Runtime Log Clean)

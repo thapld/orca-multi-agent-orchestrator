@@ -85,7 +85,7 @@
   *(On-demand Git: Review PR dùng `orca-review-pr <PR_NUM>` | Sửa Issue dùng `orca-hotfix <ISSUE_ID>`)*
 
 ### BƯỚC 3: REACTIVE WAIT, CƠ CHẾ PHẢN BIỆN ĐỒNG THUẬN (ANTI-AUTOCRACY) & KIỂM CHỨNG ZERO-TRUST
-- 🔴 **BẮT BUỘC lắng nghe đủ 4 tín hiệu (`worker_done,escalation,question,handoff`) và DỪNG GỌI TOOL sau khi chạy (các lần wait kế tiếp BẮT BUỘC thêm `--ack <DELIVERY_ID>` của batch trước để không bị lặp lại batch cũ):**
+- 🔴 **BẮT BUỘC lắng nghe đủ 4 tín hiệu (`worker_done,escalation,question,handoff`) và DỪNG GỌI TOOL sau khi chạy (CẤM gọi thêm lệnh `check --wait` thứ 2 song song khi lệnh `check --wait` trước đang chạy ngầm ở background `task-XX`; các lần wait kế tiếp sau khi lệnh trước đã trả kết quả BẮT BUỘC thêm `--ack <DELIVERY_ID>` của batch trước để không bị lặp lại batch cũ):**
   ```bash
   orca orchestration check [--ack <DELIVERY_ID>] --wait --types "worker_done,escalation,question,handoff" --timeout-ms 900000 --json
   ```

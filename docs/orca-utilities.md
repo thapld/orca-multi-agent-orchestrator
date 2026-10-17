@@ -4,9 +4,9 @@ Orca không chỉ là một trình chạy CLI mà là một **Agent Development 
 
 ---
 
-## 1. Git Worktree Isolation (`orca worktree` — 1 Role = 1 Worktree Định Danh + Gom Nhóm Terminal Tabs)
+## 1. Git Worktree Isolation (`orca worktree` — Fixed-Pool Worktree Slots Theo Concurrency + Gom Nhóm Terminal Tabs)
 
-Mỗi vai trò (`dev-worker`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`, `critic-worker`) trong Orca được cấp **1 Git Worktree định danh duy nhất**. Ở các task tiếp theo của cùng vai trò, hệ thống truyền `--worktree path:<abs_path>` vào `orca orchestration worker-start` để **mở và gom nhóm các Terminal Tab mới ngay bên trong worktree đó**, giải quyết triệt để xung đột mã nguồn mà không đẻ ra các worktree trùng lặp (`-2`, `-3`).
+Mỗi vai trò trong Orca được cấp đúng **`N` Git Worktree Slots cố định theo cấu hình `Concurrency`** (`dev-worker`, `dev-worker-2..N`, `devops-worker`, `qa-worker`, `sec-worker`, `bench-worker`, `re-worker`, `ui-worker`, `critic-worker`). Ở các task tiếp theo của cùng slot, hệ thống truyền `--worktree path:<abs_path>` vào `orca orchestration worker-start` để **mở và gom nhóm các Terminal Tab mới ngay bên trong worktree slot đó**, giải quyết triệt để xung đột mã nguồn và `git index.lock` mà không đẻ ra các worktree dư thừa vượt quá số slot `Concurrency`.
 
 ### Các lệnh phổ biến:
 ```bash

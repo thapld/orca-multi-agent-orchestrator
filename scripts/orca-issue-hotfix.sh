@@ -47,7 +47,7 @@ ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
 ROLE_OR_AGENT="${2:-issue}"
 ROLE_OR_AGENT="${ROLE_OR_AGENT:l}"
 KNOWN_AGENTS_RE='^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$'
-KNOWN_ROLES_RE='^(coord|coordinator|leader|lead|architect|orchestrator|dev|developer|developers|coder|fullstack|backend|doc|docs|fix|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|reviewer|issue|issueresolver|hotfix)$'
+KNOWN_ROLES_RE='^((coord|coordinator|leader|lead|architect|orchestrator|dev|developer|developers|coder|fullstack|backend|doc|docs|fix|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|pr-review|reviewer|issue|issueresolver|issue-fix|hotfix)(-worker)?(-[0-9]+)?)$'
 if ! [[ "$ROLE_OR_AGENT" =~ $KNOWN_AGENTS_RE || "$ROLE_OR_AGENT" =~ $KNOWN_ROLES_RE ]]; then
   echo "❌ Role hoặc agent không hợp lệ: '${2:-issue}'. Hãy dùng role hợp lệ hoặc tên agent CLI." >&2
   exit 1
@@ -55,7 +55,7 @@ fi
 CONFIG_AGENT=""
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   CONFIG_AGENT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$ROLE_OR_AGENT" 2>/dev/null || true)
-  if [[ "$CONFIG_AGENT" == "none" ]] && ! [[ "$ROLE_OR_AGENT" =~ $KNOWN_AGENTS_RE ]] && ! [[ "$ROLE_OR_AGENT" =~ ^(pr|prreviewer|reviewer|issue|issueresolver|hotfix|fix)$ ]]; then
+  if [[ "$CONFIG_AGENT" == "none" ]] && ! [[ "$ROLE_OR_AGENT" =~ $KNOWN_AGENTS_RE ]] && ! [[ "$ROLE_OR_AGENT" =~ ^(pr|prreviewer|pr-review|pr-worker|pr-review-worker|reviewer|issue|issueresolver|issue-fix|issue-worker|issue-fix-worker|hotfix|fix)(-worker)?(-[0-9]+)?$ ]]; then
     echo "❌ Vai trò '$ROLE_OR_AGENT' hiện đang tắt (disabled) trong orca-team.json. Hãy bật bằng: orca-team set $ROLE_OR_AGENT --enable" >&2
     exit 1
   fi
@@ -115,7 +115,7 @@ if [[ -n "$EXISTING_WT_PATH" && -d "$EXISTING_WT_PATH" ]]; then
 fi
 
 if [[ "$GOAL_ENABLED" != "false" ]]; then
-  ISSUE_PROMPT="${ISSUE_PROMPT} CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); khi chạy Jest bắt buộc kèm --forceExit chống treo open handles; khi lệnh chạy ngầm (task-XX) CẤM gọi manage_task(status) lặp lại mỗi vài giây gây phình turns; CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; khi báo cáo xong BẮT BUỘC nối gộp 'orca orchestration send ... && orca orchestration worker-done ...' trong cùng 1 lệnh shell rồi xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal."
+  ISSUE_PROMPT="${ISSUE_PROMPT} CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); khi chạy Jest bắt buộc kèm --forceExit chống treo open handles; khi lệnh chạy ngầm (task-XX) CẤM gọi manage_task(status) lặp lại mỗi vài giây gây phình turns; CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; nếu chạy trong phiên Orchestration có Preamble thì nối gộp 'orca orchestration send ... && orca orchestration worker-done ...' trong cùng 1 lệnh shell, sau khi hoàn tất 100% mới xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal."
 fi
 
 echo "🐋 [Orca Hotfix] Đang khởi tạo worktree song song cho Issue #$ISSUE_NUM bằng agent: $AGENT..."

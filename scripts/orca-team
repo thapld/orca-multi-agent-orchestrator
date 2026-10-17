@@ -85,7 +85,21 @@ ROLE_ALIASES = {
     "researcher": "criticSpecialist",
     "challenger": "criticSpecialist",
     "advocate": "criticSpecialist",
-    "criticspecialist": "criticSpecialist"
+    "criticspecialist": "criticSpecialist",
+    "dev-worker": "developer",
+    "qa-worker": "qa",
+    "sec-worker": "security",
+    "devops-worker": "devopsSpecialist",
+    "bench-worker": "benchSpecialist",
+    "re-worker": "reSpecialist",
+    "ui-worker": "uiSpecialist",
+    "critic-worker": "criticSpecialist",
+    "pr-worker": "prReviewer",
+    "pr-review": "prReviewer",
+    "pr-review-worker": "prReviewer",
+    "issue-worker": "issueResolver",
+    "issue-fix": "issueResolver",
+    "issue-fix-worker": "issueResolver",
 }
 
 ROLE_LABELS = {
@@ -268,16 +282,36 @@ def _infer_canonical_from_role_header(raw_task: str) -> str:
     return "developer"
 
 
-def _resolve_role_and_slot(role_input: str, raw_task: str) -> tuple[str, str]:
-    """Chuẩn hóa role_input (kể cả khi truyền tên slot như 'dev-worker-2', 'dev-2', 'ui-worker-2') thành (canonical_role, slot_branch_hint)."""
+def _is_role_or_slot_token(tok: str) -> bool:
+    """Return True if tok is a recognized role alias or slot name (e.g. 'dev', 'devops-worker', 'dev-worker-2', 'dev-2')."""
+    t = (tok or "").strip().lower()
+    if not t:
+        return False
+    if t in ROLE_ALIASES:
+        return True
+    m = re.match(r"^([a-z0-9_-]+?)(?:-worker)?(?:-(\d+))?$", t)
+    if not m:
+        return False
+    base = m.group(1)
+    return base in ROLE_ALIASES or f"{base}-worker" in ROLE_ALIASES
+
+
+def _resolve_role_and_slot(role_input: str, raw_task: str = "") -> tuple[str, str]:
+    """Chuẩn hóa role_input (kể cả khi truyền tên slot như 'dev-worker-2', 'dev-2', 'devops-worker', 'ui-worker-2') thành (canonical_role, slot_branch_hint)."""
     raw_r = (role_input or "dev").strip().lower()
-    m_slot = re.match(r"^([a-z0-9_]+?)(?:-worker)?-(\d+)$", raw_r)
+    m_slot = re.match(r"^([a-z0-9_-]+?)(?:-worker)?(?:-(\d+))?$", raw_r)
     slot_num = None
     base_r = raw_r
     if m_slot:
         base_r = m_slot.group(1)
-        slot_num = int(m_slot.group(2))
-    canonical = ROLE_ALIASES.get(raw_r) or ROLE_ALIASES.get(base_r) or ROLE_ALIASES.get(f"{base_r}-worker") or "developer"
+        if m_slot.group(2):
+            slot_num = int(m_slot.group(2))
+    canonical = (
+        ROLE_ALIASES.get(raw_r)
+        or ROLE_ALIASES.get(base_r)
+        or ROLE_ALIASES.get(re.sub(r"-worker$", "", base_r))
+        or "developer"
+    )
     if canonical == "coordinator":
         canonical = "developer"
     base_wt_map = {
@@ -289,14 +323,14 @@ def _resolve_role_and_slot(role_input: str, raw_task: str) -> tuple[str, str]:
         "benchSpecialist": "bench-worker",
         "reSpecialist": "re-worker",
         "uiSpecialist": "ui-worker",
-        "prReviewer": "pr-review-worker",
-        "issueResolver": "issue-fix-worker",
+        "prReviewer": "pr-worker",
+        "issueResolver": "issue-worker",
     }
     base_wt = base_wt_map.get(canonical, "dev-worker")
     if slot_num and slot_num >= 2:
         slot_branch = f"{base_wt}-{slot_num}"
     else:
-        m_in_task = re.search(rf"\b({re.escape(base_wt)}(?:-\d+)?)\b", raw_task)
+        m_in_task = re.search(rf"\b({re.escape(base_wt)}(?:-\d+)?)\b", raw_task or "")
         slot_branch = m_in_task.group(1) if m_in_task else base_wt
     return canonical, slot_branch
 
@@ -345,9 +379,10 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_o
             downstream.append("Bench")
         tpl = tpl.replace("điều phối cho DevOps/QA/Sec/Bench", f"điều phối cho {'/'.join(downstream)}")
         try:
-            dev_conc = max(1, min(10, int(((roles.get("developer") or {}).get("concurrency")) or 1)))
+            raw_dev_c = (roles.get("developer") or {}).get("concurrency")
+            dev_conc = max(1, min(10, int(2 if raw_dev_c is None else raw_dev_c)))
         except (ValueError, TypeError):
-            dev_conc = 1
+            dev_conc = 2
         extra_dev_branches = [f"dev-worker-{k}" for k in range(2, dev_conc + 1)]
         if extra_dev_branches:
             extra_dev_merges = " && ".join(
@@ -358,9 +393,9 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_o
                 "(! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker)",
                 f"(! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker) && {extra_dev_merges}",
             )
-        if canonical in ("security", "qa", "benchSpecialist"):
+        if canonical in ("devopsSpecialist", "security", "qa", "benchSpecialist"):
             other_upstream = []
-            if devops_on:
+            if devops_on and canonical != "devopsSpecialist":
                 try:
                     do_c = max(1, min(10, int(((roles.get("devopsSpecialist") or {}).get("concurrency")) or 1)))
                 except (ValueError, TypeError):
@@ -486,7 +521,7 @@ def cmd_spec(args: list, explicit_root: Path = None):
         task_parts = [explicit_task] if explicit_task is not None else []
     else:
         first_tok = clean_args[0].strip().lower()
-        if not leading_dd and first_tok in ROLE_ALIASES:
+        if not leading_dd and _is_role_or_slot_token(first_tok):
             role_arg = clean_args[0]
             task_parts = [explicit_task] if explicit_task is not None else clean_args[1:]
         elif not leading_dd and len(clean_args) == 2 and re.match(r"^[a-z0-9_-]{1,20}$", clean_args[0]):
@@ -743,10 +778,11 @@ def _is_role_enabled(data: dict, is_optional: bool = True) -> bool:
     if not isinstance(data, dict):
         return False
     ag = data.get("agent")
-    has_valid_agent = bool(ag and ag != "none")
+    ag_norm = str(ag).strip().lower() if ag is not None else ""
     if "enabled" in data:
-        return bool(data["enabled"]) and has_valid_agent
-    return has_valid_agent if is_optional else True
+        return bool(data["enabled"]) and ag_norm != "none"
+    has_valid_agent = bool(ag_norm and ag_norm not in ("none", "null"))
+    return has_valid_agent if is_optional else (ag_norm != "none")
 
 def _sync_discovery_links(root: Path, config: dict, create_missing: bool = False):
     """Đảm bảo GEMINI.md và CLAUDE.md/AGENTS.md ở root luôn trỏ tới .agents/GEMINI.md (không ghi đè file riêng của user)."""
@@ -1036,7 +1072,7 @@ def sync_gemini_directive(root: Path, config: dict):
     exec_host = str(config.get("executionHost") or "local").strip()
     host_label = "Local Machine" if exec_host == "local" else f"Remote SSH ({exec_host})"
     content = re.sub(
-        r"^- \*\*Execution Host:\*\* `[^`]*` \([^)]*\)",
+        r"^- \*\*Execution Host:\*\* `[^`]*` \([^\n|]*?\)+(?=\s*\|\s*\*\*Orca CLI:\*\*)",
         f"- **Execution Host:** `{exec_host}` ({host_label})",
         content,
         flags=re.M,
@@ -1257,7 +1293,7 @@ def sync_gemini_directive(root: Path, config: dict):
 
     step3_full = (
         '### BƯỚC 3: REACTIVE WAIT, CƠ CHẾ PHẢN BIỆN ĐỒNG THUẬN (ANTI-AUTOCRACY) & KIỂM CHỨNG ZERO-TRUST\n'
-        '- 🔴 **BẮT BUỘC lắng nghe đủ 4 tín hiệu (`worker_done,escalation,question,handoff`) và DỪNG GỌI TOOL sau khi chạy (các lần wait kế tiếp BẮT BUỘC thêm `--ack <DELIVERY_ID>` của batch trước để không bị lặp lại batch cũ):**\n'
+        '- 🔴 **BẮT BUỘC lắng nghe đủ 4 tín hiệu (`worker_done,escalation,question,handoff`) và DỪNG GỌI TOOL NGAY LẬP TỨC sau khi chạy (khi lệnh `check --wait` hoặc `worker-retain && check --wait` chuyển sang background `task-XX`, tuyệt đối CẤM gọi thêm lệnh `check --wait` thứ 2 song song khi `task-XX` chưa trả kết quả; các lần wait kế tiếp BẮT BUỘC thêm `--ack <DELIVERY_ID>` của batch trước để không bị lặp lại batch cũ):**\n'
         '  ```bash\n'
         '  orca orchestration check [--ack <DELIVERY_ID>] --wait --types "worker_done,escalation,question,handoff" --timeout-ms 900000 --json\n'
         '  ```\n'
@@ -2314,7 +2350,14 @@ def cmd_set(root: Path, config: dict, args: list):
 
     role_raw = args[0].lower()
     is_all_roles = role_raw in ("all", "*", "team")
-    role_key = "all" if is_all_roles else ROLE_ALIASES.get(role_raw)
+    if is_all_roles:
+        role_key = "all"
+    elif role_raw in ROLE_ALIASES:
+        role_key = ROLE_ALIASES.get(role_raw)
+    elif _is_role_or_slot_token(role_raw):
+        role_key = _resolve_role_and_slot(role_raw)[0]
+    else:
+        role_key = None
     if not role_key:
         print(f"❌ Vai trò không hợp lệ: '{role_raw}'.", file=sys.stderr)
         print(f"👉 Hợp lệ: all, {', '.join(sorted(set(ROLE_ALIASES.keys())))}", file=sys.stderr)
@@ -2930,7 +2973,12 @@ def cmd_get(root: Path, config: dict, args: list):
         sys.exit(1)
 
     role_raw = args[0].lower()
-    role_key = ROLE_ALIASES.get(role_raw, role_raw)
+    if role_raw in ROLE_ALIASES:
+        role_key = ROLE_ALIASES[role_raw]
+    elif _is_role_or_slot_token(role_raw):
+        role_key = _resolve_role_and_slot(role_raw)[0]
+    else:
+        role_key = role_raw
     if role_key not in ROLE_LABELS:
         print(f"❌ Không có cấu hình cho role '{args[0]}'.", file=sys.stderr)
         sys.exit(1)
@@ -3681,6 +3729,8 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
                         break
                 u_positions = [p for p in range(floor_pos + 1, rc_pos) if steps[p].get("type") == "USER_INPUT"]
                 if not u_positions:
+                    if floor_pos > prev_rc_pos:
+                        return min(rc_pos, floor_pos + 1)
                     for b_pos in range(rc_pos - 1, prev_rc_pos, -1):
                         if steps[b_pos].get("type") == "USER_INPUT":
                             return b_pos
@@ -3960,11 +4010,15 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                 else:
                     llm_secs += min(90.0, max(0.8, ot / avg_rate))
 
+    from datetime import datetime, timezone, timedelta
     t0 = _parse_iso_utc(steps[0].get("created_at"))
-    tN_cands = [
-        _parse_iso_utc(steps[-1].get("completed_at")),
-        _parse_iso_utc(steps[-1].get("created_at")),
-    ]
+    t_last_created = _parse_iso_utc(steps[-1].get("created_at"))
+    t_last_comp = _parse_iso_utc(steps[-1].get("completed_at"))
+    tN_cands = [t_last_comp, t_last_created]
+    if steps[-1].get("type") == "PLANNER_RESPONSE" and not t_last_comp and t_last_created:
+        last_ot = int(steps[-1].get("output_tokens") or 0)
+        last_est_dt = min(90.0, max(0.8, last_ot / avg_rate))
+        tN_cands.append(t_last_created + timedelta(seconds=last_est_dt))
     m_last_comp = re.search(r"Completed At:\s*([^\n\r]+)", str(steps[-1].get("content") or ""))
     if m_last_comp:
         tN_cands.append(_parse_iso_utc(m_last_comp.group(1).strip()))
@@ -3973,7 +4027,6 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
     active_secs = llm_secs + tool_secs
     wall_secs = max(active_secs, (tN - t0).total_seconds()) if (t0 and tN) else active_secs
     idle_wait_secs = max(idle_wait_secs, max(0.0, wall_secs - active_secs))
-    from datetime import datetime, timezone
     now_utc = datetime.now(timezone.utc)
     idle_since_last = max(0.0, (now_utc - tN).total_seconds()) if tN else 0.0
 

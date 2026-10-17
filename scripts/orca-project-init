@@ -916,12 +916,12 @@ fi
 
 if [[ "$host_choice_idx" == "2" ]]; then
   EXEC_HOST="ssh:orb"
-  HOST_LABEL="SSH Target (ssh:orb)"
+  HOST_LABEL="Remote SSH (ssh:orb)"
 elif [[ "$host_choice_idx" == "3" ]]; then
   printf "   Nhập tên SSH host target trong Orca (ví dụ: ssh:remote-server): "
   read -r ssh_target_input || true
   EXEC_HOST="${ssh_target_input:-ssh:orb}"
-  HOST_LABEL="SSH Target ($EXEC_HOST)"
+  HOST_LABEL="Remote SSH ($EXEC_HOST)"
 else
   EXEC_HOST="local"
   HOST_LABEL="Local Machine"
@@ -1283,7 +1283,7 @@ ${EXTRA_STEP2_POST_QA}  \`\`\`
   *(On-demand Git: Review PR dùng \`orca-review-pr <PR_NUM>\` | Sửa Issue dùng \`orca-hotfix <ISSUE_ID>\`)*
 
 ### BƯỚC 3: REACTIVE WAIT, CƠ CHẾ PHẢN BIỆN ĐỒNG THUẬN (ANTI-AUTOCRACY) & KIỂM CHỨNG ZERO-TRUST
-- 🔴 **BẮT BUỘC lắng nghe đủ 4 tín hiệu (\`worker_done,escalation,question,handoff\`) và DỪNG GỌI TOOL sau khi chạy (các lần wait kế tiếp BẮT BUỘC thêm \`--ack <DELIVERY_ID>\` của batch trước để không bị lặp lại batch cũ):**
+- 🔴 **BẮT BUỘC lắng nghe đủ 4 tín hiệu (\`worker_done,escalation,question,handoff\`) và DỪNG GỌI TOOL sau khi chạy (CẤM gọi thêm lệnh \`check --wait\` thứ 2 song song khi lệnh \`check --wait\` trước đang chạy ngầm ở background \`task-XX\`; các lần wait kế tiếp sau khi lệnh trước đã trả kết quả BẮT BUỘC thêm \`--ack <DELIVERY_ID>\` của batch trước để không bị lặp lại batch cũ):**
   \`\`\`bash
   orca orchestration check [--ack <DELIVERY_ID>] --wait --types "worker_done,escalation,question,handoff" --timeout-ms 900000 --json
   \`\`\`
@@ -1293,7 +1293,7 @@ ${C_STEP3_BULLET}
   - **Nhận \`question\` (từ \`ask\`):** Coordinator phản hồi qua \`orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json\`.
 ${C_HANDOFF_LINE}
 ${C_ESCALATION_LINE}
-- **Nghiệm thu Zero-Trust:** Đọc \`orca orchestration worker-read --dispatch <DISPATCH_ID> --json\` và \`orca orchestration inbox --json\`. **BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:
+- **Nghiệm thu Zero-Trust:** Đọc trực tiếp nội dung báo cáo trong trường \`messages\` trả về từ \`orca orchestration check --wait --json\` kết hợp đối chiếu độc lập bằng \`git log -n 1 --stat <ten-worktree>\` (chỉ gọi \`orca orchestration worker-read --dispatch <DISPATCH_ID> --json\` khi worker bị treo/timeout không gửi tin nhắn; **CẤM** gọi \`orca orchestration inbox --json\` vì lệnh này tải lại toàn bộ lịch sử tin nhắn cũ gây phình context). **BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:
 ${C_ZT1_LINE}
   2. **Bỏ sót/Che giấu Lỗi Runtime (Log Blindness/Masking):** DevOps/QA báo \`PASS\` nhưng thiếu bằng chứng quét **Full Container/Pod Logs** (từ lúc start trên toàn bộ App + DB + Kafka/Broker sau chu kỳ background job), dùng \`--since\` ngắn cắt lỗi, bỏ sót pod phụ trợ (\`postgres\`, \`kafka\`), hoặc QA sửa test script nới lỏng assert / phớt lờ trạng thái lỗi (\`ERROR\`, \`FATAL\`, \`Exception\`, \`SQL error\`, \`SSLHandshakeException\`, \`health: ERROR\`, \`close_status: FAILED\`) thay vì gửi \`escalation\`.
 ${C_ZT3_LINE}
