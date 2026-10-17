@@ -143,7 +143,7 @@ ROLE_SPEC_TEMPLATES = {
         "Chuẩn: (1) Lập giả thuyết ĐỘC LẬP từ bằng chứng thô TRƯỚC khi đọc giả thuyết Leader (chống anchoring), kiểm chứng bằng file:line, git log/blame/diff, DB state, runtime logs; "
         "(2) Chỉ ra giả định sai, điểm mù/blast radius, quy kết nhầm role (App vs Infra/DB) và phương án đối trọng. "
         "CẤM VƯỢT RÀO: Read-Only 100% với code app & infra; CẤM hùa theo Leader khi chưa tự kiểm chứng; CẤM phản biện không kèm bằng chứng file:line/log. "
-        "GIAO THỨC TRANH BIỆN (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id từ Preamble): "
+        "GIAO THỨC TRANH BIỆN (BẮT BUỘC giữ nguyên --from cho ask; --from/--task-id/--dispatch-id cho send từ Preamble): "
         "(a) Bác bỏ ➔ orca orchestration ask --from <worker_handle> --question 'CRITIC_CHALLENGE vòng <n>/3: <bằng chứng file:line/log> | Đề xuất: <phương án>' --timeout-ms 900000 --json "
         "(lệnh chặn tới khi Leader reply; timeout thì chạy lại với --resume <message_id>), kiểm chứng phản hồi của Leader rồi lặp tối đa 3 vòng; "
         "(b) Đồng thuận ➔ orca orchestration send --from <worker_handle> --type handoff --subject 'Critic Consensus' "
@@ -196,24 +196,27 @@ ROLE_SPEC_TEMPLATES = {
     ),
     "uiSpecialist": (
         "[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: {task}. "
-        "CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend/DB. BẰNG CHỨNG BẮT BUỘC: Build/typecheck EXIT_CODE=0, không lỗi Console, "
+        "Chuẩn: CSS/DOM chuẩn xác, Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. "
+        "CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend core/DB schema. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Build/typecheck EXIT_CODE=0, không lỗi Console, "
         "kiểm tra snapshot/screenshot Mobile/Desktop, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready' "
-        "--body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit."
+        "--body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit kèm Commit Hash."
     ),
     "prReviewer": (
         "[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: {task}. "
-        "Chuẩn: Rà soát từng dòng diff (architecture, correctness, security, performance, test coverage). "
-        "CẤM VƯỢT RÀO: Read-Only review; báo cáo file:line rõ ràng và chốt PR_VERDICT: APPROVE hoặc REQUEST_CHANGES."
+        "Chuẩn: Đồng bộ commit mới nhất của PR, đọc từng dòng diff (git diff), kiểm tra kiến trúc, OWASP Top 10, Race Conditions, Memory Leaks "
+        "và BẮT BUỘC chạy test suite + linter thực tế (CẤM duyệt suông bằng mắt). CẤM VƯỢT RÀO: Read-Only (không tự sửa code PR khi chưa được yêu cầu). "
+        "BẰNG CHỨNG BẮT BUỘC: Báo cáo file:line, EXIT_CODE test và chốt PR_VERDICT: APPROVE hoặc REQUEST_CHANGES."
     ),
     "issueResolver": (
         "[ROLE: PRINCIPAL ISSUE RESOLVER] Nhiệm vụ: {task}. "
-        "Chuẩn: Viết test tái hiện lỗi (reproduction test) trước, sửa tận gốc root-cause, chạy full unit/integration test EXIT_CODE=0 "
-        "và gửi handoff kèm Commit Hash về Coordinator."
+        "Chuẩn: (1) Tìm Root Cause, (2) Viết Reproduction Test xác nhận FAIL trước khi sửa, (3) Sửa code tối thiểu tới khi Reproduction Test PASS, "
+        "(4) Chạy regression test đạt EXIT_CODE=0. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ. "
+        "BẰNG CHỨNG BẮT BUỘC: Commit sạch kèm Commit Hash + log chạy test."
     ),
 }
 
 
-def build_role_spec(role_input: str, task_desc: str) -> str:
+def build_role_spec(role_input: str, task_desc: str, config: dict = None) -> str:
     """Tiêm Sổ tay Hiến pháp & Cấm vượt rào của từng Worker vào task spec (không bắt Leader lưu trong GEMINI.md)."""
     clean_task = (task_desc or "").strip().rstrip(".")
     if clean_task.startswith("[ROLE:"):
@@ -224,10 +227,25 @@ def build_role_spec(role_input: str, task_desc: str) -> str:
     if canonical == "coordinator":
         canonical = "developer"
     tpl = ROLE_SPEC_TEMPLATES.get(canonical, ROLE_SPEC_TEMPLATES["developer"])
-    return tpl.replace("{task}", clean_task)
+    rendered = tpl.replace("{task}", clean_task)
+    if isinstance(config, dict):
+        roles = config.get("roles") or {}
+        if not _is_role_enabled(roles.get("reSpecialist", {}), is_optional=True):
+            rendered = rendered.replace(
+                " (nếu cần giải phẫu binary phải báo Coordinator giao re-worker)",
+                " (nếu cần giải phẫu binary phải báo Coordinator)",
+            )
+        downstream = []
+        if _is_role_enabled(roles.get("devopsSpecialist", {}), is_optional=True):
+            downstream.append("DevOps")
+        downstream.extend(["QA", "Sec"])
+        if _is_role_enabled(roles.get("benchSpecialist", {}), is_optional=True):
+            downstream.append("Bench")
+        rendered = rendered.replace("điều phối cho DevOps/QA/Sec/Bench", f"điều phối cho {'/'.join(downstream)}")
+    return rendered
 
 
-def cmd_spec(args: list):
+def cmd_spec(args: list, explicit_root: Path = None):
     raw_list = list(args or [])
     if raw_list and raw_list[0] == "--":
         raw_list = raw_list[1:]
@@ -243,6 +261,7 @@ def cmd_spec(args: list):
     clean_args = []
     explicit_role = None
     explicit_task = None
+    spec_root = explicit_root
     idx = 0
     after_dd = False
     while idx < len(raw_list):
@@ -252,25 +271,48 @@ def cmd_spec(args: list):
                 after_dd = True
                 idx += 1
                 continue
-            if tok in ("--path", "-C") and idx + 1 < len(raw_list):
+            if tok in ("--path", "-C") and explicit_role is None and not clean_args:
+                if idx + 1 >= len(raw_list) or not raw_list[idx + 1].strip():
+                    print(f"❌ Thiếu giá trị đường dẫn sau '{tok}'.", file=sys.stderr)
+                    sys.exit(1)
+                cand = Path(raw_list[idx + 1]).expanduser()
+                if not cand.is_dir():
+                    print(f"❌ Đường dẫn không tồn tại: '{raw_list[idx + 1]}'.", file=sys.stderr)
+                    sys.exit(1)
+                spec_root = cand.resolve()
                 idx += 2
                 continue
-            if tok.startswith("--path="):
+            if tok.startswith("--path=") and explicit_role is None and not clean_args:
+                p_val = tok.split("=", 1)[1].strip()
+                if not p_val or not Path(p_val).expanduser().is_dir():
+                    print(f"❌ Đường dẫn không tồn tại: '{p_val}'.", file=sys.stderr)
+                    sys.exit(1)
+                spec_root = Path(p_val).expanduser().resolve()
                 idx += 1
                 continue
-            if tok in ("--role", "-r") and idx + 1 < len(raw_list):
+            if tok in ("--role", "-r") and explicit_role is None:
+                if idx + 1 >= len(raw_list) or not raw_list[idx + 1].strip():
+                    print(f"❌ Thiếu giá trị cho '{tok}'.", file=sys.stderr)
+                    sys.exit(1)
                 explicit_role = raw_list[idx + 1]
                 idx += 2
                 continue
-            if tok.startswith("--role="):
-                explicit_role = tok.split("=", 1)[1]
+            if tok.startswith("--role=") and explicit_role is None:
+                r_val = tok.split("=", 1)[1].strip()
+                if not r_val:
+                    print("❌ Thiếu giá trị cho '--role='.", file=sys.stderr)
+                    sys.exit(1)
+                explicit_role = r_val
                 idx += 1
                 continue
-            if tok in ("--task", "-t") and idx + 1 < len(raw_list):
+            if tok in ("--task", "-t") and explicit_task is None:
+                if idx + 1 >= len(raw_list):
+                    print(f"❌ Thiếu giá trị cho '{tok}'.", file=sys.stderr)
+                    sys.exit(1)
                 explicit_task = raw_list[idx + 1]
                 idx += 2
                 continue
-            if tok.startswith("--task="):
+            if tok.startswith("--task=") and explicit_task is None:
                 explicit_task = tok.split("=", 1)[1]
                 idx += 1
                 continue
@@ -305,7 +347,9 @@ def cmd_spec(args: list):
         task_text = sys.stdin.read()
     else:
         task_text = ""
-    sys.stdout.write(build_role_spec(role_arg, task_text) + "\n")
+    cfg_root = spec_root if spec_root is not None else find_project_root()
+    cfg = load_config(cfg_root) if cfg_root else None
+    sys.stdout.write(build_role_spec(role_arg, task_text, config=cfg) + "\n")
 
 
 def _is_orca_discovery_link(p: Path) -> bool:
@@ -542,96 +586,157 @@ def _is_role_enabled(data: dict, is_optional: bool = True) -> bool:
         return bool(data["enabled"]) and has_valid_agent
     return has_valid_agent if is_optional else True
 
+def _sync_discovery_links(root: Path, config: dict, create_missing: bool = False):
+    """Đảm bảo GEMINI.md và CLAUDE.md/AGENTS.md ở root luôn trỏ tới .agents/GEMINI.md (không ghi đè file riêng của user)."""
+    gemini_md = root / ".agents" / "GEMINI.md"
+    if not gemini_md.exists():
+        return
+    root_gemini_md = root / "GEMINI.md"
+    claude_md = root / "CLAUDE.md"
+    agents_md = root / "AGENTS.md"
+    c_agent = str(((config or {}).get("coordinator") or {}).get("agent") or "antigravity").strip().lower()
+    has_any_orca_link = (
+        create_missing
+        or _is_orca_discovery_link(root_gemini_md)
+        or _is_orca_discovery_link(claude_md)
+        or _is_orca_discovery_link(agents_md)
+    )
+
+    if has_any_orca_link and not os.path.lexists(root_gemini_md):
+        try:
+            os.symlink(".agents/GEMINI.md", root_gemini_md)
+        except OSError:
+            pass
+    if c_agent == "claude":
+        if has_any_orca_link and not os.path.lexists(claude_md):
+            try:
+                os.symlink(".agents/GEMINI.md", claude_md)
+            except OSError:
+                pass
+        if _is_orca_discovery_link(agents_md):
+            agents_md.unlink(missing_ok=True)
+    else:
+        if has_any_orca_link and not os.path.lexists(agents_md):
+            try:
+                os.symlink(".agents/GEMINI.md", agents_md)
+            except OSError:
+                pass
+        if _is_orca_discovery_link(claude_md):
+            claude_md.unlink(missing_ok=True)
+
+
 def sync_gemini_directive(root: Path, config: dict):
     gemini_file = root / ".agents" / "GEMINI.md"
     if not gemini_file.exists():
         return
 
     content = gemini_file.read_text(encoding="utf-8")
-    
+    upgraded_from_template = False
+
+    # Nâng cấp tự động nếu .agents/GEMINI.md đang ở phiên bản cũ (v1/v2 thiếu cấu trúc 4 BƯỚC)
+    if (
+        "### BƯỚC 1:" not in content
+        or "### BƯỚC 2:" not in content
+        or "### BƯỚC 3:" not in content
+        or "### BƯỚC 4:" not in content
+        or "> - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:**" not in content
+    ):
+        tpl_candidates = [
+            Path(__file__).resolve().parent.parent / "templates" / "GEMINI.md",
+            Path.home() / ".gemini" / "antigravity" / "scratch" / "orca-multi-agent-orchestrator" / "templates" / "GEMINI.md",
+        ]
+        for tpl_p in tpl_candidates:
+            if tpl_p.is_file():
+                try:
+                    content = tpl_p.read_text(encoding="utf-8")
+                    upgraded_from_template = True
+                    break
+                except Exception:
+                    pass
+
     # Build updated table rows
     rows = []
     rows.append("| Role | Agent & Model | Concurrency | Capabilities & Orca Utilities |")
     rows.append("| :--- | :--- | :--- | :--- |")
-    
+
     # Coordinator
-    coord = config.get("coordinator", {})
-    c_agent = coord.get("agent", "claude")
+    coord = config.get("coordinator") or {}
+    c_agent = coord.get("agent") or "claude"
     c_model = coord.get("model")
     c_display = f"`{c_agent}`" + (f" ({c_model})" if c_model else "")
     rows.append(f"| **Lead Coordinator** | {c_display} | 1 | Task DAG, Zero-Trust Audit, Decision Gates, Release |")
 
     # Developer
-    roles = config.get("roles", {})
-    dev = roles.get("developer", {})
-    d_agent = dev.get("agent", "kimi")
+    roles = config.get("roles") or {}
+    dev = roles.get("developer") or {}
+    d_agent = dev.get("agent") or "kimi"
     d_model = dev.get("model")
     d_display = f"`{d_agent}`" + (f" ({d_model})" if d_model else "")
-    d_count = dev.get("concurrency", 2)
+    d_count = dev.get("concurrency") or 2
     rows.append(f"| **Full-Stack Devs** | {d_display} | {d_count} parallel | Child worktrees, clean architecture, unit tests |")
 
     # QA
-    qa = roles.get("qa", {})
-    q_agent = qa.get("agent", "kimi")
+    qa = roles.get("qa") or {}
+    q_agent = qa.get("agent") or "kimi"
     q_model = qa.get("model")
     q_display = f"`{q_agent}`" + (f" ({q_model})" if q_model else "")
-    q_count = qa.get("concurrency", 1)
+    q_count = qa.get("concurrency") or 1
     rows.append(f"| **QA & Testers** | {q_display} | {q_count} parallel | Integration/E2E suites, adversarial edge-case testing |")
 
     # Security
-    sec = roles.get("security", {})
-    s_agent = sec.get("agent", "codex")
+    sec = roles.get("security") or {}
+    s_agent = sec.get("agent") or "codex"
     s_model = sec.get("model")
     s_display = f"`{s_agent}`" + (f" ({s_model})" if s_model else "")
-    s_count = sec.get("concurrency", 1)
+    s_count = sec.get("concurrency") or 1
     rows.append(f"| **Security & Bug Hunter** | {s_display} | {s_count} parallel | OWASP Top 10, concurrency/race conditions, leak audit |")
 
     # PR Reviewer
-    pr = roles.get("prReviewer", {})
-    p_agent = pr.get("agent", "claude")
+    pr = roles.get("prReviewer") or {}
+    p_agent = pr.get("agent") or "claude"
     p_model = pr.get("model")
     p_display = f"`{p_agent}`" + (f" ({p_model})" if p_model else "")
     rows.append(f"| **PR Reviewer** | {p_display} | On-demand | PR checkout (`--pr`), line-by-line diff audit |")
 
     # Issue Resolver
-    issue = roles.get("issueResolver", {})
-    i_agent = issue.get("agent", "kimi")
+    issue = roles.get("issueResolver") or {}
+    i_agent = issue.get("agent") or "kimi"
     i_model = issue.get("model")
     i_display = f"`{i_agent}`" + (f" ({i_model})" if i_model else "")
     rows.append(f"| **Issue Resolver** | {i_display} | On-demand | Issue checkout (`--issue`), reproduction test & fix |")
 
     # DevOps Specialist
-    devops = roles.get("devopsSpecialist", {})
+    devops = roles.get("devopsSpecialist") or {}
     devops_enabled = _is_role_enabled(devops, is_optional=True)
     if devops_enabled:
-        do_agent = devops.get("agent", "codex")
+        do_agent = devops.get("agent") or "codex"
         do_model = devops.get("model")
         do_display = f"`{do_agent}`" + (f" ({do_model})" if do_model else "")
         rows.append(f"| **DevOps Specialist** | {do_display} | On-demand | Docker/K8s rollout, DB migrations, SSH worktrees |")
 
     # Bench & Perf Specialist
-    bench = roles.get("benchSpecialist", {})
+    bench = roles.get("benchSpecialist") or {}
     bench_enabled = _is_role_enabled(bench, is_optional=True)
     if bench_enabled:
-        b_agent = bench.get("agent", "antigravity")
+        b_agent = bench.get("agent") or "antigravity"
         b_model = bench.get("model")
         b_display = f"`{b_agent}`" + (f" ({b_model})" if b_model else "")
         rows.append(f"| **Bench & Perf Specialist** | {b_display} | On-demand | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |")
 
     # Reverse Engineering Specialist (REA)
-    re_spec = roles.get("reSpecialist", {})
+    re_spec = roles.get("reSpecialist") or {}
     re_enabled = _is_role_enabled(re_spec, is_optional=True)
     if re_enabled:
-        r_agent = re_spec.get("agent", "antigravity")
+        r_agent = re_spec.get("agent") or "antigravity"
         r_model = re_spec.get("model")
         r_display = f"`{r_agent}`" + (f" ({r_model})" if r_model else "")
         rows.append(f"| **Reverse Eng (REA)** | {r_display} | On-demand | Binary/Package/ASAR/Protocol decompile (`rea` skill) |")
 
     # UI Specialist
-    ui = roles.get("uiSpecialist", {})
+    ui = roles.get("uiSpecialist") or {}
     ui_enabled = _is_role_enabled(ui, is_optional=True)
     if ui_enabled:
-        u_agent = ui.get("agent", "claude")
+        u_agent = ui.get("agent") or "claude"
         u_model = ui.get("model")
         u_display = f"`{u_agent}`" + (f" ({u_model})" if u_model else "")
         rows.append(f"| **UI/UX Specialist** | {u_display} | On-demand | Design Mode (Click-to-code), responsive & a11y |")
@@ -649,10 +754,10 @@ def sync_gemini_directive(root: Path, config: dict):
             save_config(root, config)
         except Exception:
             pass
-    critic_spec = roles.get("criticSpecialist", {})
+    critic_spec = roles.get("criticSpecialist") or {}
     critic_enabled = _is_role_enabled(critic_spec, is_optional=True)
     if critic_enabled:
-        cr_agent = critic_spec.get("agent", "antigravity")
+        cr_agent = critic_spec.get("agent") or "antigravity"
         cr_model = critic_spec.get("model")
         cr_display = f"`{cr_agent}`" + (f" ({cr_model})" if cr_model else "")
         rows.append(f"| **Research & Critic** | {cr_display} | On-demand | Deep research, Devil's Advocate critique, root-cause consensus |")
@@ -699,6 +804,22 @@ def sync_gemini_directive(root: Path, config: dict):
     )
     if pattern.search(content):
         content = pattern.sub(lambda m: m.group(1) + table_text + "\n", content)
+
+    # Đồng bộ Execution Host và tiêu đề phần 3
+    exec_host = str(config.get("executionHost") or "local").strip()
+    host_label = "Local Machine" if exec_host == "local" else f"Remote SSH ({exec_host})"
+    content = re.sub(
+        r"^- \*\*Execution Host:\*\* `[^`]*` \([^)]*\)",
+        f"- **Execution Host:** `{exec_host}` ({host_label})",
+        content,
+        flags=re.M,
+    )
+    content = re.sub(
+        r"^## ⚡ QUY TRÌNH 4 BƯỚC[^\n]*$",
+        "## ⚡ QUY TRÌNH 4 BƯỚC & HIẾN PHÁP KỸ SƯ TRƯỞNG (CHỐNG VƯỢT RÀO, ĐỘC ĐOÁN & BÁO SẠCH GIẢ)",
+        content,
+        flags=re.M,
+    )
 
     def _wt_expr(w_name):
         return f"$(git worktree list | sed -n 's/^\\([^ ]*\\/{w_name}\\) .*/--worktree path:\\1/p; s/^\\([^ ]*\\).*\\[{w_name}\\].*/--worktree path:\\1/p' | head -n 1 | grep . || echo \"--worktree new-child --name {w_name}$([ -f package.json ] || echo ' --setup skip')\")"
@@ -760,52 +881,7 @@ def sync_gemini_directive(root: Path, config: dict):
         flags=re.M
     )
 
-    # Tự động thêm/gỡ các dòng Step 2 (worker-start) nếu role được bật/tắt động
-    optional_step2 = [
-        (
-            devops_enabled,
-            "devops-worker",
-            f'  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):\n  orca orchestration worker-start --task <DEVOPS_TASK_ID> {_wt_expr("devops-worker")} {_fmt_worker_args_py(devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort"))} --json\n'
-        ),
-        (
-            critic_enabled,
-            "critic-worker",
-            f'  # Research & Critic Worker (khi cần khảo sát sâu, phản biện kế hoạch Leader & thống nhất root-cause):\n  orca orchestration worker-start --task <CRITIC_TASK_ID> {_wt_expr("critic-worker")} {_fmt_worker_args_py(critic_spec.get("agent", "antigravity"), critic_spec.get("model"), critic_spec.get("effort"))} --json\n'
-        ),
-        (
-            bench_enabled,
-            "bench-worker",
-            f'  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):\n  orca orchestration worker-start --task <BENCH_TASK_ID> {_wt_expr("bench-worker")} {_fmt_worker_args_py(bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort"))} --json\n'
-        ),
-        (
-            re_enabled,
-            "re-worker",
-            f'  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):\n  orca orchestration worker-start --task <RE_TASK_ID> {_wt_expr("re-worker")} {_fmt_worker_args_py(re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort"))} --json\n'
-        ),
-        (
-            ui_enabled,
-            "ui-worker",
-            f'  # UI Worker (khi có Task Frontend/UI):\n  orca orchestration worker-start --task <UI_TASK_ID> {_wt_expr("ui-worker")} {_fmt_worker_args_py(ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort"))} --json\n'
-        ),
-    ]
-
-    for is_en, w_name, step2_block in optional_step2:
-        has_w_cmd = bool(re.search(rf"^[ \t]*orca orchestration worker-start[^\n]*--name\s+{re.escape(w_name)}\b", content, re.M))
-        if is_en and not has_w_cmd:
-            anchor_s2 = re.search(r"^[ \t]*#[ \t]*Security Worker.*$", content, re.M)
-            if anchor_s2:
-                content = content[:anchor_s2.start()] + step2_block + content[anchor_s2.start():]
-            else:
-                dev_w = re.search(r"^.*--name\s+dev-worker.*\n", content, re.M)
-                if dev_w:
-                    content = content[:dev_w.end()] + step2_block + content[dev_w.end():]
-        elif not is_en and has_w_cmd:
-            s2_pat = re.compile(
-                rf"(?:^[ \t]*#[^\n]*\n)?^[ \t]*orca orchestration worker-start[^\n]*--name\s+{re.escape(w_name)}\b[^\n]*\n",
-                re.M
-            )
-            content = s2_pat.sub("", content)
-
+    # Bước 2: Thay thế nguyên khối theo đúng thứ tự của Bước 1 và các role đang bật
     active_wt_names = ["`dev-worker`"]
     if devops_enabled:
         active_wt_names.append("`devops-worker`")
@@ -818,16 +894,68 @@ def sync_gemini_directive(root: Path, config: dict):
         active_wt_names.append("`ui-worker`")
     if critic_enabled:
         active_wt_names.append("`critic-worker`")
-    step2_header = (
-        '### BƯỚC 2: FAN-OUT (1 ROLE = 1 WORKTREE ĐỊNH DANH DUY NHẤT & GOM NHÓM TERMINAL TABS)\n'
-        f'- 🔴 **QUY TẮC GOM NHÓM TERMINAL TABS (CẤM ĐẺ THÊM WORKTREE TRÙNG LẶP `-2`, `-3` & TRÁNH XUNG ĐỘT ĐA REPO `selector_ambiguous`):** Mỗi vai trò ({", ".join(active_wt_names)}) chỉ dùng **1 Worktree định danh duy nhất**. Nếu worktree của role đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <role>-worker` ở lần chạy đầu tiên khi worktree chưa tồn tại:\n'
-    )
+
+    step2_lines = [
+        "### BƯỚC 2: FAN-OUT (1 ROLE = 1 WORKTREE ĐỊNH DANH DUY NHẤT & GOM NHÓM TERMINAL TABS)",
+        f'- 🔴 **QUY TẮC GOM NHÓM TERMINAL TABS (CẤM ĐẺ THÊM WORKTREE TRÙNG LẶP `-2`, `-3` & TRÁNH XUNG ĐỘT ĐA REPO `selector_ambiguous`):** Mỗi vai trò ({", ".join(active_wt_names)}) chỉ dùng **1 Worktree định danh duy nhất**. Nếu worktree của role đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <role>-worker` ở lần chạy đầu tiên khi worktree chưa tồn tại:',
+        "  ```bash",
+        "  # Dev Worker:",
+        f'  orca orchestration worker-start --task <DEV_TASK_ID> {_wt_expr("dev-worker")} {_fmt_worker_args_py(d_agent, d_model, dev.get("effort"))} --json',
+    ]
+    if devops_enabled:
+        step2_lines += [
+            "  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):",
+            f'  orca orchestration worker-start --task <DEVOPS_TASK_ID> {_wt_expr("devops-worker")} {_fmt_worker_args_py(devops.get("agent") or "antigravity", devops.get("model"), devops.get("effort"))} --json',
+        ]
+    if critic_enabled:
+        step2_lines += [
+            "  # Research & Critic Worker (khi cần khảo sát sâu, phản biện kế hoạch Leader & thống nhất root-cause):",
+            f'  orca orchestration worker-start --task <CRITIC_TASK_ID> {_wt_expr("critic-worker")} {_fmt_worker_args_py(critic_spec.get("agent") or "antigravity", critic_spec.get("model"), critic_spec.get("effort"))} --json',
+        ]
+    step2_lines += [
+        "  # Security Worker (khi có Task Security Audit):",
+        f'  orca orchestration worker-start --task <SEC_TASK_ID> {_wt_expr("sec-worker")} {_fmt_worker_args_py(s_agent, s_model, sec.get("effort"))} --json',
+        "  # QA Worker (Test nghiệm thu):",
+        f'  orca orchestration worker-start --task <QA_TASK_ID> {_wt_expr("qa-worker")} {_fmt_worker_args_py(q_agent, q_model, qa.get("effort"))} --json',
+    ]
+    if bench_enabled:
+        step2_lines += [
+            "  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):",
+            f'  orca orchestration worker-start --task <BENCH_TASK_ID> {_wt_expr("bench-worker")} {_fmt_worker_args_py(bench.get("agent") or "antigravity", bench.get("model"), bench.get("effort"))} --json',
+        ]
+    if re_enabled:
+        step2_lines += [
+            "  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):",
+            f'  orca orchestration worker-start --task <RE_TASK_ID> {_wt_expr("re-worker")} {_fmt_worker_args_py(re_spec.get("agent") or "antigravity", re_spec.get("model"), re_spec.get("effort"))} --json',
+        ]
+    if ui_enabled:
+        step2_lines += [
+            "  # UI Worker (khi có Task Frontend/UI):",
+            f'  orca orchestration worker-start --task <UI_TASK_ID> {_wt_expr("ui-worker")} {_fmt_worker_args_py(ui.get("agent") or "antigravity", ui.get("model"), ui.get("effort"))} --json',
+        ]
+    step2_lines += [
+        "  ```",
+        "  *(On-demand Git: Review PR dùng `orca-review-pr <PR_NUM>` | Sửa Issue dùng `orca-hotfix <ISSUE_ID>`)*\n\n",
+    ]
+    step2_full = "\n".join(step2_lines)
     content = re.sub(
-        r"### BƯỚC 2:[^\n]*\n- [^\n]*\n",
-        lambda m: step2_header,
+        r"### BƯỚC 2:[^\n]*\n[\s\S]*?(?=### BƯỚC 3:)",
+        lambda m: step2_full,
         content,
         flags=re.M
     )
+
+    # Bước 3 & Bước 4: Tự động lọc bỏ các vai trò tùy chọn đang tắt (disabled)
+    handoff_roles = "/".join([r for r, en in [("Critic", critic_enabled), ("RE", re_enabled), ("Dev", True), ("DevOps", devops_enabled), ("UI", ui_enabled)] if en])
+    handoff_ev = ", ".join([e for e, en in [("`CONSENSUS_REACHED`", critic_enabled), ("Commit Hash", True), ("Clean-Room Spec", re_enabled), ("Pod/Port/Log sạch", devops_enabled)] if en])
+    esc_roles = "/".join([r for r, en in [("DevOps", devops_enabled), ("QA", True), ("Sec", True), ("Bench", bench_enabled)] if en])
+    reverify_w = " & ".join([w for w, en in [("`devops-worker`", devops_enabled), ("`qa-worker`", True)] if en])
+    qa_branch_roles = "/".join([r for r, en in [("QA", True), ("DevOps", devops_enabled), ("Sec", True), ("Bench", bench_enabled)] if en])
+    log_blind_roles = "/".join([r for r, en in [("DevOps", devops_enabled), ("QA", True)] if en])
+    zt4_ro_roles = "/".join([r for r, en in [("Critic", critic_enabled), ("QA", True), ("Bench", bench_enabled), ("RE", re_enabled)] if en])
+    self_heal_fixers = "/".join([w for w, en in [("`dev-worker`", True), ("`devops-worker`", devops_enabled)] if en])
+    self_heal_verifiers = "/".join([w for w, en in [("`qa-worker`", True), ("`sec-worker`", True), ("`bench-worker`", bench_enabled)] if en])
+
     step3_full = (
         '### BƯỚC 3: REACTIVE WAIT, CƠ CHẾ PHẢN BIỆN ĐỒNG THUẬN (ANTI-AUTOCRACY) & KIỂM CHỨNG ZERO-TRUST\n'
         '- 🔴 **BẮT BUỘC lắng nghe đủ 4 tín hiệu (`worker_done,escalation,question,handoff`) và DỪNG GỌI TOOL sau khi chạy (các lần wait kế tiếp BẮT BUỘC thêm `--ack <DELIVERY_ID>` của batch trước để không bị lặp lại batch cũ):**\n'
@@ -848,22 +976,29 @@ def sync_gemini_directive(root: Path, config: dict):
             '  - **Chống quy kết vội vàng:** Leader **CẤM** quy kết lỗi cho bất kỳ role nào khi chưa có bằng chứng `file:line` + log thực tế.\n'
         )
         + '  - **Nhận `question` (từ `ask`):** Coordinator phản hồi qua `orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json`.\n'
-        f'  - **Nhận `handoff` (từ {"Critic/" if critic_enabled else ""}RE/Dev/DevOps/UI):** Coordinator kiểm duyệt bằng chứng ({"`CONSENSUS_REACHED`, " if critic_enabled else ""}Commit Hash, Clean-Room Spec, Pod/Port/Log sạch) rồi quyết định bàn giao cho role kế tiếp.\n'
-        f'  - **Nhận `escalation` (từ DevOps/QA/Sec/Bench):** Coordinator phân xử dựa trên bằng chứng{" (gặp trigger Anti-Autocracy ➔ qua `critic-worker` trước)" if critic_enabled else ""} và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` vào đúng worktree định danh của role đó (`--worktree path:<abs_path>`), rồi điều phối `devops-worker` & `qa-worker` kiểm toán lại.\n'
+        f'  - **Nhận `handoff` (từ {handoff_roles}):** Coordinator kiểm duyệt bằng chứng ({handoff_ev}) rồi quyết định bàn giao cho role kế tiếp.\n'
+        f'  - **Nhận `escalation` (từ {esc_roles}):** Coordinator phân xử dựa trên bằng chứng{" (gặp trigger Anti-Autocracy ➔ qua `critic-worker` trước)" if critic_enabled else ""} và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` vào đúng worktree định danh của role đó (`--worktree path:<abs_path>`), rồi điều phối {reverify_w} kiểm toán lại.\n'
         '- **Nghiệm thu Zero-Trust:** Đọc `orca orchestration worker-read --dispatch <DISPATCH_ID> --json` và `orca orchestration inbox --json`. '
         '**BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:\n'
         '  1. **Báo sạch giả (Fake Clean):** Báo `succeeded` nhưng thiếu `EXIT_CODE=0`, thiếu `git commit` (Commit Hash), '
-        f'`Tests Run = 0`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence từ `rea` (`re-worker`), {"thiếu bằng chứng `file:line` khi phản biện (`critic-worker`), " if critic_enabled else ""}'
-        'hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ chưa merge commit mới của Dev.\n'
-        '  2. **Bỏ sót/Che giấu Lỗi Runtime (Log Blindness/Masking):** DevOps/QA báo `PASS` nhưng thiếu bằng chứng quét '
+        f'`Tests Run = 0`'
+        f'{", thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99)" if bench_enabled else ""}'
+        f'{", thiếu Evidence từ `rea` (`re-worker`)" if re_enabled else ""}'
+        f'{", thiếu bằng chứng `file:line` khi phản biện (`critic-worker`)" if critic_enabled else ""}, '
+        f'hoặc {qa_branch_roles} chạy trên nhánh cũ chưa merge commit mới của Dev.\n'
+        f'  2. **Bỏ sót/Che giấu Lỗi Runtime (Log Blindness/Masking):** {log_blind_roles} báo `PASS` nhưng thiếu bằng chứng quét '
         '**Full Container/Pod Logs** (từ lúc start trên toàn bộ App + DB + Kafka/Broker sau chu kỳ background job), dùng `--since` ngắn '
         'cắt lỗi, bỏ sót pod phụ trợ (`postgres`, `kafka`), hoặc QA sửa test script nới lỏng assert / '
         'phớt lờ trạng thái lỗi (`ERROR`, `FATAL`, `Exception`, `SQL error`, `SSLHandshakeException`, `health: ERROR`, `close_status: FAILED`) '
         'thay vì gửi `escalation`.\n'
-        f'  3. **Còn lỗi tồn đọng{" hoặc Chưa đạt Đồng thuận" if critic_enabled else ""}:** Lỗi compile, test fail, lỗi runtime logs, {"`Critic Deadlock` chưa được sếp phân xử qua Gate, " if critic_enabled else ""}`SECURITY_VERDICT: BLOCK`, `QA_VERDICT: FAIL`, '
-        '`PERF_VERDICT: BOTTLENECK_FOUND`, `RE_VERDICT: BLOCKED_BY_UNKNOWN`, hoặc pod `CrashLoopBackOff`/`ErrImagePull`.\n'
-        f'  4. **Vượt rào (Boundary Crossing):** {"Critic/" if critic_enabled else ""}QA/Bench/RE tự sửa code app, Dev xóa/skip test cũ, DevOps sửa business logic, hoặc Worker tự ý đổi kiến trúc không qua Coordinator.\n'
-        '- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao `dev-worker`/`devops-worker` sửa (mở tab mới ngay trong worktree định danh hiện hữu) và bắt buộc chạy lại `qa-worker`/`sec-worker`/`bench-worker` xác nhận đến khi PASS 100%.\n'
+        f'  3. **Còn lỗi tồn đọng{" hoặc Chưa đạt Đồng thuận" if critic_enabled else ""}:** Lỗi compile, test fail, lỗi runtime logs, '
+        f'{"`Critic Deadlock` chưa được sếp phân xử qua Gate, " if critic_enabled else ""}'
+        f'`SECURITY_VERDICT: BLOCK`, `QA_VERDICT: FAIL`'
+        f'{", `PERF_VERDICT: BOTTLENECK_FOUND`" if bench_enabled else ""}'
+        f'{", `RE_VERDICT: BLOCKED_BY_UNKNOWN`" if re_enabled else ""}'
+        f'{", hoặc pod `CrashLoopBackOff`/`ErrImagePull`" if devops_enabled else ""}.\n'
+        f'  4. **Vượt rào (Boundary Crossing):** {zt4_ro_roles} tự sửa code app, Dev xóa/skip test cũ{", DevOps sửa business logic" if devops_enabled else ""}, hoặc Worker tự ý đổi kiến trúc không qua Coordinator.\n'
+        f'- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao {self_heal_fixers} sửa (mở tab mới ngay trong worktree định danh hiện hữu) và bắt buộc chạy lại {self_heal_verifiers} xác nhận đến khi PASS 100%.\n'
         '- ⚠️ **GIỮ TERMINAL WORKER SỐNG Ở BƯỚC 3 BẰNG `worker-retain` (KHÔNG GỌI `worker-release` Ở BƯỚC 3):** Khi một worker đã hoàn tất (`worker_done`), gọi `orca orchestration worker-retain --dispatch <DISPATCH_ID> --json` để thỏa mãn Completion Accounting của Orca đồng thời giữ nguyên terminal worker trên Orca Sidebar (hiển thị **chấm xanh `🟢`**, **icon Agent `✓`** và **chuông thông báo `🔔`** cho tới Bước 4)!\n\n'
     )
     content = re.sub(
@@ -872,11 +1007,33 @@ def sync_gemini_directive(root: Path, config: dict):
         content,
         flags=re.M
     )
+
+    step4_ev_items = ["Dev (`Commit Hash` + `Build OK`)"]
+    if devops_enabled:
+        step4_ev_items.append("DevOps (`Pod/Infra Ready`)")
+    step4_ev_items.append("Security (`PASS`)")
+    step4_ev_items.append("QA (`PASS 100%`)")
+    if bench_enabled:
+        step4_ev_items.append("Benchmark (`PERF_VERDICT: PASS`)")
+    if re_enabled:
+        step4_ev_items.append("Reverse Eng (`RE_VERDICT: EVIDENCE_COMPLETE` nếu có)")
+    step4_ev_str = ", ".join(step4_ev_items[:-1]) + " và " + step4_ev_items[-1]
+
+    gate_q_items = ["Build"]
+    if devops_enabled:
+        gate_q_items.append("DevOps")
+    gate_q_items.append("Security (PASS)")
+    gate_q_items.append("QA (PASS 100%)")
+    tail_opt = "/".join([x for x, en in [("Benchmark", bench_enabled), ("RE", re_enabled)] if en])
+    if tail_opt:
+        gate_q_items.append(tail_opt)
+    gate_q_str = ", ".join(gate_q_items[:-1]) + " và " + gate_q_items[-1]
+
     step4_full = (
         '### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)\n'
-        f'- Chỉ khi {"đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` khi có trigger Anti-Autocracy) và " if critic_enabled else ""}đủ bằng chứng thép của Dev (`Commit Hash` + `Build OK`), DevOps (`Pod/Infra Ready`), Security (`PASS`), QA (`PASS 100%`), Benchmark (`PERF_VERDICT: PASS`) và Reverse Eng (`RE_VERDICT: EVIDENCE_COMPLETE` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):\n'
+        f'- Chỉ khi {"đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` khi có trigger Anti-Autocracy) và " if critic_enabled else ""}đủ bằng chứng thép của {step4_ev_str}, mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):\n'
         '  ```bash\n'
-        f'  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng {"Đồng thuận (Critic), " if critic_enabled else ""}Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?" --options \'["yes","wait"]\' --json\n'
+        f'  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng {"Đồng thuận (Critic), " if critic_enabled else ""}{gate_q_str}. Merge code vào nhánh chính chứ sếp?" --options \'["yes","wait"]\' --json\n'
         '  ```\n'
         '- Chỉ khi người dùng phản hồi `"yes"`:\n'
         '  1. Đóng Gate và khôi phục trạng thái `completed` cho `<FINAL_TASK_ID>` (vì `gate-create` chuyển task sang `blocked` và `gate-resolve` trong Orca đưa task về `ready`):\n'
@@ -893,34 +1050,8 @@ def sync_gemini_directive(root: Path, config: dict):
         flags=re.M
     )
 
-    # Đồng bộ luôn các dòng lệnh worker-start trong BƯỚC 2 của .agents/GEMINI.md
-    worker_map = {
-        "dev-worker": (d_agent, d_model, dev.get("effort")),
-        "qa-worker": (q_agent, q_model, qa.get("effort")),
-        "sec-worker": (s_agent, s_model, sec.get("effort")),
-        "devops-worker": (devops.get("agent", "antigravity"), devops.get("model"), devops.get("effort")),
-        "ui-worker": (ui.get("agent", "antigravity"), ui.get("model"), ui.get("effort")),
-        "bench-worker": (bench.get("agent", "antigravity"), bench.get("model"), bench.get("effort")),
-        "re-worker": (re_spec.get("agent", "antigravity"), re_spec.get("model"), re_spec.get("effort")),
-        "critic-worker": (critic_spec.get("agent", "antigravity"), critic_spec.get("model"), critic_spec.get("effort")),
-    }
-    for w_name, (w_ag, w_mod, w_eff) in worker_map.items():
-        if not w_ag or w_ag == "none":
-            continue
-        # Nâng cấp dòng worker-start cũ sang biểu thức tái sử dụng worktree path:<abs_path>
-        old_wt_pat = re.compile(
-            rf"(orca orchestration worker-start\s+--task\s+<[^>]+>\s+)(?:--worktree\s+new-child\s+--name\s+{re.escape(w_name)}|\$\(git worktree list[^\n]*--name\s+{re.escape(w_name)}[^\n]*\"\))(?=\s+--agent)",
-            re.MULTILINE
-        )
-        content = old_wt_pat.sub(lambda m, wn=w_name: m.group(1) + _wt_expr(wn), content)
-        w_pat = re.compile(
-            rf"(--name\s+{re.escape(w_name)}(?:\$\(\[\s+-f\s+package\.json\s+\][^\n]*?\))?\"?\)?\s+)--agent\s+\S+(?:\s+--model\s+(?:\"[^\"]*\"|\S+))?(?:\s+--effort\s+\S+)?",
-            re.MULTILINE
-        )
-        formatted_args = _fmt_worker_args_py(w_ag, w_mod, w_eff)
-        content = w_pat.sub(lambda m, fa=formatted_args: m.group(1) + fa, content)
-
     gemini_file.write_text(content, encoding="utf-8")
+    _sync_discovery_links(root, config, create_missing=upgraded_from_template)
 
 
 def _build_discovery_env():
@@ -1369,9 +1500,19 @@ def cmd_models(args: list):
         if a in ("-h", "--help"):
             print("Usage: orca-team models [agent] [--agent <agent>] [--json|--tsv] [--refresh] [--role <role>] [--tier <tier1|tier2|tier3>] [--effort <low|medium|high>]")
             return
-        elif a in ("--agent", "-a") and idx + 1 < len(args):
-            agent = args[idx + 1].lower()
+        elif a in ("--agent", "-a"):
+            if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+                print(f"❌ Thiếu giá trị cho '{a}'.", file=sys.stderr)
+                sys.exit(1)
+            agent = args[idx + 1].strip().lower()
             idx += 2
+        elif a.startswith("--agent="):
+            v = a.split("=", 1)[1].strip().lower()
+            if not v or v.startswith("-"):
+                print("❌ Thiếu giá trị cho '--agent='.", file=sys.stderr)
+                sys.exit(1)
+            agent = v
+            idx += 1
         elif a == "--json":
             as_json = True
             idx += 1
@@ -1381,27 +1522,65 @@ def cmd_models(args: list):
         elif a == "--refresh":
             refresh = True
             idx += 1
-        elif a == "--tier" and idx + 1 < len(args):
-            role_tier = args[idx + 1]
+        elif a == "--tier":
+            if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+                print("❌ Thiếu giá trị cho '--tier'.", file=sys.stderr)
+                sys.exit(1)
+            role_tier = args[idx + 1].strip()
             explicit_tier = True
             idx += 2
-        elif a == "--effort" and idx + 1 < len(args):
-            target_effort = args[idx + 1]
+        elif a.startswith("--tier="):
+            v = a.split("=", 1)[1].strip()
+            if not v or v.startswith("-"):
+                print("❌ Thiếu giá trị cho '--tier='.", file=sys.stderr)
+                sys.exit(1)
+            role_tier = v
+            explicit_tier = True
+            idx += 1
+        elif a == "--effort":
+            if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+                print("❌ Thiếu giá trị cho '--effort'.", file=sys.stderr)
+                sys.exit(1)
+            target_effort = args[idx + 1].strip()
             explicit_effort = True
             idx += 2
-        elif a == "--role" and idx + 1 < len(args):
-            r_key = ROLE_ALIASES.get(args[idx + 1].lower(), args[idx + 1])
+        elif a.startswith("--effort="):
+            v = a.split("=", 1)[1].strip()
+            if not v or v.startswith("-"):
+                print("❌ Thiếu giá trị cho '--effort='.", file=sys.stderr)
+                sys.exit(1)
+            target_effort = v
+            explicit_effort = True
+            idx += 1
+        elif a == "--role":
+            if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+                print("❌ Thiếu giá trị cho '--role'.", file=sys.stderr)
+                sys.exit(1)
+            r_key = ROLE_ALIASES.get(args[idx + 1].strip().lower(), args[idx + 1].strip())
             def_t, def_e = ROLE_TIER_MAP.get(r_key, ("tier2", "high"))
             if not explicit_tier:
                 role_tier = def_t
             if not explicit_effort:
                 target_effort = def_e
             idx += 2
+        elif a.startswith("--role="):
+            v = a.split("=", 1)[1].strip()
+            if not v or v.startswith("-"):
+                print("❌ Thiếu giá trị cho '--role='.", file=sys.stderr)
+                sys.exit(1)
+            r_key = ROLE_ALIASES.get(v.lower(), v)
+            def_t, def_e = ROLE_TIER_MAP.get(r_key, ("tier2", "high"))
+            if not explicit_tier:
+                role_tier = def_t
+            if not explicit_effort:
+                target_effort = def_e
+            idx += 1
         elif not a.startswith("-"):
             agent = a.lower()
             idx += 1
         else:
-            idx += 1
+            print(f"❌ Tùy chọn không hợp lệ: '{a}'.", file=sys.stderr)
+            sys.exit(1)
 
     models, source_label = discover_models_for_agent(agent, refresh=refresh)
     rec_idx = recommend_model_index(models, role_tier, target_effort)
@@ -1743,7 +1922,7 @@ def cmd_set(root: Path, config: dict, args: list):
     new_concurrency = None
     toggle_enable = None
     sync_only = False
-    force_flag = any(a in ("--force", "-f") for a in args[1:])
+    force_flag = False
 
     idx = 1
     while idx < len(args):
@@ -1754,35 +1933,64 @@ def cmd_set(root: Path, config: dict, args: list):
                 sys.exit(1)
             new_agent = args[idx + 1].strip().lower()
             idx += 2
+        elif opt.startswith("--agent="):
+            v = opt.split("=", 1)[1].strip().lower()
+            if not v or v.startswith("-"):
+                print("❌ Thiếu giá trị cho '--agent='.", file=sys.stderr)
+                sys.exit(1)
+            new_agent = v
+            idx += 1
         elif opt == "--model":
-            if idx + 1 >= len(args):
+            if idx + 1 >= len(args) or (args[idx + 1].startswith("-") and args[idx + 1] != "-"):
                 print("❌ Thiếu giá trị cho '--model'. Dùng: orca-team set <role> --model <model_id>", file=sys.stderr)
                 sys.exit(1)
             m_val = args[idx + 1].strip()
             new_model = "" if m_val.lower() in ("none", "null", "default", "(default)", "-") else m_val
             idx += 2
+        elif opt.startswith("--model="):
+            m_val = opt.split("=", 1)[1].strip()
+            if not m_val or (m_val.startswith("-") and m_val != "-"):
+                print("❌ Thiếu giá trị cho '--model='.", file=sys.stderr)
+                sys.exit(1)
+            new_model = "" if m_val.lower() in ("none", "null", "default", "(default)", "-") else m_val
+            idx += 1
         elif opt == "--effort":
-            if idx + 1 >= len(args):
+            if idx + 1 >= len(args) or (args[idx + 1].startswith("-") and args[idx + 1] != "-"):
                 print("❌ Thiếu giá trị cho '--effort'. Dùng: orca-team set <role> --effort <low|medium|high>", file=sys.stderr)
                 sys.exit(1)
             e_val = args[idx + 1].strip().lower()
             new_effort = "" if e_val in ("none", "null", "off", "-") else e_val
             idx += 2
-        elif opt == "--concurrency":
-            if idx + 1 >= len(args):
-                print("❌ Thiếu giá trị cho '--concurrency'. Dùng: orca-team set <role> --concurrency <1..10>", file=sys.stderr)
+        elif opt.startswith("--effort="):
+            e_val = opt.split("=", 1)[1].strip().lower()
+            if not e_val or (e_val.startswith("-") and e_val != "-"):
+                print("❌ Thiếu giá trị cho '--effort='.", file=sys.stderr)
                 sys.exit(1)
+            new_effort = "" if e_val in ("none", "null", "off", "-") else e_val
+            idx += 1
+        elif opt == "--concurrency" or opt.startswith("--concurrency="):
+            if opt == "--concurrency":
+                if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+                    print("❌ Thiếu giá trị cho '--concurrency'. Dùng: orca-team set <role> --concurrency <1..10>", file=sys.stderr)
+                    sys.exit(1)
+                c_raw = args[idx + 1]
+                idx += 2
+            else:
+                c_raw = opt.split("=", 1)[1].strip()
+                if not c_raw:
+                    print("❌ Thiếu giá trị cho '--concurrency='.", file=sys.stderr)
+                    sys.exit(1)
+                idx += 1
             if role_key == "coordinator":
                 print("❌ Lead Coordinator luôn chạy đơn luồng (concurrency = 1), không thể thay đổi.", file=sys.stderr)
                 sys.exit(1)
             try:
-                new_concurrency = int(args[idx + 1])
+                new_concurrency = int(c_raw)
             except ValueError:
                 new_concurrency = -1
             if new_concurrency < 1 or new_concurrency > 10:
-                print(f"❌ --concurrency phải là số nguyên từ 1 đến 10 (nhận được: '{args[idx + 1]}').", file=sys.stderr)
+                print(f"❌ --concurrency phải là số nguyên từ 1 đến 10 (nhận được: '{c_raw}').", file=sys.stderr)
                 sys.exit(1)
-            idx += 2
         elif opt == "--enable":
             toggle_enable = True
             idx += 1
@@ -1800,6 +2008,7 @@ def cmd_set(root: Path, config: dict, args: list):
             sync_only = True
             idx += 1
         elif opt in ("--force", "-f"):
+            force_flag = True
             idx += 1
         else:
             print(f"❌ Tùy chọn không hợp lệ: '{opt}'. Dùng 'orca-team --help' để xem danh sách cờ hỗ trợ.", file=sys.stderr)
@@ -2251,12 +2460,28 @@ def cmd_get(root: Path, config: dict, args: list):
     target = (config.get("coordinator") if role_key == "coordinator" else config.get("roles", {}).get(role_key, {})) or {}
 
     field = "agent"
-    if "--field" in args:
-        f_idx = args.index("--field")
-        if f_idx + 1 < len(args):
-            field = args[f_idx + 1]
-    elif len(args) >= 2 and not args[1].startswith("-"):
-        field = args[1]
+    idx_g = 1
+    while idx_g < len(args):
+        ga = args[idx_g]
+        if ga == "--field":
+            if idx_g + 1 >= len(args) or args[idx_g + 1].startswith("-"):
+                print("❌ Thiếu giá trị cho '--field'.", file=sys.stderr)
+                sys.exit(1)
+            field = args[idx_g + 1].strip()
+            idx_g += 2
+        elif ga.startswith("--field="):
+            fv = ga.split("=", 1)[1].strip()
+            if not fv or fv.startswith("-"):
+                print("❌ Thiếu giá trị cho '--field='.", file=sys.stderr)
+                sys.exit(1)
+            field = fv
+            idx_g += 1
+        elif not ga.startswith("-"):
+            field = ga
+            idx_g += 1
+        else:
+            print(f"❌ Tùy chọn không hợp lệ: '{ga}'.", file=sys.stderr)
+            sys.exit(1)
 
     is_opt = role_key in ("uiSpecialist", "devopsSpecialist", "benchSpecialist", "reSpecialist", "criticSpecialist")
     if not target and not is_opt:
@@ -2331,8 +2556,12 @@ def cmd_watchdog(root: Path, args: list = None):
     import subprocess
     args = args or []
     for a in args:
-        if not a.startswith("-") and Path(a).expanduser().is_dir():
-            root = Path(a).expanduser().resolve()
+        if not a.startswith("-"):
+            cand = Path(a).expanduser()
+            if not cand.is_dir():
+                print(f"❌ Đường dẫn không tồn tại: '{a}'.", file=sys.stderr)
+                sys.exit(1)
+            root = cand.resolve()
             break
     auto_unblock = any(a in args for a in ["--unblock", "--fix"])
     scan_all = any(a in args for a in ["--all", "-a"])
@@ -2814,10 +3043,23 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
             orch_steps = set()
             release_steps = set()
             for idx_pos, s in enumerate(steps):
-                if s.get("type") != "PLANNER_RESPONSE":
+                st_type = s.get("type")
+                if st_type in ("SYSTEM_MESSAGE", "USER_INPUT"):
+                    sm_str = str(s.get("content") or "")
+                    for r_m in re.findall(r"\[ORCA RUNTIME NOTIFICATION\s+—\s+RUN:\s*(run_[a-f0-9]{12})\b", sm_str):
+                        step_runs.setdefault(idx_pos, set()).add(r_m)
+                        if idx_pos + 1 < len(steps) and steps[idx_pos + 1].get("type") == "PLANNER_RESPONSE":
+                            step_runs.setdefault(idx_pos + 1, set()).add(r_m)
+                            orch_steps.add(idx_pos + 1)
+                    if "[Message from background task" in sm_str:
+                        for r_m in re.findall(r'(?:Created\s+|RUN=|"runId"\s*:\s*"|"run"\s*:\s*\{\s*"id"\s*:\s*")(run_[a-f0-9]{12})\b', sm_str):
+                            step_runs.setdefault(idx_pos, set()).add(r_m)
+                    continue
+                if st_type != "PLANNER_RESPONSE":
                     continue
                 tcs = s.get("tool_calls") or []
                 has_rc = False
+                has_orch = False
                 for tc in tcs:
                     if not isinstance(tc, dict):
                         continue
@@ -2826,31 +3068,49 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
                         continue
                     if re.search(r"\borca\s+orchestration\s+run-create\b", cmd):
                         has_rc = True
+                        has_orch = True
                         orch_steps.add(idx_pos)
                     if re.search(
                         r"\borca\s+orchestration\s+(?:task-create|worker-start|check|worker-read|gate-create|gate-resolve|task-update|worker-retain|worker-release|worker-stop|send|reply|run-show|task-list|worker-list)\b",
                         cmd,
                     ):
+                        has_orch = True
                         orch_steps.add(idx_pos)
                         for r_m in re.findall(r"--(?:run|id)\s+(run_[a-f0-9]{12})\b", cmd):
                             step_runs.setdefault(idx_pos, set()).add(r_m)
                     if re.search(r"\borca\s+orchestration\s+(?:worker-release|worker-stop)\b", cmd):
                         release_steps.add(idx_pos)
-                if has_rc:
+                if has_rc or has_orch:
                     j = idx_pos + 1
                     created_rids = []
                     fallback_rids = []
-                    while j < len(steps) and steps[j].get("type") == "GENERIC":
+                    max_scan = min(len(steps), idx_pos + 12)
+                    while j < max_scan:
+                        jt = steps[j].get("type")
                         c_str = str(steps[j].get("content") or "")
-                        created_rids.extend(
-                            re.findall(r'(?:Created\s+|RUN=|"run"\s*:\s*\{\s*"id"\s*:\s*")(run_[a-f0-9]{12})\b', c_str)
-                        )
-                        fallback_rids.extend(re.findall(r"\brun_[a-f0-9]{12}\b", c_str))
+                        if jt == "USER_INPUT":
+                            break
+                        if jt == "GENERIC" or (jt == "SYSTEM_MESSAGE" and "[Message from background task" in c_str):
+                            for r_m in re.findall(r'"runId"\s*:\s*"(run_[a-f0-9]{12})"', c_str):
+                                step_runs.setdefault(idx_pos, set()).add(r_m)
+                            if has_rc:
+                                created_rids.extend(
+                                    re.findall(r'(?:Created\s+|RUN=|"run"\s*:\s*\{\s*"id"\s*:\s*")(run_[a-f0-9]{12})\b', c_str)
+                                )
+                                fallback_rids.extend(re.findall(r"\brun_[a-f0-9]{12}\b", c_str))
+                        elif jt == "PLANNER_RESPONSE":
+                            # Stop scanning GENERIC if we hit another run-create, otherwise allow scanning for async background task completion
+                            next_tcs = steps[j].get("tool_calls") or []
+                            if any(re.search(r"\borca\s+orchestration\s+run-create\b", _command_from_tool_call(ntc)) for ntc in next_tcs if isinstance(ntc, dict)):
+                                break
+                            if not has_rc or created_rids:
+                                break
                         j += 1
-                    chosen_rid = created_rids[-1] if created_rids else (fallback_rids[-1] if fallback_rids else None)
-                    if chosen_rid:
-                        run_creates.append((idx_pos, chosen_rid))
-                        step_runs.setdefault(idx_pos, set()).add(chosen_rid)
+                    if has_rc:
+                        chosen_rid = created_rids[-1] if created_rids else (fallback_rids[-1] if fallback_rids else None)
+                        if chosen_rid:
+                            run_creates.append((idx_pos, chosen_rid))
+                            step_runs.setdefault(idx_pos, set()).add(chosen_rid)
 
             def _advance_past_turn(pos: int, limit_pos: int) -> int:
                 p = pos
@@ -2898,12 +3158,19 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
                             rset = step_runs.get(p_idx, set())
                             if rset and scope_id not in rset:
                                 break
-                            if p_idx in orch_steps:
+                            if p_idx in orch_steps or scope_id in rset:
                                 last_own = p_idx
                         last_own_end = _advance_past_turn(last_own, len(steps))
                         end_pos = len(steps)
                         for fwd_pos in range(last_own_end + 1, len(steps)):
-                            if steps[fwd_pos].get("type") in ("USER_INPUT", "SYSTEM_MESSAGE"):
+                            fwd_type = steps[fwd_pos].get("type")
+                            if fwd_type == "USER_INPUT":
+                                end_pos = fwd_pos
+                                break
+                            if fwd_type == "SYSTEM_MESSAGE":
+                                sm_txt = str(steps[fwd_pos].get("content") or "")
+                                if "[Message from background task" in sm_txt or scope_id in sm_txt:
+                                    continue
                                 end_pos = fwd_pos
                                 break
                     return steps[start_pos:end_pos] if end_pos > start_pos else []
@@ -2928,7 +3195,14 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
                 last_c_end = _advance_past_turn(last_c, next_other)
                 end_pos = next_other
                 for fwd_pos in range(last_c_end + 1, next_other):
-                    if steps[fwd_pos].get("type") in ("USER_INPUT", "SYSTEM_MESSAGE"):
+                    fwd_type = steps[fwd_pos].get("type")
+                    if fwd_type == "USER_INPUT":
+                        end_pos = fwd_pos
+                        break
+                    if fwd_type == "SYSTEM_MESSAGE":
+                        sm_txt = str(steps[fwd_pos].get("content") or "")
+                        if "[Message from background task" in sm_txt or scope_id in sm_txt:
+                            continue
                         end_pos = fwd_pos
                         break
                 return steps[start_pos:end_pos] if end_pos > start_pos else []
@@ -2978,6 +3252,8 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
     tool_calls = 0
     tool_errors = 0
     last_tool_name = "-"
+    commit_shas = []
+    ran_git_commit = False
 
     for i, s in enumerate(steps):
         if s.get("type") == "PLANNER_RESPONSE":
@@ -2995,6 +3271,13 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
             tool_calls += len(tcs)
             if tcs and isinstance(tcs[-1], dict):
                 last_tool_name = str(tcs[-1].get("name") or "-")
+            turn_has_git_commit = any(
+                re.search(r"\bgit\b[^\n]*\bcommit\b", _command_from_tool_call(tc))
+                for tc in tcs
+                if isinstance(tc, dict)
+            )
+            if turn_has_git_commit:
+                ran_git_commit = True
 
             t_start = _parse_iso_utc(s.get("created_at"))
             t_comp = _parse_iso_utc(s.get("completed_at"))
@@ -3012,6 +3295,11 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                             tool_errors += 1
                         elif steps[j].get("status") == "ERROR":
                             tool_errors += 1
+                        if turn_has_git_commit:
+                            for m_c in re.finditer(r"\[([a-zA-Z0-9_./-]+)(?:\s+\(root-commit\))?\s+([0-9a-f]{7,40})\]\s+([^\n\r]+)", c):
+                                c_sha, c_subj = m_c.group(2), m_c.group(3).strip()
+                                if not c_subj.startswith("Merge ") and c_sha not in commit_shas:
+                                    commit_shas.append(c_sha)
                         m2 = re.search(r"Completed At:\s*([^\n\r]+)", c)
                         if m2:
                             ts2 = _parse_iso_utc(m2.group(1).strip())
@@ -3093,6 +3381,8 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
         "last_tool": last_tool_name,
         "last_step_at": steps[-1].get("completed_at") or steps[-1].get("created_at") or "",
         "bloated_logs": bloated_logs,
+        "commit_shas": commit_shas,
+        "ran_git_commit": ran_git_commit,
     }
 
 
@@ -3139,37 +3429,62 @@ def _index_cli_transcripts() -> dict:
                 first_ts = str(st.get("created_at"))
                 break
         for idx_s, st in enumerate(parsed_steps):
-            if st.get("type") != "PLANNER_RESPONSE":
+            st_type = st.get("type")
+            if st_type in ("SYSTEM_MESSAGE", "USER_INPUT"):
+                sm_str = str(st.get("content") or "")
+                sm_ts = str(st.get("created_at") or first_ts or "9999")
+                for r_m in re.findall(r"\[ORCA RUNTIME NOTIFICATION\s+—\s+RUN:\s*(run_[a-f0-9]{12})\b", sm_str):
+                    coord_ts.setdefault(r_m, sm_ts)
+                continue
+            if st_type != "PLANNER_RESPONSE":
                 continue
             step_ts = str(st.get("created_at") or first_ts or "9999")
             tcs = st.get("tool_calls") or []
             has_rc = False
+            has_orch = False
             for tc in tcs:
                 cmd_str = _command_from_tool_call(tc)
                 if not cmd_str or "orca-monitor" in cmd_str:
                     continue
                 if re.search(r"\borca\s+orchestration\s+run-create\b", cmd_str):
                     has_rc = True
+                    has_orch = True
                 if re.search(
                     r"\borca\s+orchestration\s+(?:task-create|worker-start|check|worker-read|gate-create|gate-resolve|task-update|worker-retain|worker-release|worker-stop|send|reply|run-show|task-list|worker-list)\b",
                     cmd_str,
                 ):
+                    has_orch = True
                     for r_m in re.findall(r"--(?:run|id)\s+(run_[a-f0-9]{12})\b", cmd_str):
                         coord_ts.setdefault(r_m, step_ts)
-            if has_rc:
+            if has_rc or has_orch:
                 j = idx_s + 1
                 created_rids = []
                 fallback_rids = []
-                while j < len(parsed_steps) and parsed_steps[j].get("type") == "GENERIC":
+                max_scan = min(len(parsed_steps), idx_s + 12)
+                while j < max_scan:
+                    jt = parsed_steps[j].get("type")
                     g_content = str(parsed_steps[j].get("content") or "")
-                    created_rids.extend(
-                        re.findall(r'(?:Created\s+|RUN=|"run"\s*:\s*\{\s*"id"\s*:\s*")(run_[a-f0-9]{12})\b', g_content)
-                    )
-                    fallback_rids.extend(re.findall(r"\brun_[a-f0-9]{12}\b", g_content))
+                    if jt == "USER_INPUT":
+                        break
+                    if jt == "GENERIC" or (jt == "SYSTEM_MESSAGE" and "[Message from background task" in g_content):
+                        for r_m in re.findall(r'"runId"\s*:\s*"(run_[a-f0-9]{12})"', g_content):
+                            coord_ts.setdefault(r_m, step_ts)
+                        if has_rc:
+                            created_rids.extend(
+                                re.findall(r'(?:Created\s+|RUN=|"run"\s*:\s*\{\s*"id"\s*:\s*")(run_[a-f0-9]{12})\b', g_content)
+                            )
+                            fallback_rids.extend(re.findall(r"\brun_[a-f0-9]{12}\b", g_content))
+                    elif jt == "PLANNER_RESPONSE":
+                        next_tcs = parsed_steps[j].get("tool_calls") or []
+                        if any(re.search(r"\borca\s+orchestration\s+run-create\b", _command_from_tool_call(ntc)) for ntc in next_tcs if isinstance(ntc, dict)):
+                            break
+                        if not has_rc or created_rids:
+                            break
                     j += 1
-                chosen_rid = created_rids[-1] if created_rids else (fallback_rids[-1] if fallback_rids else None)
-                if chosen_rid:
-                    creator_ts.setdefault(chosen_rid, step_ts)
+                if has_rc:
+                    chosen_rid = created_rids[-1] if created_rids else (fallback_rids[-1] if fallback_rids else None)
+                    if chosen_rid:
+                        creator_ts.setdefault(chosen_rid, step_ts)
         all_matched_rids = set(creator_ts.keys()) | set(coord_ts.keys())
         for rid_match in all_matched_rids:
             score = 2 if rid_match in creator_ts else 1
@@ -3229,7 +3544,16 @@ def _index_cli_transcripts() -> dict:
     }
 
 
-def _collect_git_diff_stats(wt_path: str, wt_name: str, root: Path = None, start_dt=None, comp_dt=None, is_active: bool = False) -> dict:
+def _collect_git_diff_stats(
+    wt_path: str,
+    wt_name: str,
+    root: Path = None,
+    start_dt=None,
+    comp_dt=None,
+    is_active: bool = False,
+    commit_shas: list = None,
+    has_transcript: bool = False,
+) -> dict:
     res = {"files": 0, "ins": 0, "del": 0, "commits": 0}
     has_wt_dir = bool(wt_path and os.path.isdir(wt_path))
     git_dir = wt_path if has_wt_dir else (str(root) if root and root.is_dir() else "")
@@ -3237,18 +3561,73 @@ def _collect_git_diff_stats(wt_path: str, wt_name: str, root: Path = None, start
         return res
     import subprocess
     try:
-        def _git(*a, t=2):
-            r = subprocess.run(["git", "-C", git_dir, *a], capture_output=True, text=True, timeout=t)
+        def _git(*a, t=2, cwd_override=None):
+            r = subprocess.run(["git", "-C", cwd_override or git_dir, *a], capture_output=True, text=True, timeout=t)
             return r.stdout.strip() if r.returncode == 0 else ""
 
-        # Nếu có cửa sổ thời gian thực thi của dispatch (start_dt .. comp_dt), ưu tiên đo đúng các commit phát sinh trong khoảng đó
+        seen_files = set()
+        if commit_shas:
+            valid_shas = []
+            for sha in commit_shas:
+                ns = _git("show", "--numstat", "--format=", sha, t=3)
+                if not ns and root and root.is_dir() and str(root) != git_dir:
+                    ns = _git("show", "--numstat", "--format=", sha, t=3, cwd_override=str(root))
+                if ns or _git("cat-file", "-t", sha) == "commit":
+                    valid_shas.append(sha)
+                    for ln in ns.splitlines():
+                        parts = ln.strip().split("\t")
+                        if len(parts) >= 3:
+                            seen_files.add(parts[2])
+                            if parts[0].isdigit():
+                                res["ins"] += int(parts[0])
+                            if parts[1].isdigit():
+                                res["del"] += int(parts[1])
+            res["commits"] = len(valid_shas)
+            if is_active and has_wt_dir:
+                dirty_ns = _git("diff", "--numstat", "HEAD", t=3)
+                for ln in dirty_ns.splitlines():
+                    parts = ln.strip().split("\t")
+                    if len(parts) >= 3:
+                        seen_files.add(parts[2])
+                        if parts[0].isdigit():
+                            res["ins"] += int(parts[0])
+                        if parts[1].isdigit():
+                            res["del"] += int(parts[1])
+            res["files"] = len(seen_files)
+            return res
+
+        if has_transcript:
+            # Worker có transcript đã phân tích và không thực hiện git commit nào trong phiên này
+            if is_active and has_wt_dir:
+                dirty_ns = _git("diff", "--numstat", "HEAD", t=3)
+                for ln in dirty_ns.splitlines():
+                    parts = ln.strip().split("\t")
+                    if len(parts) >= 3:
+                        seen_files.add(parts[2])
+                        if parts[0].isdigit():
+                            res["ins"] += int(parts[0])
+                        if parts[1].isdigit():
+                            res["del"] += int(parts[1])
+                res["files"] = len(seen_files)
+            return res
+
+        # Nếu không có transcript nhưng có cửa sổ thời gian thực thi của dispatch (start_dt .. comp_dt)
         if start_dt and comp_dt:
             since_ts = max(0, int(start_dt.timestamp()))
             until_ts = int(comp_dt.timestamp()) + 15
             target_ref = "HEAD" if has_wt_dir else (wt_name if (wt_name and wt_name != "-" and _git("rev-parse", "--verify", "-q", wt_name)) else "HEAD")
-            rev_args = ["rev-list", "--first-parent", "--no-merges", f"--since=@{since_ts}", f"--until=@{until_ts}", target_ref]
-            shas = [s.strip() for s in _git(*rev_args, t=3).splitlines() if s.strip()]
-            seen_files = set()
+            shas = []
+            if has_wt_dir or (target_ref != "HEAD"):
+                rf_out = _git("reflog", "show", "--format=%H|%gs", f"--since=@{since_ts}", f"--until=@{until_ts}", target_ref, t=3)
+                for rln in rf_out.splitlines():
+                    if "|" not in rln:
+                        continue
+                    r_sha, r_gs = rln.split("|", 1)
+                    if r_gs.startswith(("commit:", "commit (amend):", "commit (initial):")) and r_sha.strip() not in shas:
+                        shas.append(r_sha.strip())
+            if not shas:
+                rev_args = ["rev-list", "--no-merges", f"--since=@{since_ts}", f"--until=@{until_ts}", target_ref]
+                shas = [s.strip() for s in _git(*rev_args, t=3).splitlines() if s.strip()]
             if shas:
                 res["commits"] = len(shas)
                 for sha in shas:
@@ -3583,6 +3962,31 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
     active_run_obj = ""
     run_tasks = {}
     workers = []
+    hb_count = done_count = esc_count = handoff_count = done_tokens = 0
+    run_msgs = []
+    leader_m = {}
+    worker_metrics_list = []
+    model_buckets = {}
+
+    explicit_run_id = None
+    for idx_a, a in enumerate(args):
+        if a == "--run":
+            if idx_a + 1 >= len(args) or args[idx_a + 1].startswith("-"):
+                if as_json:
+                    sys.stdout = orig_stdout
+                print("❌ Thiếu giá trị cho cờ --run (ví dụ: --run run_xxxxxxxxxxxx).", file=sys.stderr)
+                sys.exit(1)
+            explicit_run_id = args[idx_a + 1]
+        elif a.startswith("--run="):
+            val = a.split("=", 1)[1].strip()
+            if not val or val.startswith("-"):
+                if as_json:
+                    sys.stdout = orig_stdout
+                print("❌ Thiếu giá trị cho cờ --run (ví dụ: --run=run_xxxxxxxxxxxx).", file=sys.stderr)
+                sys.exit(1)
+            explicit_run_id = val
+        elif a.startswith("run_"):
+            explicit_run_id = a
 
     try:
         r_res = _safe_orca_run([orca_bin, "orchestration", "run-list", "--json"], capture_output=True, text=True, timeout=5)
@@ -3596,63 +4000,93 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
         proj_slug = root.name.lower()
         candidate_runs = [r for r in all_runs if not r.get("legacy")]
 
-        explicit_run_id = None
-        for idx_a, a in enumerate(args):
-            if a == "--run" and idx_a + 1 < len(args):
-                explicit_run_id = args[idx_a + 1]
-            elif a.startswith("--run="):
-                explicit_run_id = a.split("=", 1)[1]
-            elif a.startswith("run_"):
-                explicit_run_id = a
-
         selected_run = None
-        scan_runs = [r for r in candidate_runs if r.get("id") == explicit_run_id] if explicit_run_id else candidate_runs[:6]
-        for r in scan_runs:
-            rid = r.get("id")
-            if not rid:
-                continue
-            w_chk = _safe_orca_run([orca_bin, "orchestration", "worker-list", "--run", rid, "--json"], capture_output=True, text=True, timeout=8)
-            t_chk = _safe_orca_run([orca_bin, "orchestration", "task-list", "--run", rid, "--json"], capture_output=True, text=True, timeout=8)
-            if w_chk.returncode == 124 or t_chk.returncode == 124:
-                print(f"⚠️  Orca CLI phản hồi chậm (>8s) khi đọc run {rid} — bỏ qua run này.")
-                continue
-            w_list_tmp = []
-            t_list_tmp = []
-            if w_chk.returncode == 0:
-                wo = json.loads(w_chk.stdout).get("result", {})
-                w_list_tmp = wo.get("workers", []) if isinstance(wo, dict) else []
-            if t_chk.returncode == 0:
-                to = json.loads(t_chk.stdout).get("result", {})
-                t_list_tmp = to.get("tasks", []) if isinstance(to, dict) else []
+        if explicit_run_id:
+            scan_runs = [r for r in candidate_runs if r.get("id") == explicit_run_id] or [{"id": explicit_run_id, "objective": ""}]
+        else:
+            scan_runs = candidate_runs
 
-            wt_paths = [
-                str((w_item.get("resource") or {}).get("worktreeId") or "").lower()
-                for w_item in w_list_tmp
-                if (w_item.get("resource") or {}).get("worktreeId")
-            ]
-            if explicit_run_id:
-                belongs_to_proj = True
-            elif wt_paths:
-                belongs_to_proj = any(
-                    str(root).lower() in ws_str or f"/{proj_slug}/" in ws_str or ws_str.endswith(f"/{proj_slug}")
-                    for ws_str in wt_paths
-                )
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _fetch_run_workers(r_item: dict):
+            rid_str = r_item.get("id")
+            if not rid_str:
+                return (r_item, None, [])
+            w_c = _safe_orca_run([orca_bin, "orchestration", "worker-list", "--run", rid_str, "--json"], capture_output=True, text=True, timeout=8)
+            if w_c.returncode == 124:
+                return (r_item, 124, [])
+            w_l = []
+            if w_c.returncode == 0:
+                try:
+                    wo_d = json.loads(w_c.stdout).get("result", {})
+                    w_l = wo_d.get("workers", []) if isinstance(wo_d, dict) else []
+                except Exception:
+                    w_l = []
+            return (r_item, w_c.returncode, w_l)
+
+        # Kiểm tra theo đúng thứ tự thời gian (mới nhất trước): kiểm tra run đầu tiên ngay lập tức, sau đó quét song song theo lô 6 run
+        batch_idx = 0
+        while batch_idx < len(scan_runs) and not selected_run:
+            batch_size = 1 if batch_idx == 0 else 6
+            batch = scan_runs[batch_idx : batch_idx + batch_size]
+            batch_idx += batch_size
+            if len(batch) == 1:
+                batch_results = [_fetch_run_workers(batch[0])]
             else:
-                belongs_to_proj = bool(
-                    re.search(rf"(?<![\w-]){re.escape(proj_slug)}(?![\w-])", str(r.get("objective", "")).lower())
-                )
+                with ThreadPoolExecutor(max_workers=min(6, len(batch))) as pool:
+                    batch_results = list(pool.map(_fetch_run_workers, batch))
 
-            if explicit_run_id or (belongs_to_proj and (w_list_tmp or t_list_tmp)):
-                selected_run = r
-                workers = w_list_tmp
-                for t in t_list_tmp:
-                    if t.get("id"):
-                        run_tasks[t.get("id")] = t
-                break
+            for r, w_rc, w_list_tmp in batch_results:
+                rid = r.get("id")
+                if not rid:
+                    continue
+                if w_rc == 124:
+                    print(f"⚠️  Orca CLI phản hồi chậm (>8s) khi đọc run {rid} — bỏ qua run này.")
+                    continue
+                wt_paths = [
+                    str((w_item.get("resource") or {}).get("worktreeId") or "").lower()
+                    for w_item in w_list_tmp
+                    if (w_item.get("resource") or {}).get("worktreeId")
+                ]
+                if explicit_run_id:
+                    belongs_to_proj = True
+                elif wt_paths:
+                    belongs_to_proj = any(
+                        str(root).lower() in ws_str or f"/{proj_slug}/" in ws_str or ws_str.endswith(f"/{proj_slug}")
+                        for ws_str in wt_paths
+                    )
+                else:
+                    belongs_to_proj = bool(
+                        re.search(rf"(?<![\w-]){re.escape(proj_slug)}(?![\w-])", str(r.get("objective", "")).lower())
+                    )
+
+                if not explicit_run_id and not belongs_to_proj:
+                    continue
+
+                t_chk = _safe_orca_run([orca_bin, "orchestration", "task-list", "--run", rid, "--json"], capture_output=True, text=True, timeout=8)
+                if t_chk.returncode == 124:
+                    print(f"⚠️  Orca CLI phản hồi chậm (>8s) khi đọc task-list của run {rid} — bỏ qua run này.")
+                    continue
+                t_list_tmp = []
+                if t_chk.returncode == 0:
+                    to = json.loads(t_chk.stdout).get("result", {})
+                    t_list_tmp = to.get("tasks", []) if isinstance(to, dict) else []
+
+                in_cand = any(cr.get("id") == rid for cr in candidate_runs)
+                if (explicit_run_id and (in_cand or w_list_tmp or t_list_tmp)) or (belongs_to_proj and (w_list_tmp or t_list_tmp)):
+                    selected_run = r
+                    workers = w_list_tmp
+                    for t in t_list_tmp:
+                        if t.get("id"):
+                            run_tasks[t.get("id")] = t
+                    break
 
         if not selected_run and candidate_runs:
-            # Không lấy run mới nhất của project KHÁC (trước đây gây hiển thị sai số liệu và --fix đụng vào run của project khác)
-            print(f"ℹ️  Không tìm thấy Run nào thuộc project '{root.name}' trong {len(scan_runs)} run gần nhất (truyền --run <run_id> để chỉ định).")
+            if explicit_run_id:
+                print(f"ℹ️  Không tìm thấy Run '{explicit_run_id}' trong Orca Runtime.")
+            else:
+                # Không lấy run mới nhất của project KHÁC (trước đây gây hiển thị sai số liệu và --fix đụng vào run của project khác)
+                print(f"ℹ️  Không tìm thấy Run nào thuộc project '{root.name}' trong {len(scan_runs)} run gần nhất (truyền --run <run_id> để chỉ định).")
 
         if selected_run:
             active_run_id = selected_run.get("id")
@@ -3679,9 +4113,6 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             total_spec_tokens = 0
             total_report_tokens = 0
             counted_task_ids = set()
-            worker_metrics_list = []
-
-            from concurrent.futures import ThreadPoolExecutor
 
             def _fetch_ws(did_str: str):
                 if not did_str or did_str == "-":
@@ -3788,13 +4219,13 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 spec_tok = estimate_tokens(spec_txt)
 
                 rep_body = ""
-                files_mod_count = 0
+                reported_files_count = 0
                 if res_raw:
                     try:
                         res_parsed = json.loads(res_raw)
                         rep_body = str(res_parsed.get("body") or "")
                         f_mod = res_parsed.get("filesModified") or []
-                        files_mod_count = len(f_mod)
+                        reported_files_count = len(f_mod)
                     except Exception:
                         rep_body = res_raw
                 rep_tok = estimate_tokens(rep_body)
@@ -3808,10 +4239,16 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
                 is_w_active = w_state not in ("succeeded", "failed", "stopped", "timed_out")
                 git_stats = _collect_git_diff_stats(
-                    wt_path, wt_name, root=root, start_dt=start_dt, comp_dt=comp_dt, is_active=is_w_active
+                    wt_path,
+                    wt_name,
+                    root=root,
+                    start_dt=start_dt,
+                    comp_dt=comp_dt,
+                    is_active=is_w_active,
+                    commit_shas=t_metrics.get("commit_shas") if t_metrics else None,
+                    has_transcript=bool(t_metrics),
                 )
-                if files_mod_count == 0 and git_stats["files"] > 0:
-                    files_mod_count = git_stats["files"]
+                files_mod_count = git_stats["files"] if (git_stats["files"] > 0 or t_metrics) else reported_files_count
 
                 # Chuẩn bị các cột hiển thị
                 role_col = f"{d_id[:10]}.. ({wt_name})"[:27]
@@ -3909,6 +4346,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     "files": files_mod_count,
                     "ins": git_stats["ins"],
                     "del": git_stats["del"],
+                    "commits": git_stats["commits"],
                     "telemetry": t_metrics,
                 })
 
@@ -3927,9 +4365,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             # Kiểm tra các Gate treo (pending) bất kể worker đang retained hay đã released,
             # và chỉ tự chữa các Task bị kẹt 'blocked'/'ready' khi toàn bộ worker đã released (và ít nhất 1 succeeded) và không còn pending gate.
             all_workers_settled_released = (
-                bool(workers)
-                and all(str(w.get("terminalState") or "") == "released" for w in workers)
-                and any(str(w.get("workerState") or w.get("state") or "") == "succeeded" for w in workers)
+                bool(worker_metrics_list)
+                and all(wm.get("term_state") == "released" for wm in worker_metrics_list)
+                and any(wm.get("state") == "succeeded" for wm in worker_metrics_list)
             )
             if active_run_id:
                 try:
@@ -4161,8 +4599,6 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
         if runtime_ok:
             # 4.2 Phân tích Mailbox
             inbox_res = _safe_orca_run([orca_bin, "orchestration", "inbox", "--limit", "500", "--json"], capture_output=True, text=True, timeout=5)
-            hb_count = done_count = esc_count = handoff_count = done_tokens = 0
-            run_msgs = []
             if inbox_res.returncode == 0:
                 inbox_data = json.loads(inbox_res.stdout)
                 inbox_obj = inbox_data.get("result", inbox_data) if isinstance(inbox_data, dict) else {}
@@ -4199,9 +4635,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 w_prefill_speed = (w_in_tok + w_cache_tok + w_out_tok) / max(1.0, w_llm_s)
                 w_cache_pct = (w_cache_tok / max(1, w_in_tok + w_cache_tok)) * 100.0
 
-                released_cnt = sum(1 for w in workers if str(w.get("terminalState") or "") == "released")
-                retained_cnt = sum(1 for w in workers if str(w.get("terminalState") or "") in ["retained", "reclaimable"])
-                active_cnt = sum(1 for w in workers if str(w.get("terminalState") or "") == "active")
+                released_cnt = sum(1 for wm in worker_metrics_list if wm.get("term_state") == "released")
+                retained_cnt = sum(1 for wm in worker_metrics_list if wm.get("term_state") in ["retained", "reclaimable"])
+                active_cnt = sum(1 for wm in worker_metrics_list if wm.get("term_state") == "active")
 
                 print(f"\n📈 4.3 BẢNG ĐỐI CHIẾU SỐ LIỆU ĐO ĐẠC THỰC TẾ (MEASURED TRANSCRIPT METRICS):")
                 print("   ┌──────────────────────────────────────────────┬─────────────────────────────────┬─────────────────────────────────┐")
@@ -4245,7 +4681,6 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 print("   └──────────────────────────────────────────────┴─────────────────────────────────┴─────────────────────────────────┘")
 
                 # Phân tích tốc độ theo từng dòng Model thực tế trong Run
-                model_buckets = {}
                 for wm in worker_metrics_list:
                     tm = wm.get("telemetry")
                     if not tm:
@@ -4330,6 +4765,20 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             "workspace": str(root),
             "baseDirectiveTokens": base_tokens,
             "runId": active_run_id,
+            "objective": active_run_obj,
+            "workersCount": len(workers),
+            "tasksCount": len(run_tasks),
+            "mailbox": {
+                "total": len(run_msgs),
+                "heartbeat": hb_count,
+                "workerDone": done_count,
+                "handoff": handoff_count,
+                "escalation": esc_count,
+                "wakePayloadTokens": done_tokens,
+            },
+            "leaderTelemetry": leader_m,
+            "workerMetrics": worker_metrics_list,
+            "modelBenchmarks": model_buckets,
             "summary": {
                 "criticalIssues": len(critical_issues),
                 "warnings": len(warning_issues),
@@ -4373,9 +4822,15 @@ def main():
     args = []
     i = 0
     after_dd = False
+    seen_spec_token = False
     while i < len(raw_args):
         if raw_args[i] == "--":
             after_dd = True
+            args.append(raw_args[i])
+            i += 1
+            continue
+        if not after_dd and not args and raw_args[i] in ("spec", "role-spec", "prompt"):
+            seen_spec_token = True
             args.append(raw_args[i])
             i += 1
             continue
@@ -4384,15 +4839,21 @@ def main():
             args.append(raw_args[i + 1])
             i += 2
             continue
-        if not after_dd and raw_args[i] in ("--path", "-C") and i + 1 < len(raw_args):
+        if not after_dd and not seen_spec_token and raw_args[i] in ("--path", "-C"):
+            if i + 1 >= len(raw_args) or raw_args[i + 1].startswith("-"):
+                print(f"❌ Thiếu giá trị đường dẫn cho cờ '{raw_args[i]}'.", file=sys.stderr)
+                sys.exit(1)
             cand = Path(raw_args[i + 1]).expanduser()
             if not cand.is_dir():
                 print(f"❌ Đường dẫn không tồn tại: '{raw_args[i + 1]}'.", file=sys.stderr)
                 sys.exit(1)
             explicit_root = cand.resolve()
             i += 2
-        elif not after_dd and raw_args[i].startswith("--path="):
-            p_val = raw_args[i].split("=", 1)[1]
+        elif not after_dd and not seen_spec_token and raw_args[i].startswith("--path="):
+            p_val = raw_args[i].split("=", 1)[1].strip()
+            if not p_val or p_val.startswith("-"):
+                print("❌ Thiếu giá trị đường dẫn cho cờ '--path='.", file=sys.stderr)
+                sys.exit(1)
             cand = Path(p_val).expanduser()
             if not cand.is_dir():
                 print(f"❌ Đường dẫn không tồn tại: '{p_val}'.", file=sys.stderr)
@@ -4404,7 +4865,7 @@ def main():
             i += 1
 
     if args and args[0] in ("spec", "role-spec", "prompt"):
-        cmd_spec(args[1:])
+        cmd_spec(args[1:], explicit_root=explicit_root)
         return
 
     root = explicit_root if explicit_root is not None else find_project_root()

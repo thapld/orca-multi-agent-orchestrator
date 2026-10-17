@@ -23,6 +23,12 @@ fi
 
 ORCA_TEAM_BIN="$(command -v orca-team 2>/dev/null || echo "${0:A:h}/orca-team")"
 ROLE_OR_AGENT="${2:-pr}"
+KNOWN_AGENTS_RE='^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$'
+KNOWN_ROLES_RE='^(coord|coordinator|leader|orchestrator|dev|developer|coder|devops|devopsspecialist|infra|sre|ops|sec|security|bughunter|bug|auditor|qa|test|tester|sdet|ui|ux|frontend|uispecialist|design|bench|benchmark|perf|performance|benchspecialist|re|reverse|rea|respecialist|critic|research|researcher|challenger|advocate|criticspecialist|pr|prreviewer|reviewer|issue|issueresolver|hotfix)$'
+if ! [[ "$ROLE_OR_AGENT" =~ $KNOWN_AGENTS_RE || "${ROLE_OR_AGENT:l}" =~ $KNOWN_ROLES_RE ]]; then
+  echo "❌ Role hoặc agent không hợp lệ: '$ROLE_OR_AGENT'. Hãy dùng role hợp lệ hoặc tên agent CLI." >&2
+  exit 1
+fi
 CONFIG_AGENT=""
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   CONFIG_AGENT=$("$ORCA_TEAM_BIN" get "$ROLE_OR_AGENT" 2>/dev/null || true)
@@ -30,11 +36,14 @@ if [[ -x "$ORCA_TEAM_BIN" ]]; then
     CONFIG_AGENT=$("$ORCA_TEAM_BIN" get pr 2>/dev/null || true)
   fi
   if [[ -z "$CONFIG_AGENT" || "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
+    CONFIG_AGENT=$("$ORCA_TEAM_BIN" get dev 2>/dev/null || true)
+  fi
+  if [[ -z "$CONFIG_AGENT" || "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]]; then
     CONFIG_AGENT=$("$ORCA_TEAM_BIN" get coord 2>/dev/null || true)
   fi
   [[ "$CONFIG_AGENT" == "none" || "$CONFIG_AGENT" == "null" ]] && CONFIG_AGENT=""
 fi
-if [[ "$ROLE_OR_AGENT" =~ ^(kimi|claude|codex|cursor|antigravity|opencode|aider|goose|copilot|gemini|muse|codebuddy|omp)$ ]]; then
+if [[ "$ROLE_OR_AGENT" =~ $KNOWN_AGENTS_RE ]]; then
   AGENT="$ROLE_OR_AGENT"
 else
   AGENT="${CONFIG_AGENT:-antigravity}"

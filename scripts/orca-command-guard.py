@@ -100,11 +100,15 @@ def _record_agent_pids(tasks_dir: Path) -> None:
         old: list[int] = []
         if f.exists():
             try:
-                old = [int(x) for x in json.loads(f.read_text(encoding="utf-8")) if str(x).isdigit()]
+                loaded = json.loads(f.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    old = [int(x) for x in loaded if str(x).isdigit()]
             except Exception:
                 old = []
         merged = [p for p in dict.fromkeys(_ancestor_pids() + old) if _pid_alive(p)][:24]
-        f.write_text(json.dumps(merged), encoding="utf-8")
+        tmp_f = f.with_name(f"{f.name}.{os.getpid()}.tmp")
+        tmp_f.write_text(json.dumps(merged), encoding="utf-8")
+        os.replace(tmp_f, f)
     except Exception:
         pass
 
@@ -122,6 +126,8 @@ def _pid_alive(pid: int) -> bool:
 def _load_agent_pids(tasks_dir: Path) -> set[int]:
     try:
         raw = json.loads((tasks_dir / AGENT_PIDS_FILE).read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            return set()
         return {int(x) for x in raw if str(x).isdigit() and _pid_alive(int(x))}
     except Exception:
         return set()
@@ -170,7 +176,10 @@ _INTERP_INLINE_RE = re.compile(
     r"(?P<opts>(?:\s+--?[a-zA-Z0-9_=.-]+)*)\s+(?P<flag>-(?:[a-zA-Z0-9]*[ce]|p)|--eval)(?:\s+|=)?\""
 )
 _UNQUOTED_HEREDOC_RE = re.compile(
-    r"(?:^|[\s;&|(])(?:\S*/)?(?:python3?(?:\.\d+)?|node|ruby|perl|bash|zsh|sh)\b[^\n<]*<<-?\s*(?P<delim>[A-Za-z_][A-Za-z0-9_-]*)[ \t]*\n"
+    r"(?:^|[\s;&|(])(?:"
+    r"(?:\S*/)?(?:python3?(?:\.\d+)?|node|ruby|perl|bash|zsh|sh)\b[^\n<]*<<-?\s*(?P<delim>[A-Za-z_][A-Za-z0-9_-]*)[^\n]*\n|"
+    r"(?:\S*/)?(?:cat|tee)\b[^\n<|;&]*<<-?\s*(?P<delim2>[A-Za-z_][A-Za-z0-9_-]*)[^\n]*\|\s*(?:\S*/)?(?:python3?(?:\.\d+)?|node|ruby|perl|bash|zsh|sh)\b[^\n]*\n"
+    r")"
 )
 _SAFE_TEXT_PATH_RE = re.compile(
     r"(?:/|^)(?:\.[a-zA-Z0-9_.-]+|"
@@ -189,7 +198,7 @@ _WHILE_TRUE_RE = re.compile(r"\bwhile\s*(?:\(\s*)?(?:True|1)(?:\s*\))?\s*:")
 
 def _find_double_quote_end(s: str, quote_idx: int) -> int:
     """Given s[quote_idx] == '\"', find the matching closing '\"' while respecting backslash escapes
-    and arbitrarily nested $(...) command substitutions and inner quotes in POSIX shells."""
+    and arbitrarily nested $(...) command substitutions, case...esac blocks, and inner quotes in POSIX shells."""
     i = quote_idx + 1
     n = len(s)
     stack: list[str] = ["dq"]
@@ -208,7 +217,7 @@ def _find_double_quote_end(s: str, quote_idx: int) -> int:
                 stack.append("cmd_sub")
                 i += 2
                 continue
-        else:  # top == "cmd_sub"
+        else:  # top in ("cmd_sub", "case")
             if ch == "'":
                 end_sq = s.find("'", i + 1)
                 if end_sq == -1:
@@ -224,7 +233,19 @@ def _find_double_quote_end(s: str, quote_idx: int) -> int:
             elif ch == "(":
                 stack.append("cmd_sub")
             elif ch == ")":
-                stack.pop()
+                if top == "cmd_sub":
+                    stack.pop()
+            elif ch == "c" and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] == "_")):
+                m_case = re.match(r"case\s+\S+\s+in(?![A-Za-z0-9_])", s[i:])
+                if m_case:
+                    stack.append("case")
+                    i += m_case.end()
+                    continue
+            elif top == "case" and ch == "e" and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] == "_")):
+                if re.match(r"esac(?![A-Za-z0-9_])", s[i:]):
+                    stack.pop()
+                    i += 4
+                    continue
             elif ch == "#" and (i == 0 or s[i - 1] in " \t\n;(&|"):
                 nl = s.find("\n", i + 1)
                 if nl == -1:
@@ -256,7 +277,7 @@ def _strip_quoted_heredocs(cmd: str) -> str:
 
 
 def _blank_single_quotes(cmd: str) -> str:
-    """Blank out single-quoted literals while respecting double quotes (including $(...) nesting) and backslash escapes."""
+    """Blank out single-quoted literals and top-level comments while respecting double quotes and backslash escapes."""
     out: list[str] = []
     i = 0
     n = len(cmd)
@@ -265,6 +286,12 @@ def _blank_single_quotes(cmd: str) -> str:
         if ch == "\\":
             out.append(cmd[i : i + 2])
             i += 2
+            continue
+        if ch == "#" and (i == 0 or cmd[i - 1] in " \t\n;(&|"):
+            nl = cmd.find("\n", i + 1)
+            if nl == -1:
+                break
+            i = nl
             continue
         if ch == "'":
             out.append("'")
@@ -296,13 +323,12 @@ def _strip_single_quotes_and_quoted_heredocs(cmd: str) -> str:
 
 
 def _is_safe_orca_spec_substitution(dq_body: str) -> bool:
-    """Return True if dq_body has no shell expansion, or is purely a single `$(orca-team spec ...)` call
+    """Return True if dq_body has no unescaped shell expansion, or is purely a single `$(orca-team spec ...)` call
     without unescaped backticks, extra command substitutions, or chained commands."""
-    # Scan dq_body using our quote/cmd_sub state machine
     if not dq_body:
         return True
     stripped = dq_body.strip()
-    if "$(" not in stripped and "`" not in stripped:
+    if not re.search(r"(?<!\\)(?:\\\\)*(?:`|\$\()", stripped):
         return True
     if not re.match(r"^\$\(\s*(?:\S*/)?orca-team\s+spec\b", stripped) or not stripped.endswith(")"):
         return False
@@ -345,19 +371,18 @@ def _is_safe_orca_spec_substitution(dq_body: str) -> bool:
 
 
 def _strip_non_exec_prose_flags(cmd: str) -> str:
-    """Strip non-executable prose flag values (--spec, --body, --question, -m, etc.)
-    and non-executed cat/tee quoted heredocs (`cat << 'EOF' > file`),
-    only matching flags at top-level (outside single/double quotes) and properly handling
-    nested quotes inside `--spec "$(orca-team spec ...)"`."""
+    """Strip non-executable prose flag values (--spec, --body, --question, -m, etc.),
+    top-level shell comments, and non-piped cat/tee quoted heredocs (`cat << 'EOF' > file`),
+    preserving any chained commands (`&&`, `;`, `||`) on the heredoc header line."""
     cleaned = re.sub(
-        r"\b(?:cat|tee)\b[^\n<;|&]*<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"][^\n]*\n(?:.*?\n)?[ \t]*\1[ \t]*(?=\n|$)",
-        "",
+        r"\b(?:cat|tee)\b[^\n<;|&]*<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"](?:[^\n|;&]|>&|&>)*((?:;|&&|\|\|)[^\n]*)?\n(?:.*?\n)?[ \t]*\1[ \t]*(?=\n|$)",
+        r"\2",
         cmd,
         flags=re.DOTALL,
     )
     cleaned = re.sub(
-        r"\b(?:cat|tee)\b[^\n<;|&]*<<-?\s*\\([A-Za-z_][A-Za-z0-9_-]*)[^\n]*\n(?:.*?\n)?[ \t]*\1[ \t]*(?=\n|$)",
-        "",
+        r"\b(?:cat|tee)\b[^\n<;|&]*<<-?\s*\\([A-Za-z_][A-Za-z0-9_-]*)(?:[^\n|;&]|>&|&>)*((?:;|&&|\|\|)[^\n]*)?\n(?:.*?\n)?[ \t]*\1[ \t]*(?=\n|$)",
+        r"\2",
         cleaned,
         flags=re.DOTALL,
     )
@@ -369,6 +394,12 @@ def _strip_non_exec_prose_flags(cmd: str) -> str:
         if ch == "\\":
             out.append(cleaned[i : i + 2])
             i += 2
+            continue
+        if ch == "#" and (i == 0 or cleaned[i - 1] in " \t\n;(&|"):
+            nl = cleaned.find("\n", i + 1)
+            if nl == -1:
+                break
+            i = nl
             continue
         if ch == "'":
             end_sq = cleaned.find("'", i + 1)
@@ -446,7 +477,7 @@ def _double_quoted_arg_has_backtick(cmd: str, start: int) -> bool:
                 stack.append("cmd_sub")
                 i += 2
                 continue
-        else:  # top == "cmd_sub"
+        else:  # top in ("cmd_sub", "case")
             if ch == "'":
                 end_sq = body.find("'", i + 1)
                 if end_sq == -1:
@@ -464,7 +495,19 @@ def _double_quoted_arg_has_backtick(cmd: str, start: int) -> bool:
             elif ch == "(":
                 stack.append("cmd_sub")
             elif ch == ")":
-                stack.pop()
+                if top == "cmd_sub":
+                    stack.pop()
+            elif ch == "c" and (i == 0 or not (body[i - 1].isalnum() or body[i - 1] == "_")):
+                m_case = re.match(r"case\s+\S+\s+in(?![A-Za-z0-9_])", body[i:])
+                if m_case:
+                    stack.append("case")
+                    i += m_case.end()
+                    continue
+            elif top == "case" and ch == "e" and (i == 0 or not (body[i - 1].isalnum() or body[i - 1] == "_")):
+                if re.match(r"esac(?![A-Za-z0-9_])", body[i:]):
+                    stack.pop()
+                    i += 4
+                    continue
             elif ch == "#" and (i == 0 or body[i - 1] in " \t\n;(&|"):
                 nl = body.find("\n", i + 1)
                 if nl == -1:
@@ -481,11 +524,11 @@ def _inline_script_backtick_risk(cmd: str) -> bool:
     pre_sanitized = _strip_quoted_heredocs(_strip_non_exec_prose_flags(cmd))
     # 1. Check unquoted heredocs BEFORE blanking single quotes (shells expand `...` even inside '...' in <<EOF)
     for m in _UNQUOTED_HEREDOC_RE.finditer(pre_sanitized):
-        delim = m.group("delim")
+        delim = m.group("delim") or m.group("delim2")
         body = pre_sanitized[m.end() :]
         end = re.search(rf"^[ \t]*{re.escape(delim)}[ \t]*$", body, re.M)
         body = body[: end.start()] if end else body
-        if re.search(r"(?<!\\)`", body):
+        if re.search(r"(?<!\\)(?:\\\\)*`", body):
             return True
     # 2. Check single-quoted shell -c wrappers (e.g. `docker exec c sh -c 'python3 -c "x = `key`"'`)
     for m in re.finditer(
@@ -556,10 +599,10 @@ def _is_raw_binary_cat_risk(cmd: str) -> bool:
 
 
 def _is_unbounded_find_loop_risk(cmd: str) -> bool:
-    """Detect unbounded `while True:` / `while 1:` + `.find(` loops in inline Python scripts."""
-    sanitized = _strip_non_shell_quoted_heredocs(_strip_non_exec_prose_flags(cmd))
+    """Detect unbounded `while True:` / `while 1:` + `.find(` loops in inline/heredoc/piped Python scripts."""
+    sanitized = _strip_non_exec_prose_flags(cmd)
     if not _WHILE_TRUE_RE.search(sanitized) or not re.search(
-        r"\bpython3?(?:\.\d+)?(?:\s+--?[a-zA-Z0-9_=.-]+)*\s+-[a-zA-Z0-9]*c\b",
+        r"(?:\bpython3?(?:\.\d+)?(?:\s+--?[a-zA-Z0-9_=.-]+)*(?:\s+-[a-zA-Z0-9]*c\b|[^\n|;&]*<<)|\bpython3?(?:\.\d+)?\b[^\n|;&]*<<|\|\s*(?:\S*/)?python3?(?:\.\d+)?\b)",
         sanitized,
     ):
         return False
@@ -575,13 +618,20 @@ def _is_unbounded_find_loop_risk(cmd: str) -> bool:
         bounded_lines: list[str] = []
         if seg_lines:
             bounded_lines.append(seg_lines[0])
-            for ln in seg_lines[1:]:
-                stripped_ln = ln.strip()
-                if stripped_ln and not stripped_ln.startswith("#"):
-                    indent = len(ln) - len(ln.lstrip(" \t"))
-                    if indent <= base_indent and not while_prefix.strip():
-                        break
-                bounded_lines.append(ln)
+            first_line_code = re.sub(r"#.*", "", seg_lines[0]).strip()
+            if not first_line_code:
+                body_indent: int | None = None
+                for ln in seg_lines[1:]:
+                    stripped_ln = ln.strip()
+                    if stripped_ln and not stripped_ln.startswith("#"):
+                        indent = len(ln) - len(ln.lstrip(" \t"))
+                        if body_indent is None:
+                            if not while_prefix.strip() and indent <= base_indent:
+                                break
+                            body_indent = indent
+                        elif indent < body_indent or (not while_prefix.strip() and indent <= base_indent):
+                            break
+                    bounded_lines.append(ln)
         loop_body = "".join(bounded_lines)
         # Also stop at chained shell commands outside Python (`&&`, `||`)
         loop_body = re.split(r"\s+(?:&&|\|\|)\s+", loop_body, maxsplit=1)[0]
@@ -845,7 +895,7 @@ def _kill_runaway_process_for_log(log_file: Path, tasks_dir: Path) -> bool:
         if cmd_map_file.exists():
             try:
                 cmap = json.loads(cmd_map_file.read_text(encoding="utf-8"))
-                raw_entry = cmap.get(log_file.name)
+                raw_entry = cmap.get(log_file.name) if isinstance(cmap, dict) else None
                 if isinstance(raw_entry, list):
                     cmd_hints = [str(x)[:160].strip() for x in raw_entry if str(x).strip()]
                 elif raw_entry:
@@ -1006,7 +1056,7 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
             except Exception:
                 pass
 
-            combined_tail = (prev_tail + new_tail) if (prev_tail and (had_sparse_hole or not new_tail)) else new_tail
+            combined_tail = (prev_tail + new_tail) if (prev_tail and (had_sparse_hole or len(new_tail) < TAIL_KEEP_BYTES)) else new_tail
             tail_bytes = _trim_utf8_head(combined_tail[-TAIL_KEEP_BYTES:]) if len(combined_tail) > TAIL_KEEP_BYTES else _trim_utf8_head(combined_tail)
 
             # 3. Ensure every line has newline breaks <= 4096 bytes and zero \x00 sparse holes
@@ -1113,7 +1163,9 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
             cmap: dict = {}
             if cmd_map_file.exists():
                 try:
-                    cmap = json.loads(cmd_map_file.read_text(encoding="utf-8"))
+                    loaded_cmap = json.loads(cmd_map_file.read_text(encoding="utf-8"))
+                    if isinstance(loaded_cmap, dict):
+                        cmap = loaded_cmap
                 except Exception:
                     cmap = {}
             if len(cmap) > 40:
@@ -1126,7 +1178,7 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
             meaningful_lines = [
                 ln
                 for ln in non_comment_lines
-                if not re.match(r"^(?:set\s+-[a-zA-Z]+|cd\s+\S+|export\s+\w+=.*)$", ln)
+                if not re.match(r"^(?:set\s+-[a-zA-Z]+|cd\s+[^;&|\n]+|export\s+\w+=[^;&|\n]*)$", ln)
             ] or non_comment_lines
             first_line_cmd = meaningful_lines[0][:160] if meaningful_lines else ""
             if str(step_idx).isdigit() and first_line_cmd:
@@ -1139,7 +1191,9 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
                         cmap[key] = [prev, first_line_cmd]
                     else:
                         cmap[key] = [first_line_cmd]
-            cmd_map_file.write_text(json.dumps(cmap), encoding="utf-8")
+            tmp_cmap = cmd_map_file.with_name(f"{cmd_map_file.name}.{os.getpid()}.tmp")
+            tmp_cmap.write_text(json.dumps(cmap), encoding="utf-8")
+            os.replace(tmp_cmap, cmd_map_file)
 
         if oversized:
             _enforce_task_log_cap(tasks_dir)

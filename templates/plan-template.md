@@ -44,7 +44,8 @@ graph LR
 * **Acceptance Criteria:** Render mượt mà, không lỗi console.
 
 ### Task 3: Integration & E2E Testing
-* **Worker đảm nhiệm:** QA Tester (`kimi`)
+* **Worker đảm nhiệm:** QA Tester (`antigravity` / `kimi`)
+* **Worktree định danh:** `qa-worker` (tái sử dụng `path:.../qa-worker` & gom nhóm Terminal Tab)
 * **Phụ thuộc (Depends on):** Task 1, Task 2
 * **Nhiệm vụ cụ thể:**
   - Viết kịch bản test tích hợp kết nối Frontend & Backend...
@@ -52,7 +53,8 @@ graph LR
 * **Acceptance Criteria:** Toàn bộ integration test suite pass.
 
 ### Task 4: Security Audit & Code Review
-* **Worker đảm nhiệm:** Security Auditor (`codex` / `claude`)
+* **Worker đảm nhiệm:** Security Auditor (`antigravity` / `claude`)
+* **Worktree định danh:** `sec-worker` (tái sử dụng `path:.../sec-worker` & gom nhóm Terminal Tab)
 * **Nhiệm vụ cụ thể:**
   - Rà soát OWASP Top 10, Auth/RBAC, rò rỉ secret...
 * **Acceptance Criteria:** 0 cảnh báo mức High / Critical.

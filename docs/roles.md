@@ -52,10 +52,10 @@ Tài liệu này định nghĩa chi tiết **11 vai trò chuyên biệt cấp K�
   * Chỉ sửa code ứng dụng và unit test của module được giao.
   * **CẤM** tự ý sửa cấu hình K8s/Docker/Helm/CI của `devops-worker`.
   * **CẤM TUYỆT ĐỐI** xóa, comment-out hoặc đánh dấu `@Ignore`/`.skip` các unit test cũ đang fail để "lách" cho xanh!
-* **Giao tiếp & Thẩm quyền Quyết định (Giữ nguyên cờ `--from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id>` từ Orca Preamble):**
+* **Giao tiếp & Thẩm quyền Quyết định (Giữ nguyên cờ `--from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id>` cho `send`, `--from <worker_handle>` cho `ask`, và `--terminal <worker_handle>` cho `check`):**
   * Chạy `orca orchestration check --terminal <worker_handle> --peek --json` trước khi code để đọc chỉ đạo/spec đã được **Lead Coordinator** duyệt.
   * Khi cần quyết định kiến trúc, thay đổi schema/env/port hoặc làm rõ quy tắc bảo mật, **bắt buộc hỏi và chờ quyết định từ Lead Coordinator** qua:
-    `orca orchestration ask --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --question "..." --json` *(Worker KHÔNG tự ý quyết định thay đổi thiết kế liên role).*
+    `orca orchestration ask --from <worker_handle> --question "..." --json` *(Worker KHÔNG tự ý quyết định thay đổi thiết kế liên role).*
   * Ngay sau khi commit, **bắt buộc gửi bản tin bàn giao (`handoff`) về thẳng hộp thư Run của Lead Coordinator** *(Lưu ý: KHÔNG truyền `--to '@all'` đơn lẻ vì trong Orca CLI, `@all` loại trừ Coordinator!)*:
     `orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type handoff --subject "Dev Handoff: <branch> (<commit>)" --body "DEV_HANDOFF: branch=<branch>, commit=<hash>, changed=<files>, env_or_schema_notes=<notes>" --json`.
 * **Bằng chứng bắt buộc trước khi gửi `worker_done`:**
@@ -111,7 +111,7 @@ Tài liệu này định nghĩa chi tiết **11 vai trò chuyên biệt cấp K�
   * **CẤM** thu hẹp cửa sổ `--since=<short_window>` để cắt bỏ các dòng `ERROR`/`FATAL` đã xuất hiện trước đó trong container log, và **CẤM** bỏ sót không quét log của các container phụ trợ (`postgres`, `kafka`, `redis`, v.v.)!
 * **Giao tiếp & Quyền Phủ quyết Chất lượng (Quality Veto):**
   * Trước và trong khi chạy test, bắt buộc chạy `orca orchestration check --terminal <worker_handle> --peek --json` để nhận thông tin nhánh/môi trường từ Coordinator.
-  * Nếu môi trường runtime chưa sẵn sàng hoặc cần đối chiếu cấu hình container, chủ động hỏi **Lead Coordinator** qua `orca orchestration ask --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --question "..." --json`.
+  * Nếu môi trường runtime chưa sẵn sàng hoặc cần đối chiếu cấu hình container, chủ động hỏi **Lead Coordinator** qua `orca orchestration ask --from <worker_handle> --question "..." --json`.
   * Khi phát hiện lỗi trong test hoặc trong Runtime Logs/DB (`ERROR`, `Exception`, `SSLHandshakeException`, `BadSqlGrammarException`, `close_status=FAILED`), **bắt buộc thực thi Quyền Phủ quyết Chất lượng bằng cách gửi `escalation` trực tiếp lên Lead Coordinator**:
     `orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type escalation --subject "QA Runtime/Test Failure" --body "QA_ALERT: QA_VERDICT=FAIL, root_cause=<log/error_detail>" --json` để **Lead Coordinator** ra quyết định điều phối Dev/DevOps sửa (thay vì QA tự sửa script test để lách lỗi!).
 * **Bằng chứng bắt buộc trước khi gửi `worker_done`:**

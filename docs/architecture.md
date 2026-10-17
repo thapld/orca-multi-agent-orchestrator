@@ -69,7 +69,7 @@ Bao gồm các agent chuyên biệt được khởi chạy có giám sát:
 * Chạy trong terminal tab được gom nhóm theo từng Worktree vai trò của Orca (`orca orchestration worker-start`).
 * Được giữ sống trên Sidebar ở Bước 3 bằng `orca orchestration worker-retain --dispatch <DISPATCH_ID> --json` (để thỏa mãn Completion Accounting của Orca đồng thời hiển thị chấm xanh `🟢`, icon Agent `✓` và chuông thông báo `🔔` cho đến khi người dùng duyệt Human Gate ở Bước 4 mới gọi `worker-release`).
 * Tuân thủ **Orca Worker Contract**:
-  - Giữ nguyên bộ cờ định danh từ Orca Preamble (`--from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id>` cho `send`/`ask` và `--terminal <worker_handle>` cho `check`).
+  - Giữ nguyên bộ cờ định danh từ Orca Preamble (`--from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id>` cho `send`, `--from <worker_handle>` cho `ask`, và `--terminal <worker_handle>` cho `check`).
   - Gửi `heartbeat` định kỳ để báo còn sống và kiểm tra chỉ đạo mới từ Leader qua `orca orchestration check --terminal <worker_handle> --peek --json`.
   - Gửi `handoff` (kèm Commit Hash / Clean-Room Spec / Runtime Log Audit) hoặc thực thi Quyền Phủ quyết Chuyên môn qua `escalation` về hộp thư Run của Lead Coordinator.
   - Kết thúc bằng một báo cáo `worker_done` cấu trúc 3 câu ngắn gọn và dừng kiểm tra hộp thư sau khi đã gửi `worker_done`.

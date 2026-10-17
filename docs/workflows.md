@@ -166,7 +166,7 @@ sequenceDiagram
     Note over Lead,Orca: Lắng nghe sự kiện: orca orchestration check [--ack <DELIVERY_ID>] --wait --types "worker_done,escalation,question,handoff"
 
     alt Trường hợp A: Worker hỏi quyết định kiến trúc (Blocking Question)
-        Worker->>Orca: orca orchestration ask --from <handle> --task-id <tid> --dispatch-id <did> --question "Cần làm rõ format JWT header" --json
+        Worker->>Orca: orca orchestration ask --from <handle> --question "Cần làm rõ format JWT header" --json
         Orca-->>Lead: Sự kiện 'question' (id: <MSG_ID>)
         Lead->>Orca: orca orchestration reply --id <MSG_ID> --body "Quyết định của Chief Architect: Dùng Authorization: Bearer <token>" --json
         Orca-->>Worker: Mở khóa 'ask' và trả về câu trả lời của Coordinator
@@ -185,7 +185,7 @@ sequenceDiagram
             Lead->>Orca: orca orchestration task-create & worker-start --worktree path:<wt_path> (Mở tab mới trong worktree định danh của role)
         end
     else Trường hợp D: Vấn đề vượt phạm vi spec cần ý kiến con người
-        Lead->>Orca: orca orchestration gate-create --title "..." --question "..." --options "approve,revise" --json
+        Lead->>Orca: orca orchestration gate-create --task <tid> --question "..." --options '["approve","revise"]' --json
         Lead-->>User: Tham vấn người dùng (Human Gate)
         User->>Lead: Phản hồi quyết định
     end
@@ -221,7 +221,7 @@ sequenceDiagram
     else Bế tắc sau 3 vòng
         Critic->>Orca: send --type handoff --subject "Critic Deadlock" (CRITIC_VERDICT: HYPOTHESIS_CHALLENGED)
         Orca-->>Lead: Sự kiện handoff
-        Lead->>Orca: gate-create --options leader,critic,wait (CẤM Leader tự phán quyết)
+        Lead->>Orca: gate-create --task <tid> --options '["leader","critic","wait"]' (CẤM Leader tự phán quyết)
         Orca-->>User: Trình 2 phương án + bằng chứng mỗi bên
         User->>Lead: Chọn phương án
     end
