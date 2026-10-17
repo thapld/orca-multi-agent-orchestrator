@@ -146,6 +146,66 @@ def _load_agent_pids(tasks_dir: Path) -> set[int]:
     return set(_load_agent_pids_ordered(tasks_dir))
 
 
+LEAF_AGENT_EXEC_NAMES = {
+    "agy",
+    "antigravity",
+    "claude",
+    "kimi",
+    "codex",
+}
+
+
+def _looks_like_leaf_agent(args_str: str) -> bool:
+    """Return True ONLY for leaf worker CLI / language_server processes that directly spawn tool commands.
+    Excludes GUI/PTY host daemons like `Orca Helper.app`, `Orca.app`, `Antigravity.app` (Electron), `orca-team`, etc."""
+    toks = args_str.split()
+    if not toks:
+        return False
+    exe = os.path.basename(toks[0]).lower()
+    if exe.startswith("language_server"):
+        return True
+    low_all = args_str.lower()
+    if ".app/contents/macos/" in low_all:
+        return False
+    if exe in INTERPRETERS or exe.startswith("python"):
+        non_flag_args = [t for t in toks[1:5] if not t.startswith("-")]
+        for raw_arg in non_flag_args[:2]:
+            script_arg = raw_arg.lower().replace("\\", "/")
+            script_base = os.path.basename(script_arg)
+            if script_base in LEAF_AGENT_EXEC_NAMES:
+                return True
+            if any(
+                pkg in script_arg
+                for pkg in (
+                    "@anthropic-ai/claude-code",
+                    "/claude-code/",
+                    "/antigravity-cli/",
+                    "/kimi-cli/",
+                    "@openai/codex",
+                )
+            ):
+                return True
+        return False
+    return exe in LEAF_AGENT_EXEC_NAMES
+
+
+def _load_leaf_agent_pid(tasks_dir: Path, proc_table: dict[int, tuple[int, int, str]]) -> int | None:
+    """Return the innermost leaf agent PID recorded for this conversation (raw[0]) if and only if it is still alive
+    and is a leaf agent process. Never falls back to parent shells or global `Orca Helper.app` / `Orca.app`."""
+    try:
+        raw = json.loads((tasks_dir / AGENT_PIDS_FILE).read_text(encoding="utf-8"))
+        if not isinstance(raw, list) or not raw:
+            return None
+        first = raw[0]
+        if str(first).isdigit():
+            pid = int(first)
+            if pid in proc_table and _looks_like_leaf_agent(proc_table[pid][2]):
+                return pid
+    except Exception:
+        pass
+    return None
+
+
 def _looks_like_agent(args_str: str) -> bool:
     """Match agent markers on the executable name (or installed agent CLI paths/wrappers for node/python),
     never on arbitrary user script basenames like `python3 orca_test.py` or `node claude_test.js`."""
@@ -487,6 +547,41 @@ def _is_safe_orca_spec_substitution(dq_body: str) -> bool:
     return True
 
 
+def _has_unquoted_comment(s: str) -> bool:
+    """Return True if `s` contains an unquoted shell `#` comment token (preceded by start-of-line or shell delimiter)."""
+    in_sq = False
+    in_dq = False
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if in_sq:
+            if ch == "'":
+                in_sq = False
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if in_dq:
+            if ch == '"':
+                in_dq = False
+            i += 1
+            continue
+        if ch == "'":
+            in_sq = True
+            i += 1
+            continue
+        if ch == '"':
+            in_dq = True
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or s[i - 1] in " \t\n;(&|"):
+            return True
+        i += 1
+    return False
+
+
 def _strip_non_piped_cat_tee_heredocs(cmd: str) -> str:
     """Scan top-level shell lines in order:
     - Any heredoc (`python3 - << 'EOF'`, `cat << 'EOF'`, etc.) advances `i` past its closing delimiter line
@@ -515,7 +610,7 @@ def _strip_non_piped_cat_tee_heredocs(cmd: str) -> str:
             continue
         # Ensure << is not inside a top-level # comment on the same line
         pre_hd = code_part[: m_hd.start()]
-        if re.search(r"(?:^|[\s;(&|])#", pre_hd):
+        if _has_unquoted_comment(pre_hd):
             out_lines.append(line)
             i += 1
             continue
@@ -1059,6 +1154,8 @@ def _run_stream_filter() -> None:
 
 def _parse_ps_etime(etime_str: str) -> int:
     s = etime_str.strip()
+    if not s:
+        return -1
     days = 0
     if "-" in s:
         d_part, s = s.split("-", 1)
@@ -1071,7 +1168,7 @@ def _parse_ps_etime(etime_str: str) -> int:
         return days * 86400 + parts[0] * 60 + parts[1]
     if len(parts) == 1:
         return days * 86400 + parts[0]
-    return 0
+    return -1
 
 
 def _get_process_table_with_etime() -> tuple[dict[int, tuple[int, int, str]], dict[int, int]]:
@@ -1125,25 +1222,31 @@ def _collect_descendants(root_pid: int, children_map: dict[int, list[int]]) -> l
 
 
 def _normalize_cmd_hint(raw_cmd: str) -> str:
-    s = raw_cmd.strip()
+    s = re.sub(r"\\\r?\n\s*", " ", raw_cmd).strip()
     if len(s) >= 158 and " " in s:
         s = s.rsplit(None, 1)[0]
     prev = None
     while s and s != prev:
         prev = s
+        s = re.sub(r"^[\s({]+", "", s)
         s = re.sub(
-            r"^(?:\s*(?:set\s+-[a-zA-Z0-9\s-]+|cd\s+[^;&|\n]+|export\s+[^;&|\n]+|source\s+[^;&|\n]+|\.\s+[^;&|\n]+)\s*(?:&&|;)\s*)+",
+            r"^(?:(?:sudo|env|command|nohup|nice)\s+)*(?:\S*/)?(?:sh|bash|zsh|dash|ksh)\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+['\"]?",
             "",
             s,
         ).strip()
         s = re.sub(
-            r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)+",
+            r"^(?:\s*(?:set\s+-[a-zA-Z0-9\s-]+|(?:cd|pushd|popd)\s+[^;&|\n]+|export\s+[^;&|\n]+|unset\s+[^;&|\n]+|ulimit\s+[^;&|\n]+|source\s+[^;&|\n]+|\.\s+[^;&|\n]+)\s*(?:&&|;|$)\s*)+",
+            "",
+            s,
+        ).strip()
+        s = re.sub(
+            r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)(?:\s+|(?:\s*;\s*)+|$))+",
             "",
             s,
         ).strip()
     s = re.sub(r"<<-?\s*['\"\\]?[A-Za-z0-9_.-]+['\"]?", "", s)
-    s = re.sub(r"\b\d*>&\d+\b", "", s)
-    s = re.sub(r"\b\d*>>?\s*\S+", "", s)
+    s = re.sub(r"(?:^|(?<=[\s;&|()]))(?:\d*>&\d+|\d*>>?\s*\S+|&>>?\s*\S+)", "", s)
+    s = re.sub(r"[\s)};]+$", "", s)
     return s.strip()
 
 
@@ -1195,14 +1298,12 @@ def _kill_runaway_process_for_log(
             return False
 
         # Fallback khi `agy`/`language_server` không giữ mở FD của `task-XX.log` liên tục (chỉ open->write->close khi có output):
-        # lấy PID của leaf agent thuộc conversation này từ `.orca-agent-pids.json` hoặc `lsof` trên `.system_generated`.
+        # chỉ lấy PID của LEAF agent (`raw[0]`) thuộc conversation này từ `.orca-agent-pids.json` hoặc `lsof` trên `.system_generated`.
         if not holder_pids:
-            ordered_agents = _load_agent_pids_ordered(tasks_dir)
-            for apid in ordered_agents:
-                if apid in proc_table and _looks_like_agent(proc_table[apid][2]):
-                    holder_pids.append(apid)
-                    break
-            if not holder_pids and tasks_dir.parent.name == ".system_generated":
+            leaf_pid = _load_leaf_agent_pid(tasks_dir, proc_table)
+            if leaf_pid:
+                holder_pids.append(leaf_pid)
+            elif tasks_dir.parent.name == ".system_generated":
                 try:
                     sg_res = subprocess.run(
                         ["lsof", "-t", str(tasks_dir.parent)],
@@ -1214,7 +1315,7 @@ def _kill_runaway_process_for_log(
                         for x in sg_res.stdout.splitlines():
                             if x.strip().isdigit():
                                 p_cand = int(x.strip())
-                                if p_cand in proc_table and _looks_like_agent(proc_table[p_cand][2]):
+                                if p_cand in proc_table and _looks_like_leaf_agent(proc_table[p_cand][2]):
                                     holder_pids.append(p_cand)
                 except Exception:
                     pass
@@ -1317,8 +1418,8 @@ def _kill_runaway_process_for_log(
                     if any(ex in full_low for ex in EXCLUDED_CHILD_MARKERS):
                         continue
                     # Chống giết nhầm tiến trình mới vừa khởi chạy cho một file log cũ đã ngừng ghi từ trước:
-                    max_etime = max([etime_map.get(dp, 0) for dp in desc_pids] + [etime_map.get(ch_pid, 0)])
-                    if log_idle_s >= 5.0 and max_etime > 0 and (max_etime + 2.0) < log_idle_s:
+                    max_etime = max([etime_map.get(dp, -1) for dp in desc_pids] + [etime_map.get(ch_pid, -1)])
+                    if log_idle_s >= 2.0 and max_etime >= 0 and (max_etime + 1.5) < log_idle_s:
                         continue
                     if require_jest and not re.search(r"\b(?:jest|vitest)\b", full_low):
                         continue
@@ -1328,6 +1429,7 @@ def _kill_runaway_process_for_log(
                 # Mơ hồ (0 hoặc >1 ứng viên) ➔ KHÔNG kill gì (chỉ cắt log) để không giết nhầm dev server / MCP server / lệnh song song.
                 if cmd_hints:
                     matched: list[tuple[int, int, str]] = []
+                    has_any_tokens = False
                     for hint in reversed(cmd_hints):
                         norm_hint = _normalize_cmd_hint(hint)
                         exact = [
@@ -1339,6 +1441,8 @@ def _kill_runaway_process_for_log(
                             matched = exact
                             break
                         hint_tokens = _extract_hint_tokens(hint)
+                        if hint_tokens:
+                            has_any_tokens = True
                         tok_match = [
                             c
                             for c in candidate_children
@@ -1350,9 +1454,10 @@ def _kill_runaway_process_for_log(
                             matched = tok_match
                             break
                     if not matched and len(candidate_children) == 1:
-                        # Khi đã lọc `max_etime >= log_idle_s - 2` (và `require_jest` hoặc PTY session tách biệt `ch_pgid != h_pgid`),
-                        # nếu chỉ có duy nhất 1 tiến trình con đang chạy dưới agent này thì chính là nó.
-                        if require_jest or candidate_children[0][1] != h_pgid:
+                        # Chỉ fallback khi require_jest=True (đã xác nhận trình chạy là jest/vitest và etime khớp log_idle_s)
+                        # hoặc khi cmd_hints không trích xuất được token nào; nếu cmd_hints có token mà không khớp bất kỳ
+                        # tiến trình con nào thì tiến trình gốc đã thoát và ứng viên hiện tại thuộc lệnh mới khác.
+                        if require_jest or (not has_any_tokens and candidate_children[0][1] != h_pgid):
                             matched = candidate_children
                     candidate_children = matched
                 elif len(candidate_children) != 1:
@@ -1415,8 +1520,8 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
                                             b"\n[ORCA AUTO-EXIT: Terminated hung Jest process after all tests completed (open handles). Tip: pass --forceExit to jest.]\n"
                                         )
                                     truncated_count += 1
-                                elif idle_age >= 5.0:
-                                    # Đánh dấu đã kiểm tra để không gọi lsof/ps lặp lại mỗi 1.5s hoặc giết nhầm lần chạy Jest sau
+                                else:
+                                    # Đánh dấu ngay sau lần kiểm tra ở >=3.0s để không tạo cửa sổ mù 3.0s..5.0s giết nhầm lần chạy Jest kế tiếp
                                     with open(log_file, "ab") as jf_out:
                                         jf_out.write(
                                             b"\n[ORCA AUTO-EXIT: Jest open-handle warning noted (process already exited). Tip: pass --forceExit to jest.]\n"
@@ -1427,7 +1532,15 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
 
             # 1. Terminate ONLY the runaway child command writing to this log file first (never the Agent CLI)
             #    so the PTY buffer drains into log_file BEFORE we sample new_tail and truncate.
-            killed = _kill_runaway_process_for_log(log_file, tasks_dir)
+            already_truncated_idle = False
+            if now_ts - mtime >= 2.0:
+                try:
+                    with open(log_file, "rb") as chk_f:
+                        if marker in chk_f.read(HEAD_KEEP_BYTES + 1024):
+                            already_truncated_idle = True
+                except Exception:
+                    pass
+            killed = False if already_truncated_idle else _kill_runaway_process_for_log(log_file, tasks_dir)
             if killed:
                 time.sleep(0.25)
                 try:
@@ -1486,15 +1599,10 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
 def _has_active_tool_children(tasks_dir: Path) -> bool:
     """Return True if the conversation's leaf agent process still has an active non-MCP tool child running."""
     try:
-        ordered_agents = _load_agent_pids_ordered(tasks_dir)
-        if not ordered_agents:
-            return False
         proc_table = _get_process_table()
-        leaf_agent = None
-        for apid in ordered_agents:
-            if apid in proc_table and _looks_like_agent(proc_table[apid][2]):
-                leaf_agent = apid
-                break
+        if not proc_table:
+            return False
+        leaf_agent = _load_leaf_agent_pid(tasks_dir, proc_table)
         if not leaf_agent:
             return False
         _, h_pgid, _ = proc_table[leaf_agent]
@@ -1605,18 +1713,16 @@ def _ensure_watcher_for_payload(payload: dict, event: str, cmd: str) -> None:
                     cmap = {}
             if len(cmap) > 200:
                 cmap = dict(list(cmap.items())[-120:])
-            non_comment_lines = [
-                ln.strip()
-                for ln in cmd.splitlines()
-                for ln in [ _normalize_cmd_hint(ln) or ln.strip() ]
-                if ln.strip() and not ln.strip().startswith("#")
-            ]
-            meaningful_lines = [
-                ln
-                for ln in non_comment_lines
-                if not re.match(r"^(?:set\s+-[a-zA-Z]+|cd\s+[^;&|\n]+|export\s+\w+=[^;&|\n]*)$", ln)
-            ] or non_comment_lines
-            first_line_cmd = meaningful_lines[0][:160] if meaningful_lines else ""
+            joined_cmd = re.sub(r"\\\r?\n\s*", " ", cmd)
+            non_comment_lines: list[str] = []
+            for raw_ln in joined_cmd.splitlines():
+                s_ln = raw_ln.strip()
+                if not s_ln or s_ln.startswith("#"):
+                    continue
+                norm_ln = _normalize_cmd_hint(s_ln)
+                if norm_ln and not norm_ln.startswith("#"):
+                    non_comment_lines.append(norm_ln)
+            first_line_cmd = non_comment_lines[0][:160] if non_comment_lines else ""
             if str(step_idx).isdigit() and first_line_cmd:
                 base_idx = int(step_idx)
                 for key in (f"task-{base_idx}.log", f"task-{base_idx + 1}.log", f"task-{base_idx + 2}.log"):

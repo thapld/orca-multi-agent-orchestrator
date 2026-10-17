@@ -48,9 +48,9 @@ for bin in "${BINARIES[@]}"; do
   fi
 done
 
-# Gỡ bỏ orca-command-guard khỏi ~/.gemini/config/hooks.json
+# Gỡ bỏ orca-command-guard khỏi ~/.gemini/config/hooks.json và dọn khối cấu hình cũ trong ~/.zshrc, ~/.bashrc
 python3 - << 'PY' >/dev/null 2>&1 || true
-import json, os
+import json, os, re
 from pathlib import Path
 hooks_path = Path.home() / ".gemini" / "config" / "hooks.json"
 if hooks_path.exists():
@@ -63,6 +63,22 @@ if hooks_path.exists():
             os.replace(tmp_path, hooks_path)
     except Exception:
         pass
+
+for rc_name in (".zshrc", ".bashrc"):
+    rc_path = Path.home() / rc_name
+    if rc_path.exists() and not rc_path.is_symlink():
+        try:
+            txt = rc_path.read_text(encoding="utf-8")
+            cleaned = re.sub(
+                r"\n?# >>> Orca Multi-Agent Orchestrator.*?# <<< Orca Multi-Agent Orchestrator <<<\n?",
+                "\n",
+                txt,
+                flags=re.DOTALL,
+            )
+            if cleaned != txt:
+                rc_path.write_text(cleaned, encoding="utf-8")
+        except Exception:
+            pass
 PY
 
 echo ""

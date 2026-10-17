@@ -113,15 +113,17 @@ ROLE_SPEC_TEMPLATES = {
     "developer": (
         "[ROLE: PRINCIPAL DEV] Nhiệm vụ: {task}. "
         "Chuẩn: Clean Architecture, type-safe 100%, xử lý edge cases (null, timeout, concurrency), không TODO/mock giả/hardcode secret. "
-        "CẤM VƯỢT RÀO: Chỉ sửa code app & unit test trong phạm vi file được giao; CẤM sửa K8s/Docker của DevOps; CẤM xóa/skip (@Ignore, .skip) test cũ đang fail. "
+        "CẤM VƯỢT RÀO: Chỉ sửa code app & unit test (__tests__/*, *.test.*, *.spec.*) thuộc phạm vi module/file được giao (cấm đụng sang module của slot khác); "
+        "chủ động định vị đường dẫn package trong monorepo (services/*, packages/*, apps/*) mà không dừng lại ask Coordinator; CẤM sửa K8s/Docker của DevOps; CẤM xóa/skip (@Ignore, .skip) test cũ đang fail. "
         "GIAO TIẾP & THẨM QUYỀN QUYẾT ĐỊNH (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): "
         "(1) Đồng bộ nhánh mới nhất (git merge --no-edit main) và kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận chỉ đạo/spec từ Coordinator; "
-        "nếu cần quyết định kiến trúc/cấu hình, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json "
-        "(worker KHÔNG tự ý đổi thiết kế liên role), (2) Build & Unit Test EXIT_CODE=0 và git commit sạch vào nhánh worktree hiện tại (dev-worker / dev-worker-N), "
-        "(3) Trước khi gửi worker_done, BẮT BUỘC gửi bàn giao về Coordinator duyệt: "
-        "orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: <branch_name> (<commit_hash>)' "
+        "nếu cần quyết định kiến trúc/cấu hình liên role, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json, "
+        "(2) Build & Unit Test EXIT_CODE=0 (Jest bắt buộc kèm --forceExit) và git commit sạch vào nhánh worktree hiện tại ({slot_branch}), "
+        "(3) Khi hoàn tất, BẮT BUỘC gộp lệnh gửi handoff và worker-done trong CÙNG MỘT LỆNH SHELL nối bằng && (để Coordinator không bị đánh thức 2 lần lệch nhịp): "
+        "orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: {slot_branch} (<commit_hash>)' "
         "--body 'Tóm tắt nhánh, file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench' "
-        "--task-id <task_id> --dispatch-id <dispatch_id> --json (KHÔNG dùng --to '@all' vì '@all' loại trừ Coordinator!)."
+        "--task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json "
+        "(KHÔNG dùng --to '@all' vì '@all' loại trừ Coordinator!)."
     ),
     "devopsSpecialist": (
         "[ROLE: PRINCIPAL DEVOPS/SRE] Nhiệm vụ: {task}. "
@@ -130,18 +132,18 @@ ROLE_SPEC_TEMPLATES = {
         "CẤM TUYỆT ĐỐI tự ý dịch ngược hoặc đọc/cat/strings/grep trực tiếp file binary trong container (nếu cần giải phẫu binary phải báo Coordinator giao re-worker); "
         "CẤM đặt dấu backtick (`) bên trong chuỗi nháy kép (\"...\") của bash/zsh/python -c vì shell sẽ thực thi command substitution gây biến rỗng và treo vòng lặp stdout! "
         "RÀ SOÁT RUNTIME LOGS & BÁO CÁO COORDINATOR (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): "
-        "(1) Chạy orca orchestration check --terminal <worker_handle> --json nhận nhánh/commit đã được Coordinator duyệt và "
-        "chạy git merge --no-edit main && git merge --no-edit dev-worker trước khi build, (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! "
+        "(1) Đầu ca chạy git merge --no-edit main và orca orchestration check --terminal <worker_handle> --json; khi hộp thư có bàn giao nhánh Dev đã được Coordinator duyệt cần build/rollout thì merge thêm "
+        "(! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker), (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! "
         "Bắt buộc chờ qua chu kỳ chạy thật của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start "
         "(kubectl logs/docker logs KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) "
         "cùng trạng thái DB, (3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, "
         "SSLHandshakeException, Auth 401/403 hay health=ERROR nào lúc runtime (hoặc nếu vướng lỗi quá 15 turns chưa xử lý được ở tầng Infra/DB) ➔ BẮT BUỘC dừng đào bới và trình báo ngay lên Coordinator: "
         "orca orchestration send --from <worker_handle> --type escalation --subject 'Runtime Log Error' "
         "--body '<Chi tiết pod & log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json "
-        "(KHÔNG dùng --to '@all'!) rồi chờ chỉ đạo hoặc báo worker_done --outcome failed "
-        "(CẤM báo succeeded khi runtime log còn lỗi!); khi sạch lỗi 100%, gửi "
+        "(KHÔNG dùng --to '@all'!) rồi chờ chỉ đạo hoặc báo worker-done --outcome failed "
+        "(CẤM báo succeeded khi runtime log còn lỗi!); khi sạch lỗi 100%, gộp gửi handoff và worker-done trong cùng 1 lệnh (&&): "
         "orca orchestration send --from <worker_handle> --type handoff --subject 'Infra Ready' --body '<Pod/Port/Log sạch 100%>' "
-        "--task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator."
+        "--task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json."
     ),
     "criticSpecialist": (
         "[ROLE: PRINCIPAL RESEARCH & ADVERSARIAL CRITIC] Nhiệm vụ: {task} (Spec tách riêng Triệu chứng + bằng chứng thô và Giả thuyết/Kế hoạch của Leader). "
@@ -151,16 +153,15 @@ ROLE_SPEC_TEMPLATES = {
         "GIAO THỨC TRANH BIỆN (BẮT BUỘC giữ nguyên --from cho ask; --from/--task-id/--dispatch-id cho send từ Preamble): "
         "(a) Bác bỏ ➔ orca orchestration ask --from <worker_handle> --question 'CRITIC_CHALLENGE vòng <n>/3: <bằng chứng file:line/log> | Đề xuất: <phương án>' --timeout-ms 900000 --json "
         "(lệnh chặn tới khi Leader reply; timeout thì chạy lại với --resume <message_id>), kiểm chứng phản hồi của Leader rồi lặp tối đa 3 vòng; "
-        "(b) Đồng thuận ➔ orca orchestration send --from <worker_handle> --type handoff --subject 'Critic Consensus' "
-        "--body 'CRITIC_VERDICT: CONSENSUS_REACHED | <root-cause/spec đã thống nhất + file:line>' --task-id <task_id> --dispatch-id <dispatch_id> --json; "
-        "(c) Hết 3 vòng vẫn bất đồng ➔ cùng lệnh send với --subject 'Critic Deadlock' --body 'CRITIC_VERDICT: HYPOTHESIS_CHALLENGED | Phương án Leader vs Critic + bằng chứng mỗi bên'. "
-        "CẤM gửi worker_done trước khi đã gửi (b) hoặc (c)."
+        "(b) Đồng thuận ➔ gộp trong cùng 1 lệnh (&&): orca orchestration send --from <worker_handle> --type handoff --subject 'Critic Consensus' "
+        "--body 'CRITIC_VERDICT: CONSENSUS_REACHED | <root-cause/spec đã thống nhất + file:line>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json; "
+        "(c) Hết 3 vòng vẫn bất đồng ➔ gộp lệnh send với --subject 'Critic Deadlock' --body 'CRITIC_VERDICT: HYPOTHESIS_CHALLENGED | Phương án Leader vs Critic + bằng chứng mỗi bên' && orca orchestration worker-done ..."
     ),
     "security": (
         "[ROLE: PRINCIPAL SECURITY AUDITOR] Nhiệm vụ: {task}. "
         "Chuẩn: Soi git diff theo OWASP Top 10 (SQLi, Injection, Auth/JWT, IDOR, SSRF, XSS), Race Conditions/Deadlock, Resource/Memory Leaks "
         "và Secret Leaks. CẤM VƯỢT RÀO: Read-Only Audit & PoC; CẤM tự sửa code tính năng của Dev. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: "
-        "Chạy git merge --no-edit main && git merge --no-edit dev-worker để diff đúng commit mới của Dev; nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng "
+        "Chạy git merge --no-edit main && (! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker) để diff đúng commit mới (nếu có xung đột merge chỉ giữ code từ nhánh được kiểm toán, CẤM tạo commit mới sửa code tính năng); nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng "
         "orca orchestration send --from <worker_handle> --type escalation --subject 'Security Vulnerability Found' "
         "--body '<file:line & PoC trình Coordinator ra quyết định>' --task-id <task_id> --dispatch-id <dispatch_id> --json; "
         "liệt kê rõ file:line theo 4 mục [OWASP, Concurrency, Leaks, Secrets] và chốt SECURITY_VERDICT: PASS hoặc BLOCK."
@@ -171,7 +172,7 @@ ROLE_SPEC_TEMPLATES = {
         "CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test; CẤM TUYỆT ĐỐI sửa business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi "
         "status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót "
         "không quét pod DB/Kafka! GIAO TIẾP & BÁO CÁO COORDINATOR (BẮT BUỘC): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) "
-        "nhận nhánh/môi trường từ Coordinator và chạy git merge --no-edit main && git merge --no-edit dev-worker trước khi test, (2) Chạy lệnh test thật VÀ kiểm toán trực tiếp "
+        "nhận nhánh/môi trường từ Coordinator và chạy git merge --no-edit main && (! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker) trước khi test, (2) Chạy lệnh test thật (Jest kèm --forceExit) VÀ kiểm toán trực tiếp "
         "TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, "
         "(3) Nếu vướng môi trường phải hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json; "
         "nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs hay DB ➔ BẮT BUỘC trình ngay lên Coordinator bằng "
@@ -182,7 +183,7 @@ ROLE_SPEC_TEMPLATES = {
         "[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: {task}. "
         "Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. "
         "CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! "
-        "GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và chạy git merge --no-edit main && git merge --no-edit dev-worker để đo trên code mới nhất, "
+        "GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và chạy git merge --no-edit main && (! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker) để đo trên code mới nhất, "
         "(2) Xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM; "
         "nếu phát hiện nghẽn cổ chai, gửi ngay orca orchestration send --from <worker_handle> --type escalation --subject 'Perf Bottleneck Found' "
         "--body '<file:line/query gây nghẽn trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json "
@@ -195,16 +196,17 @@ ROLE_SPEC_TEMPLATES = {
         "(chỉ xuất Đặc tả Kỹ thuật Clean-Room, CẤM copy code decompile rối rắm vào repo), "
         "(2) CẤM dùng REA cho source code repo thông thường, (3) CẤM đoán mò hành vi hộp đen khi không có Evidence từ REA! "
         "GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Xuất Hồ sơ Evidence thực tế (Target SHA-256/Path, REA tool đã chạy, Symbol/Offset/Decompiled Function/"
-        "Struct/Protocol contract, Unknowns/Limitations), gửi bản tin orca orchestration send --from <worker_handle> --type handoff "
-        "--subject 'REA Clean-Room Spec' --body '<Tóm tắt Spec trình Coordinator duyệt và giao Dev>' --task-id <task_id> --dispatch-id <dispatch_id> --json "
+        "Struct/Protocol contract, Unknowns/Limitations), gộp lệnh gửi handoff và worker-done trong cùng 1 lệnh (&&): orca orchestration send --from <worker_handle> --type handoff "
+        "--subject 'REA Clean-Room Spec' --body '<Tóm tắt Spec trình Coordinator duyệt và giao Dev>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json "
         "và chốt RE_VERDICT: EVIDENCE_COMPLETE hoặc BLOCKED_BY_UNKNOWN."
     ),
     "uiSpecialist": (
         "[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: {task}. "
         "Chuẩn: CSS/DOM chuẩn xác, Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. "
         "CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend core/DB schema. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Đồng bộ nhánh mới nhất (git merge --no-edit main), Build/typecheck EXIT_CODE=0, không lỗi Console, "
-        "kiểm tra snapshot/screenshot Mobile/Desktop, gửi orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready' "
-        "--body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json về Coordinator và git commit kèm Commit Hash vào nhánh ui-worker."
+        "kiểm tra snapshot/screenshot Mobile/Desktop, git commit kèm Commit Hash vào nhánh {slot_branch} và gộp gửi handoff + worker-done trong cùng 1 lệnh (&&): "
+        "orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready: {slot_branch} (<commit_hash>)' "
+        "--body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json."
     ),
     "prReviewer": (
         "[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: {task}. "
@@ -225,7 +227,7 @@ GOAL_MODE_CLAUSE = (
     " CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế "
     "(file diff, build & test EXIT_CODE=0, runtime log); khi chạy Jest phải kèm --forceExit để chống treo open handles và khi lệnh chuyển sang background (task-XX) CẤM gọi manage_task(status) lặp liên tục 2-3s mỗi lần (hãy dừng gọi tool để hệ thống tự đánh thức khi xong hoặc dùng schedule >=20s); "
     "CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; "
-    "chỉ sau khi đã hoàn tất 100% nhiệm vụ + gửi bản tin báo cáo + gửi worker_done về Coordinator mới được xuất thẻ "
+    "chỉ sau khi đã hoàn tất 100% nhiệm vụ + gộp lệnh gửi bản tin báo cáo && gửi worker-done về Coordinator mới được xuất thẻ "
     "<!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal."
 )
 
@@ -266,15 +268,47 @@ def _infer_canonical_from_role_header(raw_task: str) -> str:
     return "developer"
 
 
+def _resolve_role_and_slot(role_input: str, raw_task: str) -> tuple[str, str]:
+    """Chuẩn hóa role_input (kể cả khi truyền tên slot như 'dev-worker-2', 'dev-2', 'ui-worker-2') thành (canonical_role, slot_branch_hint)."""
+    raw_r = (role_input or "dev").strip().lower()
+    m_slot = re.match(r"^([a-z0-9_]+?)(?:-worker)?-(\d+)$", raw_r)
+    slot_num = None
+    base_r = raw_r
+    if m_slot:
+        base_r = m_slot.group(1)
+        slot_num = int(m_slot.group(2))
+    canonical = ROLE_ALIASES.get(raw_r) or ROLE_ALIASES.get(base_r) or ROLE_ALIASES.get(f"{base_r}-worker") or "developer"
+    if canonical == "coordinator":
+        canonical = "developer"
+    base_wt_map = {
+        "developer": "dev-worker",
+        "devopsSpecialist": "devops-worker",
+        "criticSpecialist": "critic-worker",
+        "security": "sec-worker",
+        "qa": "qa-worker",
+        "benchSpecialist": "bench-worker",
+        "reSpecialist": "re-worker",
+        "uiSpecialist": "ui-worker",
+        "prReviewer": "pr-review-worker",
+        "issueResolver": "issue-fix-worker",
+    }
+    base_wt = base_wt_map.get(canonical, "dev-worker")
+    if slot_num and slot_num >= 2:
+        slot_branch = f"{base_wt}-{slot_num}"
+    else:
+        m_in_task = re.search(rf"\b({re.escape(base_wt)}(?:-\d+)?)\b", raw_task)
+        slot_branch = m_in_task.group(1) if m_in_task else base_wt
+    return canonical, slot_branch
+
+
 def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_override: bool = None) -> str:
     """Tiêm Sổ tay Hiến pháp, Cấm vượt rào & Chế độ /goal của từng Worker vào task spec."""
     raw_task = (task_desc or "").strip()
     if not role_input and raw_task.startswith("[ROLE:"):
         canonical = _infer_canonical_from_role_header(raw_task)
+        _, slot_branch = _resolve_role_and_slot(canonical, raw_task)
     else:
-        canonical = ROLE_ALIASES.get((role_input or "dev").strip().lower(), "developer")
-        if canonical == "coordinator":
-            canonical = "developer"
+        canonical, slot_branch = _resolve_role_and_slot(role_input, raw_task)
     roles = (config.get("roles") if isinstance(config, dict) else None) or {}
     role_cfg = roles.get(canonical) if isinstance(roles, dict) else {}
     goal_on = goal_override if goal_override is not None else _is_goal_mode_enabled(role_cfg, config)
@@ -300,7 +334,9 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_o
                 " (nếu cần giải phẫu binary phải báo Coordinator)",
             )
         downstream = []
-        if _is_role_enabled(roles.get("devopsSpecialist", {}), is_optional=True):
+        devops_on = _is_role_enabled(roles.get("devopsSpecialist", {}), is_optional=True)
+        ui_on = _is_role_enabled(roles.get("uiSpecialist", {}), is_optional=True)
+        if devops_on:
             downstream.append("DevOps")
         else:
             tpl = tpl.replace("; CẤM sửa K8s/Docker của DevOps", "")
@@ -312,18 +348,42 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_o
             dev_conc = max(1, min(10, int(((roles.get("developer") or {}).get("concurrency")) or 1)))
         except (ValueError, TypeError):
             dev_conc = 1
-        if dev_conc >= 2:
-            # Dùng (! git rev-parse ... || git merge ...) thay vì (git rev-parse ... && git merge ... || true)
-            # để nếu nhánh tồn tại nhưng bị xung đột merge (merge conflict), mã lỗi khác 0 vẫn được giữ nguyên!
-            extra_merges = " && ".join(
-                f"(! git rev-parse --verify --quiet dev-worker-{k} >/dev/null || git merge --no-edit dev-worker-{k})"
-                for k in range(2, dev_conc + 1)
+        extra_dev_branches = [f"dev-worker-{k}" for k in range(2, dev_conc + 1)]
+        if extra_dev_branches:
+            extra_dev_merges = " && ".join(
+                f"(! git rev-parse --verify --quiet {br} >/dev/null || git merge --no-edit {br})"
+                for br in extra_dev_branches
             )
             tpl = tpl.replace(
-                "git merge --no-edit main && git merge --no-edit dev-worker",
-                f"git merge --no-edit main && git merge --no-edit dev-worker && {extra_merges}",
+                "(! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker)",
+                f"(! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker) && {extra_dev_merges}",
             )
-    rendered = tpl.replace("{task}", clean_task)
+        if canonical in ("security", "qa", "benchSpecialist"):
+            other_upstream = []
+            if devops_on:
+                try:
+                    do_c = max(1, min(10, int(((roles.get("devopsSpecialist") or {}).get("concurrency")) or 1)))
+                except (ValueError, TypeError):
+                    do_c = 1
+                other_upstream.extend(["devops-worker"] + [f"devops-worker-{k}" for k in range(2, do_c + 1)])
+            if ui_on:
+                try:
+                    ui_c = max(1, min(10, int(((roles.get("uiSpecialist") or {}).get("concurrency")) or 1)))
+                except (ValueError, TypeError):
+                    ui_c = 1
+                other_upstream.extend(["ui-worker"] + [f"ui-worker-{k}" for k in range(2, ui_c + 1)])
+            if other_upstream:
+                upstream_merges = " && ".join(
+                    f"(! git rev-parse --verify --quiet {br} >/dev/null || git merge --no-edit {br})"
+                    for br in other_upstream
+                )
+                target_anchor = (
+                    f"(! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker) && {extra_dev_merges}"
+                    if extra_dev_branches
+                    else "(! git rev-parse --verify --quiet dev-worker >/dev/null || git merge --no-edit dev-worker)"
+                )
+                tpl = tpl.replace(target_anchor, f"{target_anchor} && {upstream_merges}")
+    rendered = tpl.replace("{slot_branch}", slot_branch).replace("{task}", clean_task)
     if goal_on:
         rendered = rendered + GOAL_MODE_CLAUSE
     return rendered
@@ -1002,9 +1062,10 @@ def sync_gemini_directive(root: Path, config: dict):
                 f"BẮT BUỘC chia thành {count} Task độc lập không trùng phạm vi file khi có ≥2 hạng mục:"
             )
             for idx_s, s_name in enumerate(slots, 1):
+                spec_arg = role_cli if idx_s == 1 else s_name
                 out_lines.append(
-                    f"  orca orchestration task-create --spec \"$(orca-team spec {role_cli} "
-                    f"'[Slot {idx_s}/{count} ({s_name}) - Phạm vi module/file nhánh {idx_s} (không đụng nhánh khác): {single_spec.strip('[]')}]')\""
+                    f"  orca orchestration task-create --spec \"$(orca-team spec {spec_arg} "
+                    f"'[Slot {idx_s}/{count} ({s_name}) - Phạm vi module/file + unit test nhánh {idx_s} (không đụng nhánh khác): {single_spec.strip('[]')}]')\""
                 )
 
     def _append_step2_role(out_lines: list, single_comment: str, multi_prefix: str, task_var: str, base_wt: str, count: int, w_args: str):
@@ -1024,8 +1085,8 @@ def sync_gemini_directive(root: Path, config: dict):
     # Bước 1: Tự động sinh đủ N lệnh task-create cho các vai trò có Concurrency >= 2
     step1_lines = [
         "### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ + CONCURRENCY (CẤM GỘP VIỆC — TỰ ĐỘNG TIÊM SỔ TAY WORKER)",
-        "- Tạo Run mới và **tách Task riêng cho từng vai trò & từng Slot song song**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **KHÔNG** thêm `--json` vào `task-create` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng `orca orchestration task-list --brief`).",
-        "- 🔴 **LUẬT CHIA TẢI SONG SONG BẮT BUỘC (`CONCURRENCY ≥ 2`):** Với mọi vai trò được cấu hình `N parallel` (ví dụ `Full-Stack Devs: 2 parallel`), khi bài toán có ≥ 2 hạng mục/module/nhóm file độc lập, Leader **BẮT BUỘC chia thành đủ `N` Task song song với phạm vi file tách biệt (Disjoint File Ownership — không sửa trùng file)** để huy động đồng thời cả `N` agent ở Bước 2 (tuyệt đối **CẤM** gom toàn bộ việc vào 1 task bắt 1 agent gánh một mình!):",
+        "- Tạo Run mới và **tách Task riêng cho từng vai trò & từng Slot song song**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **CẤM** gọi `view_file` đọc hàng loạt file source code ở root workspace trước khi giao việc — chỉ dùng lệnh nhẹ như `ls` để định vị cấu trúc thư mục/package; **KHÔNG** thêm `--json` vào `task-create` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng `orca orchestration task-list --brief`).",
+        "- 🔴 **LUẬT CHIA TẢI SONG SONG BẮT BUỘC (`CONCURRENCY ≥ 2`):** Với mọi vai trò được cấu hình `N parallel` (ví dụ `Full-Stack Devs: 2 parallel`), khi bài toán có ≥ 2 hạng mục/module/nhóm file độc lập, Leader **BẮT BUỘC chia thành đủ `N` Task song song với phạm vi file tách biệt (Disjoint File Ownership — mỗi Slot sở hữu trọn vẹn code + unit test `__tests__/*`, `*.test.*` của module mình, không đụng sang module của Slot khác)** để huy động đồng thời cả `N` agent ở Bước 2 (tuyệt đối **CẤM** gom toàn bộ việc vào 1 task bắt 1 agent gánh một mình!):",
         "  ```bash",
         '  orca orchestration run-create --objective "[Mô tả tổng thể]"',
         "",
@@ -1103,7 +1164,8 @@ def sync_gemini_directive(root: Path, config: dict):
 
     step2_lines = [
         "### BƯỚC 2: PARALLEL FAN-OUT THEO CONCURRENCY & GOM NHÓM TERMINAL TABS TRÊN CÁC SLOT CỐ ĐỊNH",
-        f'- 🔴 **QUY TẮC FIXED-POOL WORKTREE SLOTS THEO CONCURRENCY (CHẠY SONG SONG ĐỦ `N` AGENTS & GOM NHÓM TERMINAL TABS):** Mỗi vai trò sử dụng **đúng `N` Worktree Slots cố định theo cấu hình `Concurrency`** ({", ".join(active_wt_names)}). Với vai trò có `N parallel` (như `Full-Stack Devs: {max(2, d_count)} parallel`), Leader **BẮT BUỘC khởi chạy đồng thời đủ `N` workers vào `N` worktree slots riêng biệt (`dev-worker`, `dev-worker-2`...) ngay trong cùng lượt Fan-out** để các agent thực thi song song 100% mà không xung đột `git index.lock`! Nếu worktree của slot đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree slot đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <slot_name>` ở lần chạy đầu tiên khi slot chưa tồn tại (CẤM đẻ thêm worktree vượt quá số slot `Concurrency` đã cấu hình):',
+        f'- 🔴 **QUY TẮC FIXED-POOL WORKTREE SLOTS THEO CONCURRENCY (CHẠY SONG SONG ĐỦ `N` AGENTS & GOM NHÓM TERMINAL TABS):** Mỗi vai trò sử dụng **đúng `N` Worktree Slots cố định theo cấu hình `Concurrency`** ({", ".join(active_wt_names)}). Với vai trò có `N parallel` (như `Full-Stack Devs: {max(2, d_count)} parallel`), Leader **BẮT BUỘC khởi chạy đồng thời đủ `N` workers vào `N` worktree slots riêng biệt (`dev-worker`, `dev-worker-2`...) ngay trong cùng lượt Fan-out** để các agent thực thi song song 100% mà không xung đột `git index.lock`! Nếu worktree của slot đó đã tồn tại trong repo (`git worktree list`), **BẮT BUỘC truyền `--worktree path:<abs_path>` (không truyền `--name`)** để Orca định vị chính xác tuyệt đối worktree của repo hiện tại và **mở + gom nhóm các Terminal Tab mới ngay bên trong worktree slot đó** (giống hệt cách `main` worktree gom nhóm các tab của Leader); chỉ tạo `--worktree new-child --name <slot_name>` ở lần chạy đầu tiên khi slot chưa tồn tại (CẤM đẻ thêm worktree vượt quá số slot `Concurrency` đã cấu hình).',
+        '- ⚠️ **CHỜ TẤT CẢ LỆNH `worker-start` TRẢ VỀ `dispatchId` TRƯỚC KHI SANG BƯỚC 3 (CHỐNG RACE CONDITION):** Mỗi lệnh `orca orchestration worker-start` mất khoảng 15–40 giây để khởi tạo worktree & PTY (có thể chuyển sang background `task-XX`). Leader **BẮT BUỘC** chờ toàn bộ các lệnh `worker-start` của đợt Fan-out hoàn tất và trả về `dispatchId` rồi mới gọi `orca orchestration check --wait` ở Bước 3:',
         "  ```bash",
     ]
     _append_step2_role(
@@ -1215,7 +1277,7 @@ def sync_gemini_directive(root: Path, config: dict):
         + '  - **Nhận `question` (từ `ask`):** Coordinator phản hồi qua `orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json`.\n'
         f'  - **Nhận `handoff` (từ {handoff_roles}):** Coordinator kiểm duyệt bằng chứng ({handoff_ev}) rồi quyết định bàn giao cho role kế tiếp.\n'
         f'  - **Nhận `escalation` (từ {esc_roles}):** Coordinator phân xử dựa trên bằng chứng{" (gặp trigger Anti-Autocracy ➔ qua `critic-worker` trước)" if critic_enabled else ""} và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` vào đúng worktree slot của role đó (`--worktree path:<abs_path>`), rồi điều phối {reverify_w} kiểm toán lại.\n'
-        '- **Nghiệm thu Zero-Trust:** Đọc `orca orchestration worker-read --dispatch <DISPATCH_ID> --json` và `orca orchestration inbox --json`. '
+        '- **Nghiệm thu Zero-Trust:** Đọc trực tiếp nội dung báo cáo trong trường `messages` trả về từ `orca orchestration check --wait --json` kết hợp đối chiếu độc lập bằng `git log -n 1 --stat <ten-worktree>` (chỉ gọi `orca orchestration worker-read --dispatch <DISPATCH_ID> --json` khi worker bị treo/timeout không gửi tin nhắn; **CẤM** gọi `orca orchestration inbox --json` vì lệnh này tải lại toàn bộ lịch sử tin nhắn cũ gây phình context). '
         '**BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:\n'
         '  1. **Báo sạch giả (Fake Clean):** Báo `succeeded` nhưng thiếu `EXIT_CODE=0`, thiếu `git commit` (Commit Hash), '
         f'`Tests Run = 0`'
@@ -3514,6 +3576,15 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
 
         elif scope_id.startswith("run_"):
             # Leader transcript may contain multiple sequential orchestration runs (`run-create`) or resumed `--run <rid>` blocks
+            def _is_bg_task_sys_msg(st_obj: dict) -> bool:
+                if st_obj.get("type") != "SYSTEM_MESSAGE":
+                    return False
+                txt = str(st_obj.get("content") or "")
+                return (
+                    "[Message from background task" in txt
+                    or bool(re.search(r'Task id "[^"]+/task-\d+" finished with result:', txt))
+                )
+
             run_creates = []
             step_runs = {}
             orch_steps = set()
@@ -3527,8 +3598,8 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
                         if idx_pos + 1 < len(steps) and steps[idx_pos + 1].get("type") == "PLANNER_RESPONSE":
                             step_runs.setdefault(idx_pos + 1, set()).add(r_m)
                             orch_steps.add(idx_pos + 1)
-                    if "[Message from background task" in sm_str:
-                        for r_m in re.findall(r'(?:Created\s+|RUN=|"runId"\s*:\s*"|"run"\s*:\s*\{\s*"id"\s*:\s*")(run_[a-f0-9]{12})\b', sm_str):
+                    if _is_bg_task_sys_msg(s):
+                        for r_m in re.findall(r'(?:Created\s+|RUN=|"run(?:Id|_id)"\s*:\s*"|\brun:|"run"\s*:\s*\{\s*"id"\s*:\s*")(run_[a-f0-9]{12})\b', sm_str):
                             step_runs.setdefault(idx_pos, set()).add(r_m)
                     continue
                 if st_type != "PLANNER_RESPONSE":
@@ -3566,8 +3637,8 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
                         c_str = str(steps[j].get("content") or "")
                         if jt == "USER_INPUT":
                             break
-                        if jt == "GENERIC" or (jt == "SYSTEM_MESSAGE" and "[Message from background task" in c_str):
-                            for r_m in re.findall(r'"runId"\s*:\s*"(run_[a-f0-9]{12})"', c_str):
+                        if jt == "GENERIC" or _is_bg_task_sys_msg(steps[j]):
+                            for r_m in re.findall(r'(?:"run(?:Id|_id)"\s*:\s*"|\brun:)(run_[a-f0-9]{12})\b', c_str):
                                 step_runs.setdefault(idx_pos, set()).add(r_m)
                             if has_rc:
                                 created_rids.extend(
@@ -3645,7 +3716,7 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
                                 break
                             if fwd_type == "SYSTEM_MESSAGE":
                                 sm_txt = str(steps[fwd_pos].get("content") or "")
-                                if "[Message from background task" in sm_txt or scope_id in sm_txt:
+                                if _is_bg_task_sys_msg(steps[fwd_pos]) or scope_id in sm_txt:
                                     continue
                                 end_pos = fwd_pos
                                 break
@@ -3677,7 +3748,7 @@ def _slice_transcript_steps(steps: list, tf_path: Path, scope_id: str = None) ->
                         break
                     if fwd_type == "SYSTEM_MESSAGE":
                         sm_txt = str(steps[fwd_pos].get("content") or "")
-                        if "[Message from background task" in sm_txt or scope_id in sm_txt:
+                        if _is_bg_task_sys_msg(steps[fwd_pos]) or scope_id in sm_txt:
                             continue
                         end_pos = fwd_pos
                         break
@@ -3699,8 +3770,20 @@ _GIT_COMMIT_HEADER_RE = re.compile(
 )
 _GIT_MERGE_SUBJ_RE = re.compile(r"(?i)^(?:Merge\b|\w+\(merge\):)")
 _GIT_REV_INSPECT_CMD_RE = re.compile(
-    r"(?:^|[;&|()\n])\s*git(?:\s+(?:-C|-c)\s+\S+)?\s+(?:rev-parse\s+HEAD|log\b[^\n]*-1|show\b)"
+    r"(?:^|[;&|()\n])\s*git(?:\s+(?:-C|-c)\s+\S+)?\s+(?:rev-parse(?:\s+--short)?\s+HEAD\b|log\b[^\n;&|]*-(?:1|n\s*1)\b(?![^\n;&|]*\b[0-9a-f]{7,40}\b)|show\b(?![^\n;&|]*\b[0-9a-f]{7,40}\b))"
 )
+
+
+def _is_feature_git_commit_cmd(cmd_str: str) -> bool:
+    """Return True if cmd_str runs a non-merge feature/fix `git commit` (excluding plain `git commit --no-edit` merge continuation)."""
+    if not cmd_str or not _GIT_COMMIT_CMD_RE.search(cmd_str):
+        return False
+    for seg in re.split(r"[;&|\n]+", cmd_str):
+        if _GIT_COMMIT_CMD_RE.search(seg):
+            if "--no-edit" in seg and not re.search(r"(?:\s-(?:[a-zA-Z]*[amF]|-amend|-message|-all|-file)\b)", seg):
+                continue
+            return True
+    return False
 
 
 def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict:
@@ -3721,15 +3804,18 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
             ot = int(s.get("output_tokens") or 0)
             if t_s and t_comp:
                 dt = max(0.5, (t_comp - t_s).total_seconds())
-                measured_llm_secs += dt
-                measured_out_tok += ot
+                if dt <= 120.0 and ot >= 20:
+                    measured_llm_secs += dt
+                    measured_out_tok += ot
             elif i + 1 < len(steps) and steps[i + 1].get("type") == "GENERIC":
                 t_e = _parse_iso_utc(steps[i + 1].get("created_at"))
                 if t_s and t_e:
                     dt = max(0.5, (t_e - t_s).total_seconds())
-                    measured_llm_secs += dt
-                    measured_out_tok += ot
-    avg_rate = (measured_out_tok / measured_llm_secs) if measured_llm_secs > 0 else 50.0
+                    if dt <= 120.0 and ot >= 20:
+                        measured_llm_secs += dt
+                        measured_out_tok += ot
+    raw_rate = (measured_out_tok / measured_llm_secs) if measured_llm_secs > 0 else 50.0
+    avg_rate = max(30.0, min(120.0, raw_rate))
 
     llm_secs = 0.0
     tool_secs = 0.0
@@ -3783,7 +3869,7 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                 )
                 if is_pure_poll_tools or is_pure_sleep_cmd:
                     poll_turns += 1
-            turn_has_git_commit = any(_GIT_COMMIT_CMD_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
+            turn_has_git_commit = any(_is_feature_git_commit_cmd(cmd_c) for cmd_c in tc_cmds if cmd_c)
             turn_has_git_amend = any(_GIT_COMMIT_AMEND_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
             turn_has_rev_inspect = any(_GIT_REV_INSPECT_CMD_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
 
@@ -3837,13 +3923,15 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                                 r_sha = m_rev.group(1)
                                 if r_sha not in commit_shas:
                                     commit_shas.append(r_sha)
-                                pending_truncated_commit = False
+                            pending_truncated_commit = False
                         m2 = re.search(r"Completed At:\s*([^\n\r]+)", c)
                         if m2:
                             ts2 = _parse_iso_utc(m2.group(1).strip())
                             if ts2 and (not t_tool_end or ts2 > t_tool_end):
                                 t_tool_end = ts2
                         j += 1
+                    if not turn_has_git_commit and pending_truncated_commit:
+                        pending_truncated_commit = False
                     if j < len(steps) and steps[j].get("type") == "PLANNER_RESPONSE":
                         ts_next_p = _parse_iso_utc(steps[j].get("created_at"))
                         if ts_next_p and t_tool_start and ts_next_p > t_tool_start and (not t_tool_end or t_tool_end == t_tool_start):
@@ -3857,15 +3945,20 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                     if t_next and (t_next - t_comp).total_seconds() > 0:
                         idle_wait_secs += (t_next - t_comp).total_seconds()
                 else:
-                    est_dt = max(0.8, ot / max(10.0, avg_rate))
-                    llm_secs += est_dt
-                    if t_start and t_end and (t_end - t_start).total_seconds() > est_dt:
-                        idle_wait_secs += (t_end - t_start).total_seconds() - est_dt
+                    est_dt = min(90.0, max(0.8, ot / avg_rate))
+                    if t_start and t_end:
+                        raw_gap = max(0.5, (t_end - t_start).total_seconds())
+                        est_dt = min(raw_gap, est_dt)
+                        llm_secs += est_dt
+                        if raw_gap > est_dt:
+                            idle_wait_secs += raw_gap - est_dt
+                    else:
+                        llm_secs += est_dt
             else:
                 if t_start and t_comp:
                     llm_secs += max(0.5, (t_comp - t_start).total_seconds())
                 else:
-                    llm_secs += max(0.8, ot / max(10.0, avg_rate))
+                    llm_secs += min(90.0, max(0.8, ot / avg_rate))
 
     t0 = _parse_iso_utc(steps[0].get("created_at"))
     tN_cands = [
@@ -3879,6 +3972,7 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
     tN = max(tN_valid) if tN_valid else None
     active_secs = llm_secs + tool_secs
     wall_secs = max(active_secs, (tN - t0).total_seconds()) if (t0 and tN) else active_secs
+    idle_wait_secs = max(idle_wait_secs, max(0.0, wall_secs - active_secs))
     from datetime import datetime, timezone
     now_utc = datetime.now(timezone.utc)
     idle_since_last = max(0.0, (now_utc - tN).total_seconds()) if tN else 0.0
@@ -4016,8 +4110,12 @@ def _index_cli_transcripts() -> dict:
                     g_content = str(parsed_steps[j].get("content") or "")
                     if jt == "USER_INPUT":
                         break
-                    if jt == "GENERIC" or (jt == "SYSTEM_MESSAGE" and "[Message from background task" in g_content):
-                        for r_m in re.findall(r'"runId"\s*:\s*"(run_[a-f0-9]{12})"', g_content):
+                    is_bg_sys = jt == "SYSTEM_MESSAGE" and (
+                        "[Message from background task" in g_content
+                        or bool(re.search(r'Task id "[^"]+/task-\d+" finished with result:', g_content))
+                    )
+                    if jt == "GENERIC" or is_bg_sys:
+                        for r_m in re.findall(r'(?:"run(?:Id|_id)"\s*:\s*"|\brun:)(run_[a-f0-9]{12})\b', g_content):
                             coord_ts.setdefault(r_m, step_ts)
                             if has_active_orch:
                                 active_coord_rids.add(r_m)
@@ -4959,7 +5057,9 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     poll_t = int(t_metrics.get("poll_turns") or 0)
                     eff_t = int(t_metrics["effective_turns"]) if "effective_turns" in t_metrics else max(0, int(t_metrics["turns"]) - poll_t)
                     poll_info = f" | eff_turns: {eff_t}t (poll={poll_t}t)" if poll_t > 0 else ""
-                    lat_str = f"avg_turn: {t_metrics['avg_turn_s']:.1f}s/turn{poll_info} | active_vel: {t_metrics['active_tok_s']:.1f} tok/s | in_fresh: {_fmt_tok(t_metrics['in_tok'])} | cache_read: {_fmt_tok(t_metrics['cache_tok'])} | last_tool: {t_metrics['last_tool']}"
+                    wait_s = max(float(t_metrics.get("idle_wait_secs") or 0.0), max(0.0, wall_s - float(t_metrics.get("active_secs") or 0.0)))
+                    wait_info = f" | wait/retry: {_fmt_dur(wait_s)}" if wait_s >= 30.0 else ""
+                    lat_str = f"avg_turn: {t_metrics['avg_turn_s']:.1f}s/turn{poll_info} | active_vel: {t_metrics['active_tok_s']:.1f} tok/s{wait_info} | in_fresh: {_fmt_tok(t_metrics['in_tok'])} | cache_read: {_fmt_tok(t_metrics['cache_tok'])} | last_tool: {t_metrics['last_tool']}"
                 else:
                     lat_str = "transcript telemetry unavailable"
                 print(f"      ↳ Task: \"{t_title}\" | spec={spec_tok} tok -> report={rep_tok} tok | {git_str}")
@@ -4992,7 +5092,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         warning_issues.append(
                             f"Worker {wt_name} ({d_id}) chạy {raw_t} turns trên tác vụ lớn ({w_state}, {files_mod_count} files, chỉ {t_errs}/{t_calls} lỗi; thực thi chính: {eff_t}t, poll background: {poll_t}t, đọc file: {view_c} lần)."
                         )
-                if t_metrics and t_metrics["tool_errors"] >= 10:
+                elif t_metrics and t_metrics["tool_errors"] >= 10:
                     warning_issues.append(
                         f"Worker {wt_name} ({d_id}) có {t_metrics['tool_errors']}/{t_metrics['tool_calls']} lệnh tool trả về mã lỗi (command retry overhead)."
                     )
