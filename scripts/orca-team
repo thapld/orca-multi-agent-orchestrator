@@ -223,9 +223,10 @@ ROLE_SPEC_TEMPLATES = {
 
 GOAL_MODE_CLAUSE = (
     " CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế "
-    "(file diff, build/test EXIT_CODE=0, runtime log); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; "
+    "(file diff, build & test EXIT_CODE=0, runtime log); khi chạy Jest phải kèm --forceExit để chống treo open handles và khi lệnh chuyển sang background (task-XX) CẤM gọi manage_task(status) lặp liên tục 2-3s mỗi lần (hãy dừng gọi tool để hệ thống tự đánh thức khi xong hoặc dùng schedule >=20s); "
+    "CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; "
     "chỉ sau khi đã hoàn tất 100% nhiệm vụ + gửi bản tin báo cáo + gửi worker_done về Coordinator mới được xuất thẻ "
-    "<!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal. /goal"
+    "<!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal."
 )
 
 
@@ -281,16 +282,14 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_o
     if raw_task.startswith("[ROLE:"):
         if goal_on:
             if "CHẾ ĐỘ /goal" in raw_task:
-                if raw_task.endswith(" /goal"):
-                    return raw_task
-                return re.sub(r"(?:\s+/goal)?[.\s]*$", "", raw_task, flags=re.IGNORECASE) + " /goal"
-            base_task = re.sub(r"(?:^|\s+)/goal\s*$", "", raw_task, flags=re.IGNORECASE).strip()
+                return re.sub(r"(?:\s+/goal(?:/goal)?)+[.\s]*$", ".", raw_task, flags=re.IGNORECASE)
+            base_task = re.sub(r"(?:^|\s+)/goal(?:/goal)?\s*$", "", raw_task, flags=re.IGNORECASE).strip()
             if not base_task.endswith((".", "!", "?")):
                 base_task += "."
             return base_task + GOAL_MODE_CLAUSE
         else:
             raw_task = re.sub(r"\s*CHẾ ĐỘ /goal[\s\S]*$", "", raw_task)
-            raw_task = re.sub(r"(?:^|\s+)/goal[.\s]*$", "", raw_task, flags=re.IGNORECASE)
+            raw_task = re.sub(r"(?:^|\s+)/goal(?:/goal)?[.\s]*$", "", raw_task, flags=re.IGNORECASE)
         return raw_task
 
     clean_task = re.sub(r"(?:^|\s+)/goal\s*$", "", raw_task, flags=re.IGNORECASE).strip().rstrip(".")
@@ -3167,8 +3166,47 @@ def cmd_watchdog(root: Path, args: list = None):
             if not note:
                 idle_s = t_metrics.get("idle_since_last_secs", 0.0) if t_metrics else 0.0
                 if w_state not in ("succeeded", "failed", "stopped", "timed_out") and idle_s > 180:
-                    note = f"⚠️ KHÔNG PHẢN HỒI {_fmt_dur(idle_s)} (last_tool={t_metrics.get('last_tool', '-')})"
-                    hung_count += 1
+                    unblocked_idle = False
+                    if auto_unblock and term != "-":
+                        try:
+                            if tf_match:
+                                tasks_dir = tf_match.parent.parent / "tasks"
+                                guard_bin = os.path.expanduser("~/.local/bin/orca-command-guard")
+                                if tasks_dir.is_dir() and os.path.exists(guard_bin):
+                                    import importlib.util
+                                    from importlib.machinery import SourceFileLoader
+                                    guard_spec = importlib.util.spec_from_file_location(
+                                        "orca_guard", guard_bin, loader=SourceFileLoader("orca_guard", guard_bin)
+                                    )
+                                    guard_mod = importlib.util.module_from_spec(guard_spec)
+                                    guard_spec.loader.exec_module(guard_mod)
+                                    guard_mod._enforce_task_log_cap(tasks_dir)
+                            t_read_idle = _safe_orca_run([orca_bin, "terminal", "read", "--terminal", term, "--limit", "15", "--screen", "--json"], timeout=5)
+                            if t_read_idle.returncode == 0:
+                                t_data_i = json.loads(t_read_idle.stdout)
+                                t_res_i = t_data_i.get("result", t_data_i) if isinstance(t_data_i, dict) else {}
+                                term_obj_i = t_res_i.get("terminal", {}) if isinstance(t_res_i, dict) else {}
+                                tail_i = term_obj_i.get("tail") if isinstance(term_obj_i, dict) else None
+                                scr_i = "\n".join(str(line) for line in tail_i) if isinstance(tail_i, list) else str(t_res_i.get("content") or t_res_i.get("screen") or "")
+                                clean_i = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", scr_i)
+                                has_destructive = any(rx.search(clean_i) for rx in _WATCHDOG_DESTRUCTIVE_RES)
+                                if not has_destructive and re.search(r"(?m)^\s*>\s*$", clean_i):
+                                    nudge_res = _safe_orca_run(
+                                        [
+                                            orca_bin, "terminal", "send", "--terminal", term,
+                                            "--text", "Tiếp tục hoàn thành nhiệm vụ đang dở (nếu chạy jest phải kèm --forceExit) và gửi báo cáo worker_done về Coordinator ngay khi xong.",
+                                            "--enter",
+                                        ],
+                                        timeout=5,
+                                    )
+                                    if nudge_res.returncode == 0:
+                                        note = f"🔓 ĐÃ GỬI NUDGE ĐÁNH THỨC WORKER TREO ({_fmt_dur(idle_s)})"
+                                        unblocked_idle = True
+                        except Exception:
+                            pass
+                    if not unblocked_idle:
+                        note = f"⚠️ KHÔNG PHẢN HỒI {_fmt_dur(idle_s)} (last_tool={t_metrics.get('last_tool', '-')})"
+                        hung_count += 1
                 elif state == "active":
                     note = f"🟢 Đang thực thi ({t_metrics.get('turns', 0)}t, {t_metrics.get('out_tok_s', 0.0):.1f} tok/s)" if t_metrics else "🟢 Đang thực thi"
                 elif state == "reclaimable":
@@ -3685,6 +3723,8 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
     peak_ctx = 0
     last_ctx = 0
     turns = 0
+    poll_turns = 0
+    view_calls = 0
     tool_calls = 0
     tool_errors = 0
     last_tool_name = "-"
@@ -3706,8 +3746,17 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                 peak_ctx = last_ctx
             tcs = s.get("tool_calls") or []
             tool_calls += len(tcs)
-            if tcs and isinstance(tcs[-1], dict):
-                last_tool_name = str(tcs[-1].get("name") or "-")
+            tc_names_in_turn = []
+            for tc_item in tcs:
+                if isinstance(tc_item, dict):
+                    nm_item = str(tc_item.get("name") or tc_item.get("tool_name") or "-")
+                    tc_names_in_turn.append(nm_item)
+                    if nm_item in ("view_file", "Read"):
+                        view_calls += 1
+            if tc_names_in_turn:
+                last_tool_name = tc_names_in_turn[-1]
+                if all(nm_item in ("manage_task", "schedule") for nm_item in tc_names_in_turn):
+                    poll_turns += 1
             tc_cmds = [_command_from_tool_call(tc) for tc in tcs if isinstance(tc, dict)]
             turn_has_git_commit = any(_GIT_COMMIT_CMD_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
             turn_has_git_amend = any(_GIT_COMMIT_AMEND_RE.search(cmd_c) for cmd_c in tc_cmds if cmd_c)
@@ -3824,6 +3873,9 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
         "transcript_path": str(tf_path),
         "steps": len(steps),
         "turns": turns,
+        "poll_turns": poll_turns,
+        "effective_turns": max(0, turns - poll_turns),
+        "view_calls": view_calls,
         "tool_calls": tool_calls,
         "tool_errors": tool_errors,
         "in_tok": in_tok,
@@ -4865,7 +4917,10 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 t_title = str(t_obj_info.get("task_title") or t_obj_info.get("display_name") or "")[:54]
                 git_str = f"git: {files_mod_count} files (+{git_stats['ins']}/-{git_stats['del']}, {git_stats['commits']} commits)"
                 if t_metrics:
-                    lat_str = f"avg_turn: {t_metrics['avg_turn_s']:.1f}s/turn | active_vel: {t_metrics['active_tok_s']:.1f} tok/s | in_fresh: {_fmt_tok(t_metrics['in_tok'])} | cache_read: {_fmt_tok(t_metrics['cache_tok'])} | last_tool: {t_metrics['last_tool']}"
+                    poll_t = int(t_metrics.get("poll_turns") or 0)
+                    eff_t = int(t_metrics.get("effective_turns") or t_metrics["turns"])
+                    poll_info = f" | eff_turns: {eff_t}t (poll={poll_t}t)" if poll_t > 0 else ""
+                    lat_str = f"avg_turn: {t_metrics['avg_turn_s']:.1f}s/turn{poll_info} | active_vel: {t_metrics['active_tok_s']:.1f} tok/s | in_fresh: {_fmt_tok(t_metrics['in_tok'])} | cache_read: {_fmt_tok(t_metrics['cache_tok'])} | last_tool: {t_metrics['last_tool']}"
                 else:
                     lat_str = "transcript telemetry unavailable"
                 print(f"      ↳ Task: \"{t_title}\" | spec={spec_tok} tok -> report={rep_tok} tok | {git_str}")
@@ -4880,9 +4935,24 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         f"Worker {wt_name} ({d_id}) đã dừng ({w_state}/{w_phase}) sau {t_metrics.get('turns', 0)} turns nhưng chưa gửi báo cáo hoàn tất (report=0 tok)."
                     )
                 if t_metrics and t_metrics["turns"] > 120:
-                    warning_issues.append(
-                        f"Worker {wt_name} ({d_id}) đã chạy {t_metrics['turns']} turns (vượt ngưỡng 120 turns/task — dấu hiệu sa đà đào bới lỗi hoặc vòng lặp retry)."
-                    )
+                    raw_t = int(t_metrics["turns"])
+                    poll_t = int(t_metrics.get("poll_turns") or 0)
+                    eff_t = int(t_metrics.get("effective_turns") or (raw_t - poll_t))
+                    view_c = int(t_metrics.get("view_calls") or 0)
+                    t_errs = int(t_metrics["tool_errors"])
+                    t_calls = int(t_metrics["tool_calls"])
+                    if t_errs >= 10 or w_state in ("failed", "stopped", "timed_out"):
+                        warning_issues.append(
+                            f"Worker {wt_name} ({d_id}) đã chạy {raw_t} turns (thực thi: {eff_t}t, poll: {poll_t}t) kèm {t_errs}/{t_calls} lỗi tool — dấu hiệu sa đà đào bới lỗi hoặc vòng lặp retry."
+                        )
+                    elif eff_t <= 120 and poll_t >= 20:
+                        warning_issues.append(
+                            f"Worker {wt_name} ({d_id}) có tổng {raw_t} turns ({w_state}, chỉ {t_errs}/{t_calls} lỗi), nhưng thực thi chính chỉ {eff_t} turns (còn {poll_t} turns là poll manage_task/schedule chờ lệnh background)."
+                        )
+                    elif eff_t > 160:
+                        warning_issues.append(
+                            f"Worker {wt_name} ({d_id}) chạy {raw_t} turns trên tác vụ lớn ({w_state}, {files_mod_count} files, chỉ {t_errs}/{t_calls} lỗi; thực thi chính: {eff_t}t, poll background: {poll_t}t, đọc file: {view_c} lần)."
+                        )
                 if t_metrics and t_metrics["tool_errors"] >= 10:
                     warning_issues.append(
                         f"Worker {wt_name} ({d_id}) có {t_metrics['tool_errors']}/{t_metrics['tool_calls']} lệnh tool trả về mã lỗi (command retry overhead)."

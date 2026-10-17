@@ -114,7 +114,7 @@ if [[ -n "$EXISTING_WT_PATH" ]]; then
 fi
 
 if [[ "$GOAL_ENABLED" != "false" ]]; then
-  PR_PROMPT="${PR_PROMPT} CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal. /goal"
+  PR_PROMPT="${PR_PROMPT} CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); khi chạy Jest bắt buộc kèm --forceExit chống treo open handles; khi lệnh chạy ngầm (task-XX) CẤM gọi manage_task(status) lặp lại mỗi vài giây gây phình turns; CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal."
 fi
 
 echo "🐋 [Orca PR Review] Đang khởi tạo worktree thẩm định PR #$PR_NUM bằng agent: $AGENT..."

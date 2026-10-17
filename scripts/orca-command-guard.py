@@ -1241,13 +1241,33 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
         return 0
     truncated_count = 0
     marker = b"\n\n[ORCA CIRCUIT-BREAKER:"
+    jest_hang_marker = b"Jest did not exit one second after the test run has completed"
+    jest_exit_notice = b"[ORCA AUTO-EXIT:"
+    now_ts = time.time()
     try:
         for log_file in tasks_dir.glob("task-*.log"):
             try:
-                sz = log_file.stat().st_size
+                st = log_file.stat()
+                sz = st.st_size
+                mtime = st.st_mtime
             except Exception:
                 continue
             if sz <= MAX_TASK_LOG_BYTES:
+                if sz >= 120 and 3.0 <= (now_ts - mtime) <= 1800.0:
+                    try:
+                        with open(log_file, "rb") as jf:
+                            if sz > 2048:
+                                jf.seek(sz - 2048)
+                            tail_j = jf.read(2048)
+                        if jest_hang_marker in tail_j and jest_exit_notice not in tail_j:
+                            if _kill_runaway_process_for_log(log_file, tasks_dir):
+                                with open(log_file, "ab") as jf_out:
+                                    jf_out.write(
+                                        b"\n[ORCA AUTO-EXIT: Terminated hung Jest process after all tests completed (open handles). Tip: pass --forceExit to jest.]\n"
+                                    )
+                                truncated_count += 1
+                    except Exception:
+                        pass
                 continue
 
             # 1. Terminate ONLY the runaway child command writing to this log file first (never the Agent CLI)

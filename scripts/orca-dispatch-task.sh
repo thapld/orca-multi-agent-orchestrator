@@ -252,7 +252,7 @@ else:
   [[ -n "$CHOSEN_SLOT" ]] && ROLE_WORKTREE="$CHOSEN_SLOT"
 fi
 
-GOAL_MODE_CLAUSE=" CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ + gửi bản tin báo cáo + gửi worker_done về Coordinator mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal. /goal"
+GOAL_MODE_CLAUSE=" CHẾ ĐỘ /goal (LÀM TRIỆT ĐỂ 100% DELIVERABLES): Tự lập checklist đối chiếu từng yêu cầu với bằng chứng thực tế (file diff, build/test EXIT_CODE=0, runtime log); khi chạy Jest bắt buộc kèm --forceExit chống treo open handles; khi lệnh chạy ngầm (task-XX) CẤM gọi manage_task(status) lặp lại mỗi vài giây gây phình turns (hãy chờ thông báo hoàn tất hoặc đợi tối thiểu 30-60s); CẤM dừng nửa chừng hoặc bỏ sót bất kỳ hạng mục nào; chỉ sau khi đã hoàn tất 100% nhiệm vụ + gửi bản tin báo cáo + gửi worker_done về Coordinator mới được xuất thẻ <!-- GOAL_COMPLETE --> ở câu trả lời cuối cùng để đóng Goal."
 
 # Tự động tiêm Hiến pháp Vai trò Cấp Principal (Chống vượt rào, Chống báo sạch giả & Chế độ /goal) nếu SPEC chưa có
 if [[ "$SPEC" != "[ROLE:"* && -x "$ORCA_TEAM_BIN" ]]; then
@@ -305,7 +305,7 @@ if [[ "$SPEC" != "[ROLE:"* ]]; then
       ;;
   esac
 fi
-if [[ "$ROLE_GOAL_MODE" != "false" && "$SPEC" != *" /goal" ]]; then
+if [[ "$ROLE_GOAL_MODE" != "false" && "$SPEC" != *"CHẾ ĐỘ /goal"* && "$SPEC" != *" /goal" ]]; then
   if [[ "$SPEC" == *[.!?] ]]; then
     SPEC="${SPEC}${GOAL_MODE_CLAUSE}"
   else
