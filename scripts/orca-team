@@ -34,6 +34,7 @@ import shutil
 import select
 import tty
 import termios
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROLE_ALIASES = {
@@ -182,18 +183,18 @@ ROLE_SPEC_TEMPLATES = {
     ),
     "qa": (
         "[ROLE: PRINCIPAL QA/SDET — KIỂM SOÁT CHẤT LƯỢNG & TIẾN ĐỘ 100% PLAN] Nhiệm vụ: {task}. "
-        "Chuẩn: Thay mặt Leader kiểm soát chất lượng và kiểm đếm 100% tiến độ Plan ([P1..Pn]), phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) và Acceptance Criteria. "
-        "CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test & kiểm toán Plan; CẤM sửa business logic của Dev; CẤM xóa/nới lỏng assert (lờ đi status=FAILED/health=ERROR/SSLHandshakeException); CẤM dùng `--since` ngắn cắt log lỗi hoặc bỏ sót pod DB/Kafka! "
+        "Chuẩn: Thay mặt Leader kiểm đếm 100% tiến độ Plan ([P1..Pn]), phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) & Acceptance Criteria. "
+        "CẤM VƯỢT RÀO: Chỉ viết/chạy test & kiểm toán Plan; CẤM sửa business logic của Dev; CẤM xóa/nới lỏng assert (lờ đi status=FAILED/health=ERROR/SSL); CẤM dùng `--since` ngắn cắt log lỗi hoặc bỏ sót pod DB/Broker! "
         "GIAO TIẾP, P2P & BÁO CÁO (giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble; CẤM truyền --run vào check): "
-        "(1) Chạy `orca orchestration check [--ack <DELIVERY_ID>] --terminal <worker_handle> --json` (từ lần 2 bắt buộc kèm `--ack <DELIVERY_ID>`) và `orca-team merge-upstream --role qa --task-id <task_id> --dispatch-id <dispatch_id>` để đồng bộ các nhánh thuộc Run hiện tại + đọc Pinned Master Plan [P1..Pn] & Peer Directory (CẤM tự chạy vòng lặp merge `dev-worker*`), "
-        "(2) KIỂM ĐẾM 100% PLAN-TO-CODE & TEST: Chạy `git diff main...HEAD` đối chiếu 1-1 từng mục [P1..Pn] trong Plan với code thực tế (bắt mọi mục thiếu hoặc TODO/FIXME/stub/mock giả), chạy test thật (Jest kèm `--forceExit`; không poll `manage_task` liên tục) VÀ quét TOÀN BỘ Runtime Logs (`kubectl/docker logs` từ lúc start trên MỌI container App + DB + Broker), "
-        "(3) Nếu Dev thiếu BẤT KỲ mục nào trong Plan (`INCOMPLETE_PLAN`) hoặc test/Runtime Logs có lỗi ERROR/Exception/FATAL/SQL/SSL ➔ "
-        "(a) Nếu `dev-worker` đang `LIVE` (P2P mode), bắn `--to dispatch:<DEV_DISPATCH_ID>` (hoặc `--to '@all'`) kèm `--type handoff --subject 'QA_REJECT vòng <n>/3'` (P2P bắt buộc dùng `--type handoff`, CẤM dùng `--type escalation` với `--to`) để Dev sửa ngay (tối đa 3 vòng); "
-        "(b) Nếu `dev-worker` đã `SETTLED` hoặc quá 3 vòng vẫn lỗi, trình ngay lên Coordinator: "
-        "orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type escalation --subject 'QA Plan/Test Failure' --body 'INCOMPLETE_PLAN / TEST_FAIL: <Bảng mục [P1..Pn] thiếu hoặc log lỗi>' --json && "
+        "(1) Chạy `orca orchestration check [--ack <DELIVERY_ID>] --terminal <worker_handle> --json` (từ lần 2 bắt buộc kèm `--ack <DELIVERY_ID>`) và `orca-team merge-upstream --role qa --task-id <task_id> --dispatch-id <dispatch_id>` để merge nhánh thuộc Run hiện tại + đọc Pinned Plan [P1..Pn] & Peer Directory (CẤM tự gõ vòng lặp merge `dev-worker*`), "
+        "(2) KIỂM ĐẾM 100% PLAN & TEST: Chạy `git diff main...HEAD` đối chiếu 1-1 từng mục [P1..Pn] trong Plan với code (bắt mọi mục thiếu/TODO/stub/mock giả), chạy test thật (Jest kèm `--forceExit`; không poll `manage_task` liên tục) VÀ quét TOÀN BỘ Runtime Logs (`kubectl/docker logs` từ lúc start trên MỌI container App + DB + Broker), "
+        "(3) Nếu thiếu BẤT KỲ mục nào trong Plan (`INCOMPLETE_PLAN`) hoặc test/log có lỗi ERROR/Exception/FATAL/SQL/SSL ➔ "
+        "(a) Nếu `dev-worker` đang `LIVE` (P2P), gửi `--to dispatch:<DEV_DISPATCH_ID>` (hoặc `--to '@all'`) kèm `--type handoff --subject 'QA_REJECT vòng <n>/3'` (P2P bắt buộc `--type handoff`, CẤM `--type escalation` với `--to`) để Dev sửa ngay (tối đa 3 vòng); "
+        "(b) Nếu `dev-worker` đã `SETTLED` hoặc quá 3 vòng lỗi, trình Coordinator: "
+        "orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type escalation --subject 'QA Plan/Test Failure' --body 'INCOMPLETE_PLAN / TEST_FAIL: <Mục [P1..Pn] thiếu hoặc log lỗi>' --json && "
         "orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type worker_done --outcome failed --subject 'Worker Failed: {slot_branch}' --body 'QA_VERDICT: FAIL' --json! "
-        "(4) Chỉ khi 100% hạng mục [P1..Pn] DONE + test/log sạch 100% ➔ gộp gửi `QA_FINAL` (kèm Bảng Đối Chiếu Tiến Độ Plan [P1..Pn] 100% DONE + `file:line`) và `--type worker_done` trong cùng 1 lệnh (`&&`): "
-        "orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type handoff --subject 'QA_FINAL: Plan 100% Verified ({slot_branch})' --body 'QA_VERDICT: PASS | Bảng Đối Chiếu Tiến Độ Plan: [P1..Pn] 100% DONE (kèm file:line, EXIT_CODE=0 & runtime logs sạch)' --json && "
+        "(4) Chỉ khi 100% [P1..Pn] DONE + test/log sạch 100% ➔ gộp gửi `QA_FINAL` và `--type worker_done` trong 1 lệnh (`&&`): "
+        "orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type handoff --subject 'QA_FINAL: Plan 100% Verified ({slot_branch})' --body 'QA_VERDICT: PASS | Bảng Đối Chiếu Plan: [P1..Pn] 100% DONE (kèm file:line, EXIT_CODE=0 & runtime logs sạch)' --json && "
         "orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type worker_done --outcome succeeded --subject 'Worker Done: {slot_branch}' --body 'QA_VERDICT: PASS (100% Plan Verified)' --json."
     ),
     "benchSpecialist": (
@@ -1967,6 +1968,106 @@ def run_orca_json(orca_args: list, cwd: Path = None, timeout: int = 6) -> tuple[
     return proc.returncode, {}, raw_err or raw_out
 
 
+def _has_active_reject_marker(text: str) -> bool:
+    """Kiểm tra xem văn bản có chứa cờ từ chối P2P đang hoạt động (QA_REJECT / SEC_BLOCK / INCOMPLETE_PLAN)
+    mà KHÔNG phải là câu thông báo đã khắc phục (vd: 'Fixed QA_REJECT', '0 QA_REJECT', 'Resolved SEC_BLOCK')."""
+    if not text:
+        return False
+    if re.search(r"(?:QA_VERDICT|SECURITY_VERDICT)\s*:\s*(?:FAIL|BLOCK)\b", text, re.IGNORECASE):
+        return True
+    cleaned = re.sub(
+        r"\b(?:fixed|resolved|address(?:ed)?|fix(?:ing)?|no|0|zero|without|clear(?:ed)?|pass(?:ed)?\s+after)\s+"
+        r"(?:all\s+|the\s+|previous\s+)?(?:qa_reject|sec_block|incomplete_plan)\w*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return bool(re.search(r"\b(QA_REJECT|SEC_BLOCK|INCOMPLETE_PLAN)\b", cleaned, re.IGNORECASE))
+
+
+def _classify_p2p_message(m_type: str, m_subj: str, m_body: str) -> str:
+    """Phân loại bản tin P2P thành 'ready', 'reject', hoặc 'other'."""
+    m_type_l = (m_type or "").strip().lower()
+    subj_s = m_subj or ""
+    body_s = m_body or ""
+    combined = f"{subj_s}\n{body_s}"
+    if _has_active_reject_marker(subj_s):
+        return "reject"
+    if re.search(r"(?:QA_VERDICT|SECURITY_VERDICT)\s*:\s*(?:FAIL|BLOCK)\b", combined, re.IGNORECASE):
+        return "reject"
+    if m_type_l == "handoff" and re.search(
+        r"\b(DEV_READY|DEV HANDOFF|UI_READY|UI READY|INFRA_READY|INFRA READY|QA_FINAL|CONSENSUS_REACHED)\b|"
+        r"(?:QA_VERDICT|SECURITY_VERDICT|PERF_VERDICT|CRITIC_VERDICT)\s*:\s*(?:PASS|CONSENSUS_REACHED)\b",
+        combined,
+        re.IGNORECASE,
+    ):
+        return "ready"
+    if _has_active_reject_marker(body_s):
+        return "reject"
+    if m_type_l == "handoff":
+        return "ready"
+    return "other"
+
+
+def _extract_msg_dispatch_and_task(
+    m_obj,
+    handle_to_disp: dict[str, str] | None = None,
+    handle_to_task: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Trích xuất (dispatch_id, task_id) của người gửi bản tin từ top-level fields, JSON `payload`, hoặc `from_handle`."""
+    try:
+        m_dict = m_obj if isinstance(m_obj, dict) else dict(m_obj)
+    except Exception:
+        return "", ""
+    s_did = str(
+        m_dict.get("fromDispatchId")
+        or m_dict.get("from_dispatch_id")
+        or m_dict.get("sender_dispatch_id")
+        or m_dict.get("senderDispatchId")
+        or m_dict.get("dispatch_id")
+        or m_dict.get("dispatchId")
+        or ""
+    ).strip()
+    s_tid = str(m_dict.get("task_id") or m_dict.get("taskId") or "").strip()
+
+    raw_payload = m_dict.get("payload")
+    payload_obj = None
+    if isinstance(raw_payload, dict):
+        payload_obj = raw_payload
+    elif isinstance(raw_payload, str) and raw_payload.strip().startswith("{"):
+        try:
+            payload_obj = json.loads(raw_payload)
+        except Exception:
+            payload_obj = None
+    if isinstance(payload_obj, dict):
+        if not s_did:
+            s_did = str(
+                payload_obj.get("dispatchId")
+                or payload_obj.get("dispatch_id")
+                or payload_obj.get("fromDispatchId")
+                or payload_obj.get("from_dispatch_id")
+                or ""
+            ).strip()
+        if not s_tid:
+            s_tid = str(payload_obj.get("taskId") or payload_obj.get("task_id") or "").strip()
+
+    from_h = str(m_dict.get("from_handle") or m_dict.get("fromHandle") or m_dict.get("from") or "").strip()
+    if from_h:
+        norm_h = from_h[len("terminal:"):] if from_h.startswith("terminal:") else from_h
+        cand_handles = (from_h, norm_h, f"terminal:{norm_h}")
+        if not s_did and handle_to_disp:
+            for ch in cand_handles:
+                if ch in handle_to_disp and handle_to_disp[ch]:
+                    s_did = handle_to_disp[ch]
+                    break
+        if not s_tid and handle_to_task:
+            for ch in cand_handles:
+                if ch in handle_to_task and handle_to_task[ch]:
+                    s_tid = handle_to_task[ch]
+                    break
+    return s_did, s_tid
+
+
 def resolve_run_upstream_branches(
     caller_dir: Path,
     run_id: str = "",
@@ -2120,7 +2221,10 @@ def resolve_run_upstream_branches(
         try:
             if s.endswith("Z"):
                 s = s[:-1] + "+00:00"
-            return datetime.fromisoformat(s).timestamp()
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
         except Exception:
             return 0.0
 
@@ -2287,38 +2391,6 @@ def resolve_run_upstream_branches(
                 except Exception:
                     pass
 
-                try:
-                    m_rows = conn.execute(
-                        """
-                        SELECT from_dispatch_id, type, subject, body, created_at
-                        FROM messages
-                        WHERE run_id = ? AND type IN ('handoff', 'escalation')
-                        ORDER BY created_at ASC, rowid ASC
-                        """,
-                        (resolved_run_id,),
-                    ).fetchall()
-                    latest_reject_ts = 0.0
-                    latest_ready_ts_by_disp: dict[str, float] = {}
-                    for mr in m_rows:
-                        fd_id = str(mr["from_dispatch_id"] or "").strip()
-                        m_type = str(mr["type"] or "").strip().lower()
-                        m_subj = str(mr["subject"] or "")
-                        m_body = str(mr["body"] or "")
-                        m_ts = _to_epoch_secs(mr["created_at"])
-                        combined_txt = f"{m_subj}\n{m_body}"
-                        if re.search(r"\b(QA_REJECT|SEC_BLOCK|INCOMPLETE_PLAN)\b", combined_txt, re.IGNORECASE):
-                            if m_ts > latest_reject_ts:
-                                latest_reject_ts = m_ts
-                        elif m_type == "handoff" and fd_id:
-                            if m_ts >= latest_ready_ts_by_disp.get(fd_id, 0.0):
-                                latest_ready_ts_by_disp[fd_id] = m_ts
-                    for fd_id, r_ts in latest_ready_ts_by_disp.items():
-                        if r_ts > latest_reject_ts:
-                            p2p_handoff_dispatch_ids.add(fd_id)
-                            p2p_ready_handoff_ts[fd_id] = r_ts
-                except Exception:
-                    pass
-
                 t_rows = conn.execute(
                     "SELECT id, task_title, spec, status, deps, created_at FROM tasks WHERE run_id = ? ORDER BY created_at ASC",
                     (resolved_run_id,),
@@ -2381,6 +2453,60 @@ def resolve_run_upstream_branches(
                         "terminalHandle": str(dr["agent_terminal_handle"] or ""),
                         "createdAt": dr["created_at"],
                     })
+
+                try:
+                    m_rows = conn.execute(
+                        """
+                        SELECT from_handle, type, subject, body, payload, created_at
+                        FROM messages
+                        WHERE run_id = ? AND type IN ('handoff', 'escalation')
+                        ORDER BY created_at ASC, rowid ASC
+                        """,
+                        (resolved_run_id,),
+                    ).fetchall()
+                    disp_role_map = {
+                        str(d.get("dispatchId") or ""): str(d.get("rolePrefix") or "dev")
+                        for d in dispatches_in_run
+                        if d.get("dispatchId")
+                    }
+                    handle_to_disp: dict[str, str] = {}
+                    for d in dispatches_in_run:
+                        did_v = str(d.get("dispatchId") or "").strip()
+                        th_v = str(d.get("terminalHandle") or "").strip()
+                        if did_v and th_v:
+                            norm_th = th_v[len("terminal:"):] if th_v.startswith("terminal:") else th_v
+                            handle_to_disp[th_v] = did_v
+                            handle_to_disp[norm_th] = did_v
+                            handle_to_disp[f"terminal:{norm_th}"] = did_v
+                    latest_reject_ts = 0.0
+                    latest_ready_ts_by_disp: dict[str, float] = {}
+                    for mr in m_rows:
+                        fd_id, _ = _extract_msg_dispatch_and_task(mr, handle_to_disp=handle_to_disp)
+                        m_type = str(mr["type"] or "").strip().lower()
+                        m_subj = str(mr["subject"] or "")
+                        m_body = str(mr["body"] or "")
+                        m_ts = _to_epoch_secs(mr["created_at"])
+                        msg_cls = _classify_p2p_message(m_type, m_subj, m_body)
+                        if msg_cls == "reject":
+                            if m_ts > latest_reject_ts:
+                                latest_reject_ts = m_ts
+                        elif msg_cls == "ready" and fd_id:
+                            if m_ts >= latest_ready_ts_by_disp.get(fd_id, 0.0):
+                                latest_ready_ts_by_disp[fd_id] = m_ts
+                    max_ready_ts_by_grp: dict[str, float] = {}
+                    for fd_id, r_ts in latest_ready_ts_by_disp.items():
+                        r_pref = disp_role_map.get(fd_id, "dev")
+                        r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
+                        if r_ts > max_ready_ts_by_grp.get(r_grp, 0.0):
+                            max_ready_ts_by_grp[r_grp] = r_ts
+                    for fd_id, r_ts in latest_ready_ts_by_disp.items():
+                        r_pref = disp_role_map.get(fd_id, "dev")
+                        r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
+                        if r_ts > 0 and max_ready_ts_by_grp.get(r_grp, 0.0) > latest_reject_ts:
+                            p2p_handoff_dispatch_ids.add(fd_id)
+                            p2p_ready_handoff_ts[fd_id] = r_ts
+                except Exception:
+                    pass
             conn.close()
         except Exception:
             used_sqlite = False
@@ -2471,12 +2597,16 @@ def resolve_run_upstream_branches(
                     })
 
             rc_ml, out_ml, _ = run_orca_json(
-                ["orchestration", "messages", "--run", resolved_run_id, "--limit", "500", "--json"],
+                ["orchestration", "inbox", "--limit", "500", "--json"],
                 cwd=main_root,
                 timeout=6,
             )
             if rc_ml == 0 and isinstance(out_ml, dict):
                 m_list = out_ml.get("messages") if isinstance(out_ml.get("messages"), list) else []
+                m_list = [
+                    m for m in m_list
+                    if isinstance(m, dict) and (m.get("run_id") == resolved_run_id or m.get("runId") == resolved_run_id)
+                ]
                 m_list_sorted = sorted(
                     enumerate(m_list),
                     key=lambda pair: (
@@ -2484,6 +2614,20 @@ def resolve_run_upstream_branches(
                         pair[0],
                     ),
                 )
+                disp_role_map = {
+                    str(d.get("dispatchId") or ""): str(d.get("rolePrefix") or "dev")
+                    for d in dispatches_in_run
+                    if d.get("dispatchId")
+                }
+                handle_to_disp = {}
+                for d in dispatches_in_run:
+                    did_v = str(d.get("dispatchId") or "").strip()
+                    th_v = str(d.get("terminalHandle") or "").strip()
+                    if did_v and th_v:
+                        norm_th = th_v[len("terminal:"):] if th_v.startswith("terminal:") else th_v
+                        handle_to_disp[th_v] = did_v
+                        handle_to_disp[norm_th] = did_v
+                        handle_to_disp[f"terminal:{norm_th}"] = did_v
                 latest_reject_ts = 0.0
                 latest_ready_ts_by_disp: dict[str, float] = {}
                 for _, mr in m_list_sorted:
@@ -2492,19 +2636,27 @@ def resolve_run_upstream_branches(
                     m_type = str(mr.get("type") or "").strip().lower()
                     if m_type not in ("handoff", "escalation"):
                         continue
-                    fd_id = str(mr.get("fromDispatchId") or mr.get("from_dispatch_id") or "").strip()
+                    fd_id, _ = _extract_msg_dispatch_and_task(mr, handle_to_disp=handle_to_disp)
                     m_subj = str(mr.get("subject") or "")
                     m_body = str(mr.get("body") or "")
                     m_ts = _to_epoch_secs(mr.get("createdAt") or mr.get("created_at"))
-                    combined_txt = f"{m_subj}\n{m_body}"
-                    if re.search(r"\b(QA_REJECT|SEC_BLOCK|INCOMPLETE_PLAN)\b", combined_txt, re.IGNORECASE):
+                    msg_cls = _classify_p2p_message(m_type, m_subj, m_body)
+                    if msg_cls == "reject":
                         if m_ts > latest_reject_ts:
                             latest_reject_ts = m_ts
-                    elif m_type == "handoff" and fd_id:
+                    elif msg_cls == "ready" and fd_id:
                         if m_ts >= latest_ready_ts_by_disp.get(fd_id, 0.0):
                             latest_ready_ts_by_disp[fd_id] = m_ts
+                max_ready_ts_by_grp: dict[str, float] = {}
                 for fd_id, r_ts in latest_ready_ts_by_disp.items():
-                    if r_ts > latest_reject_ts:
+                    r_pref = disp_role_map.get(fd_id, "dev")
+                    r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
+                    if r_ts > max_ready_ts_by_grp.get(r_grp, 0.0):
+                        max_ready_ts_by_grp[r_grp] = r_ts
+                for fd_id, r_ts in latest_ready_ts_by_disp.items():
+                    r_pref = disp_role_map.get(fd_id, "dev")
+                    r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
+                    if r_ts > 0 and max_ready_ts_by_grp.get(r_grp, 0.0) > latest_reject_ts:
                         p2p_handoff_dispatch_ids.add(fd_id)
                         p2p_ready_handoff_ts[fd_id] = r_ts
 
@@ -6691,7 +6843,13 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                     if g_tok > max_tool_output_tok:
                         max_tool_output_tok = g_tok
                         max_tool_cmd = cmd_label_short
-                    if is_shell_cmd and g_tok >= 3500 and cmd_label_short and not any(cmd_label_short in cb for cb in context_bomb_cmds):
+                    if (
+                        is_shell_cmd
+                        and g_tok >= 3500
+                        and cmd_label_short
+                        and not re.search(r"\borca\s+orchestration\s+ask\b", raw_shell_cmd)
+                        and not any(cmd_label_short in cb for cb in context_bomb_cmds)
+                    ):
                         context_bomb_cmds.append(f"{cmd_label_short} (~{g_tok:,} tok)")
                     if turn_has_orca_check and re.search(r'"replayed"\s*:\s*true', c):
                         replayed_checks += 1
@@ -7596,6 +7754,10 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
 
         from concurrent.futures import ThreadPoolExecutor
 
+        db_p_scan = _find_orca_orchestration_db()
+        root_real_lower = os.path.realpath(str(root)).lower()
+        root_str_lower = str(root).lower()
+
         def _fetch_run_workers(r_item: dict):
             rid_str = r_item.get("id")
             if not rid_str:
@@ -7610,6 +7772,47 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     w_l = wo_d.get("workers", []) if isinstance(wo_d, dict) else []
                 except Exception:
                     w_l = []
+            if db_p_scan is not None and (not w_l or any(not (wi.get("resource") or {}).get("worktreeId") for wi in w_l if isinstance(wi, dict))):
+                try:
+                    import sqlite3 as _sq3_w
+                    _cw = _sq3_w.connect(f"file:{db_p_scan}?mode=ro", uri=True, timeout=1.5)
+                    _cw.row_factory = _sq3_w.Row
+                    _wrows = _cw.execute(
+                        """
+                        SELECT dc.id AS dispatch_id, dc.task_id, dc.status AS dc_status, dc.created_at, dc.completed_at,
+                               wd.state AS wd_state, wd.worktree_id, wd.agent_terminal_handle
+                        FROM dispatch_contexts dc
+                        LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id
+                        WHERE dc.run_id = ?
+                        ORDER BY dc.created_at DESC
+                        """,
+                        (rid_str,),
+                    ).fetchall()
+                    _cw.close()
+                    if not w_l and _wrows:
+                        for wr in _wrows:
+                            w_l.append({
+                                "dispatchId": wr["dispatch_id"],
+                                "taskId": wr["task_id"],
+                                "state": wr["wd_state"] or wr["dc_status"],
+                                "workerState": wr["wd_state"] or wr["dc_status"],
+                                "createdAt": wr["created_at"],
+                                "completedAt": wr["completed_at"],
+                                "agentTerminalHandle": wr["agent_terminal_handle"],
+                                "resource": {"worktreeId": wr["worktree_id"], "state": "released"},
+                            })
+                    elif _wrows:
+                        wt_by_did = {str(wr["dispatch_id"] or ""): str(wr["worktree_id"] or "") for wr in _wrows if wr["worktree_id"]}
+                        for wi in w_l:
+                            if isinstance(wi, dict):
+                                did_k = str(wi.get("dispatchId") or wi.get("id") or "")
+                                if did_k in wt_by_did:
+                                    if not isinstance(wi.get("resource"), dict):
+                                        wi["resource"] = {}
+                                    if not wi["resource"].get("worktreeId"):
+                                        wi["resource"]["worktreeId"] = wt_by_did[did_k]
+                except Exception:
+                    pass
             return (r_item, w_c.returncode, w_l)
 
         # Kiểm tra theo đúng thứ tự thời gian (mới nhất trước): kiểm tra run đầu tiên ngay lập tức, sau đó quét song song theo lô 6 run
@@ -7632,15 +7835,21 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     print(f"⚠️  Orca CLI phản hồi chậm (>8s) khi đọc run {rid} — bỏ qua run này.")
                     continue
                 wt_paths = [
-                    str((w_item.get("resource") or {}).get("worktreeId") or "").lower()
+                    str((w_item.get("resource") or {}).get("worktreeId") or w_item.get("worktreeId") or "").lower()
                     for w_item in w_list_tmp
-                    if (w_item.get("resource") or {}).get("worktreeId")
+                    if isinstance(w_item, dict) and ((w_item.get("resource") or {}).get("worktreeId") or w_item.get("worktreeId"))
                 ]
-                if explicit_run_id:
+                has_local_run_dir = (root / ".orca" / "runs" / rid).is_dir()
+                if explicit_run_id or has_local_run_dir:
                     belongs_to_proj = True
                 elif wt_paths:
                     belongs_to_proj = any(
-                        str(root).lower() in ws_str or f"/{proj_slug}/" in ws_str or ws_str.endswith(f"/{proj_slug}")
+                        root_str_lower in ws_str
+                        or root_real_lower in ws_str
+                        or f"/{proj_slug}/" in ws_str
+                        or f"/{proj_slug}-worktrees/" in ws_str
+                        or f"/{proj_slug}." in ws_str
+                        or ws_str.endswith(f"/{proj_slug}")
                         for ws_str in wt_paths
                     )
                 else:
@@ -7661,7 +7870,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     t_list_tmp = to.get("tasks", []) if isinstance(to, dict) else []
 
                 in_cand = any(cr.get("id") == rid for cr in candidate_runs)
-                if (explicit_run_id and (in_cand or w_list_tmp or t_list_tmp)) or (belongs_to_proj and (w_list_tmp or t_list_tmp)):
+                if (explicit_run_id and (in_cand or w_list_tmp or t_list_tmp)) or (belongs_to_proj and (w_list_tmp or t_list_tmp or has_local_run_dir)):
                     selected_run = r
                     workers = w_list_tmp
                     for t in t_list_tmp:
@@ -7700,51 +7909,115 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             worker_done_body_by_dispatch = {}
             worker_done_body_by_task = {}
             if active_run_id:
-                msg_res = _safe_orca_run(
-                    [orca_bin, "orchestration", "messages", "--run", active_run_id, "--limit", "500", "--json"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if msg_res.returncode != 0:
+                handle_to_disp_mon: dict[str, str] = {}
+                handle_to_task_mon: dict[str, str] = {}
+                for w_it in workers:
+                    if not isinstance(w_it, dict):
+                        continue
+                    w_did = str(w_it.get("dispatchId") or w_it.get("id") or "").strip()
+                    w_tid = str(w_it.get("taskId") or "").strip()
+                    w_th = str(w_it.get("agentTerminalHandle") or "").strip()
+                    if w_th:
+                        norm_th = w_th[len("terminal:"):] if w_th.startswith("terminal:") else w_th
+                        for ch in (w_th, norm_th, f"terminal:{norm_th}"):
+                            if w_did:
+                                handle_to_disp_mon[ch] = w_did
+                            if w_tid:
+                                handle_to_task_mon[ch] = w_tid
+
+                loaded_msgs_sqlite = False
+                db_p_mon = _find_orca_orchestration_db()
+                if db_p_mon is not None:
+                    try:
+                        import sqlite3 as _sq3
+                        _c_mon = _sq3.connect(f"file:{db_p_mon}?mode=ro", uri=True, timeout=1.5)
+                        _c_mon.row_factory = _sq3.Row
+                        _m_rows = _c_mon.execute(
+                            """
+                            SELECT id, run_id, from_handle, to_handle, subject, body, type, payload, created_at
+                            FROM messages
+                            WHERE run_id = ?
+                            ORDER BY created_at ASC, rowid ASC
+                            """,
+                            (active_run_id,),
+                        ).fetchall()
+                        run_msgs = [dict(r) for r in _m_rows]
+                        _c_mon.close()
+                        loaded_msgs_sqlite = True
+                    except Exception:
+                        loaded_msgs_sqlite = False
+
+                if not loaded_msgs_sqlite:
                     msg_res = _safe_orca_run(
                         [orca_bin, "orchestration", "inbox", "--limit", "500", "--json"],
                         capture_output=True, text=True, timeout=5,
                     )
-                if msg_res.returncode == 0:
-                    try:
-                        msg_data = json.loads(msg_res.stdout)
-                        msg_obj = msg_data.get("result", msg_data) if isinstance(msg_data, dict) else {}
-                        all_msgs = msg_obj.get("messages", []) if isinstance(msg_obj, dict) else []
-                        run_msgs = [
-                            m for m in all_msgs
-                            if isinstance(m, dict) and (m.get("run_id") == active_run_id or m.get("runId") == active_run_id)
-                        ]
-                        hb_count = sum(1 for m in run_msgs if m.get("type") == "heartbeat")
-                        done_count = sum(1 for m in run_msgs if m.get("type") == "worker_done")
-                        esc_count = sum(1 for m in run_msgs if m.get("type") in ["escalation", "question"])
-                        handoff_count = sum(1 for m in run_msgs if m.get("type") == "handoff")
-                        for m in run_msgs:
-                            m_type = str(m.get("type") or "")
-                            subj_u = str(m.get("subject") or "").upper()
-                            body_s = str(m.get("body") or "")
-                            body_u = body_s.upper()
-                            if m_type == "handoff":
-                                if any(k in subj_u or k in body_u for k in ("QA_REJECT", "SEC_BLOCK", "INCOMPLETE_PLAN")):
-                                    p2p_reject_cnt += 1
-                                elif any(k in subj_u or k in body_u for k in ("DEV_READY", "DEV HANDOFF", "INFRA READY", "UI READY", "QA_FINAL", "CRITIC_VERDICT")):
-                                    p2p_dev_ready_cnt += 1
-                            if m_type in ("worker_done", "handoff") and body_s:
-                                s_did = str(m.get("sender_dispatch_id") or m.get("senderDispatchId") or m.get("dispatch_id") or m.get("dispatchId") or "")
-                                s_tid = str(m.get("task_id") or m.get("taskId") or "")
-                                if s_did and (m_type == "worker_done" or s_did not in worker_done_body_by_dispatch):
-                                    worker_done_body_by_dispatch[s_did] = body_s
-                                if s_tid and (m_type == "worker_done" or s_tid not in worker_done_body_by_task):
-                                    worker_done_body_by_task[s_tid] = body_s
-                        done_tokens = sum(
-                            estimate_tokens(str(m.get("body") or "") + str(m.get("subject") or ""))
-                            for m in run_msgs if m.get("type") in ["worker_done", "handoff", "escalation", "question"]
+                    if msg_res.returncode == 0:
+                        try:
+                            msg_data = json.loads(msg_res.stdout)
+                            msg_obj = msg_data.get("result", msg_data) if isinstance(msg_data, dict) else {}
+                            all_msgs = msg_obj.get("messages", []) if isinstance(msg_obj, dict) else []
+                            run_msgs = [
+                                m for m in all_msgs
+                                if isinstance(m, dict) and (m.get("run_id") == active_run_id or m.get("runId") == active_run_id)
+                            ]
+                        except Exception:
+                            run_msgs = []
+
+                try:
+                    # Khử trùng lặp các bản ghi fan-out của `--to '@all'` (cùng người gửi, type, subject, body, payload, created_at)
+                    dedup_msgs = []
+                    seen_msg_keys = set()
+                    for m in run_msgs:
+                        if not isinstance(m, dict):
+                            continue
+                        m_type_k = str(m.get("type") or "")
+                        if m_type_k == "heartbeat":
+                            dedup_msgs.append(m)
+                            continue
+                        m_key = (
+                            str(m.get("from_handle") or m.get("fromHandle") or ""),
+                            m_type_k,
+                            str(m.get("subject") or ""),
+                            str(m.get("body") or ""),
+                            str(m.get("payload") or ""),
                         )
-                    except Exception:
-                        pass
+                        if m_key in seen_msg_keys:
+                            continue
+                        seen_msg_keys.add(m_key)
+                        dedup_msgs.append(m)
+                    run_msgs = dedup_msgs
+
+                    hb_count = sum(1 for m in run_msgs if m.get("type") == "heartbeat")
+                    done_count = sum(1 for m in run_msgs if m.get("type") == "worker_done")
+                    esc_count = sum(1 for m in run_msgs if m.get("type") in ["escalation", "question"])
+                    handoff_count = sum(1 for m in run_msgs if m.get("type") == "handoff")
+                    for m in run_msgs:
+                        m_type = str(m.get("type") or "")
+                        subj_s = str(m.get("subject") or "")
+                        body_s = str(m.get("body") or "")
+                        if m_type in ("handoff", "escalation"):
+                            m_cls = _classify_p2p_message(m_type, subj_s, body_s)
+                            if m_cls == "reject":
+                                p2p_reject_cnt += 1
+                            elif m_cls == "ready" and m_type == "handoff":
+                                p2p_dev_ready_cnt += 1
+                        if m_type in ("worker_done", "handoff") and body_s:
+                            s_did, s_tid = _extract_msg_dispatch_and_task(
+                                m,
+                                handle_to_disp=handle_to_disp_mon,
+                                handle_to_task=handle_to_task_mon,
+                            )
+                            if s_did and len(body_s) >= len(worker_done_body_by_dispatch.get(s_did, "")):
+                                worker_done_body_by_dispatch[s_did] = body_s
+                            if s_tid and len(body_s) >= len(worker_done_body_by_task.get(s_tid, "")):
+                                worker_done_body_by_task[s_tid] = body_s
+                    done_tokens = sum(
+                        estimate_tokens(str(m.get("body") or "") + str(m.get("subject") or ""))
+                        for m in run_msgs if m.get("type") in ["worker_done", "handoff", "escalation", "question"]
+                    )
+                except Exception:
+                    pass
 
             if workers:
                 print("\n📊 4.1 BẢNG ĐO LƯỜNG TỐC ĐỘ AGENT CLI & TIÊU THỤ TOKEN TRÊN TỪNG WORKER:")
