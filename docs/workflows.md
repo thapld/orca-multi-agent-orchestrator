@@ -13,42 +13,44 @@ sequenceDiagram
     autonumber
     actor User as 👤 Người dùng
     participant Lead as 🏛️ Lead Coordinator
-    participant Orca as 🐋 Orca Runtime
+    participant Critic as 🔎 critic-worker (Quân sư System Eng)
+    participant Orca as 🐋 Orca Runtime & Pinned Plan
     participant Devs as 💻 Dev Swarm (1–N)
-    participant QA as 🧪 QA Swarm
+    participant QA as 🧪 QA Swarm (Kiểm toán Plan 100%)
     participant Sec as 🔍 Security Auditor
 
-    User->>Lead: Yêu cầu tính năng mới
-    Lead->>Lead: Phân tích & Viết bản Kế hoạch (plan.md)
-    Lead-->>User: Trình Plan để Người dùng duyệt (Decision Gate)
-    User->>Lead: Duyệt kế hoạch (Approved)
+    User->>Lead: Yêu cầu tính năng / sửa lỗi mới
+    Lead->>Orca: orca orchestration run-create & task-create (critic-worker)
+    Lead->>Critic: Trình Bản nháp Plan [P1..Pn] + Bằng chứng thô
+    Critic->>Critic: Tra cứu System Eng KB (orca-team kb) & điều tra độc lập
+    Critic<<->>Lead: Vòng lặp thảo luận 2 chiều (ask / reply) hiệu chỉnh Plan
+    Critic->>Orca: send --type handoff (CRITIC_VERDICT: CONSENSUS_REACHED) & --type worker_done
+    Lead-->>User: Trình Plan đã đồng thuận để Người dùng chốt (nếu cần)
+    Lead->>Orca: orca-team plan pin (Ghim Pinned Master Plan [P1..Pn] công khai cho toàn team)
+    Lead->>Orca: orca orchestration task-create (Tách Task riêng cho Dev, DevOps, Sec, QA)
 
-    Lead->>Orca: orca orchestration run-create
-    Lead->>Orca: orca orchestration task-create (Tạo Task DAG có dependency)
-
-    par Khởi chạy Workers (Elastic Worktree Auto-Scale qua $(orca-team worktree-arg <role>))
+    par Khởi chạy Đợt 1 — Workers viết code ($(orca-team worktree-arg <role>))
         Lead->>Orca: worker-start Dev $(orca-team worktree-arg dev) (dev-worker, dev-worker-2..N)
-        Lead->>Orca: worker-start DevOps $(orca-team worktree-arg devops)
+        Devs->>Orca: orca-team plan show (Đọc Pinned Master Plan [P1..Pn] & Danh bạ P2P)
     end
 
-    loop Trong khi code
-        Devs->>Orca: send --from <handle> --type heartbeat
-        Devs->>Devs: Viết code, Unit test & git commit
+    Devs->>Orca: send --from <handle> --type handoff --subject "Dev Handoff" & send --type worker_done --outcome succeeded
+    Lead->>Orca: check [--ack <DELIVERY_ID>] --wait & worker-retain
+
+    Lead->>Orca: Khởi chạy Đợt 2 — worker-start QA, Sec & DevOps ($(orca-team worktree-arg qa/sec/devops))
+    QA->>Orca: orca-team merge-upstream --role qa (In Pinned Master Plan [P1..Pn] + Merge nhánh Dev)
+    loop Phối hợp P2P nội bộ Team (Tối đa 3 vòng nếu thiếu mục [Pk] hoặc lỗi test)
+        QA->>Devs: send --to '@all' --type handoff --subject "QA_REJECT vòng n/3" (Trả bài P2P)
+        Devs->>QA: Vá bổ sung + commit + nhắn P2P "DEV_READY"
     end
-
-    Devs->>Orca: send --from <handle> --type handoff --subject "Dev Handoff" --body "DEV_HANDOFF: branch=dev-worker, commit=..."
-    Devs->>Orca: worker-done --terminal <handle> --outcome succeeded
-    Lead->>Orca: check [--ack <DELIVERY_ID>] --wait, git log -n 1 --stat & worker-retain (Kiểm duyệt Commit Hash & Build=0)
-
-    Lead->>Orca: worker-start QA & Security Auditor ($(orca-team worktree-arg qa) & $(orca-team worktree-arg sec))
-    QA->>Orca: send --from <handle> --type worker_done --outcome succeeded (QA_VERDICT: PASS + Runtime Log Clean)
+    QA->>Orca: send --from <handle> --type handoff --subject "QA_FINAL: PLAN 100% & TESTS PASS" & send --type worker_done --outcome succeeded
     Sec->>Orca: send --from <handle> --type worker_done --outcome succeeded (SECURITY_VERDICT: PASS)
 
-    Lead->>Orca: orca file open-changed --mode diff (Soi diff tổng thể)
+    Lead->>Orca: Verify lại lần cuối (Đối chiếu Bảng QA_FINAL [P1..Pn] + git log/diff --stat)
     Lead->>Orca: orca orchestration gate-create (Xin phép Human User trước khi merge)
     User->>Lead: Duyệt Merge (Approved)
-    Lead->>Orca: gate-resolve, task-update --status completed, git merge & orca-team release-workers --run <RUN_ID>
-    Lead-->>User: Báo cáo hoàn tất
+    Lead->>Orca: gate-resolve, task-update --status completed, orca-team merge-upstream --to-main & release-workers
+    Lead-->>User: Báo cáo hoàn tất 100% Plan [P1..Pn]
 ```
 
 ---

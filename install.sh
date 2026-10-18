@@ -31,6 +31,13 @@ link_or_copy "$SCRIPT_DIR/scripts/orca-pr-review.sh" "$INSTALL_DIR/orca-review"
 link_or_copy "$SCRIPT_DIR/scripts/orca-pr-review.sh" "$INSTALL_DIR/orca-review-pr"
 link_or_copy "$SCRIPT_DIR/scripts/orca-command-guard.py" "$INSTALL_DIR/orca-command-guard"
 
+if [[ -d "$SCRIPT_DIR/knowledge/system-engineer" ]]; then
+  mkdir -p "${HOME}/.orca/knowledge"
+  rm -rf "${HOME}/.orca/knowledge/system-engineer"
+  ln -sf "$SCRIPT_DIR/knowledge/system-engineer" "${HOME}/.orca/knowledge/system-engineer" 2>/dev/null || cp -R "$SCRIPT_DIR/knowledge/system-engineer" "${HOME}/.orca/knowledge/system-engineer"
+  echo "  🧠 Đã cài đặt: System Engineering Knowledge Base (~/.orca/knowledge/system-engineer)"
+fi
+
 # Kích hoạt Orca Agent Status Hooks (vòng xoay vàng, chấm xanh & chuông thông báo cho Antigravity/Claude/Kimi/Gemini)
 if [[ -x "/Applications/Orca.app/Contents/MacOS/Orca" && -f "/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/main/agent-hooks/managed-agent-hook-controls.js" ]]; then
   ELECTRON_RUN_AS_NODE=1 /Applications/Orca.app/Contents/MacOS/Orca -e '
