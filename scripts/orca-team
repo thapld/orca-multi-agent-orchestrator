@@ -128,16 +128,16 @@ ORCA_DIRECTIVE_MARKER = "Orca Multi-Agent Orchestration Directive"
 ROLE_SPEC_TEMPLATES = {
     "developer": (
         "[ROLE: PRINCIPAL DEV] Nhiệm vụ: {task}. "
-        "Chuẩn: Clean Architecture, type-safe 100%, xử lý edge cases (null, timeout, concurrency), không TODO/mock giả/hardcode secret. "
+        "Chuẩn: Hoàn thiện ĐẦY ĐỦ 100% mọi hạng mục/yêu cầu trong Nhiệm vụ mà Leader giao (Leader sẽ đối chiếu trực tiếp git diff với từng mục trong Plan ở Bước 3, nếu thiếu bất kỳ mục nào sẽ bị bác bỏ!), Clean Architecture, type-safe 100%, xử lý edge cases (null, timeout, concurrency), không TODO/stub/mock giả/hardcode secret. "
         "CẤM VƯỢT RÀO: Chỉ sửa code app & unit test (__tests__/*, *.test.*, *.spec.*) thuộc phạm vi module/file được giao (cấm đụng sang module của slot khác); "
         "chủ động định vị đường dẫn package trong monorepo (services/*, packages/*, apps/*) mà không dừng lại ask Coordinator; CẤM sửa K8s/Docker của DevOps; CẤM xóa/skip (@Ignore, .skip) test cũ đang fail. "
         "GIAO TIẾP & THẨM QUYỀN QUYẾT ĐỊNH (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): "
         "(1) Đồng bộ nhánh mới nhất (git merge --no-edit main) và kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) nhận chỉ đạo/spec từ Coordinator; "
         "nếu cần quyết định kiến trúc/cấu hình liên role, BẮT BUỘC hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json, "
-        "(2) Build & Unit Test EXIT_CODE=0 (Jest bắt buộc kèm --forceExit) và git commit sạch vào nhánh worktree hiện tại ({slot_branch}), "
+        "(2) Build & Unit Test EXIT_CODE=0 (Jest bắt buộc kèm --forceExit; khi lệnh chuyển sang background task-XX CẤM poll manage_task liên tục mà hãy dừng gọi tool chờ đánh thức) và git commit sạch vào nhánh worktree hiện tại ({slot_branch}), "
         "(3) Khi hoàn tất, BẮT BUỘC gộp lệnh gửi handoff và worker-done trong CÙNG MỘT LỆNH SHELL nối bằng && (để Coordinator không bị đánh thức 2 lần lệch nhịp): "
         "orca orchestration send --from <worker_handle> --type handoff --subject 'Dev Handoff: {slot_branch} (<commit_hash>)' "
-        "--body 'Tóm tắt nhánh worktree, file sửa, API/schema/env thay đổi để Coordinator điều phối cho DevOps/QA/Sec/Bench' "
+        "--body 'Tóm tắt từng hạng mục Plan đã hoàn thành, nhánh worktree, file sửa, API/schema/env thay đổi để Coordinator kiểm đếm đối chiếu với Plan và điều phối cho DevOps/QA/Sec/Bench' "
         "--task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json "
         "(KHÔNG dùng --to '@all' vì '@all' loại trừ Coordinator!)."
     ),
@@ -184,16 +184,16 @@ ROLE_SPEC_TEMPLATES = {
     ),
     "qa": (
         "[ROLE: PRINCIPAL QA/SDET] Nhiệm vụ: {task}. "
-        "Chuẩn: Phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) và 100% Acceptance Criteria. "
+        "Chuẩn: Phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) và 100% Acceptance Criteria trong Plan của Leader. "
         "CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test; CẤM TUYỆT ĐỐI sửa business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi "
         "status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót "
         "không quét pod DB/Kafka! GIAO TIẾP & BÁO CÁO COORDINATOR (BẮT BUỘC): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) "
-        "nhận nhánh/môi trường từ Coordinator và chạy orca-team merge-upstream --role qa --task-id <task_id> --dispatch-id <dispatch_id> trước khi test (lệnh này tự xác minh mọi dev-worker* trong CÙNG Run đã succeeded 100% và CHỈ merge đúng các nhánh thuộc Run của Leader này, CẤM tự chạy vòng lặp merge dev-worker*!), (2) Chạy lệnh test thật (Jest kèm --forceExit) VÀ kiểm toán trực tiếp "
+        "nhận nhánh/môi trường từ Coordinator và chạy orca-team merge-upstream --role qa --task-id <task_id> --dispatch-id <dispatch_id> trước khi test (lệnh này tự xác minh mọi dev-worker* trong CÙNG Run đã succeeded 100% và CHỈ merge đúng các nhánh thuộc Run của Leader này, CẤM tự chạy vòng lặp merge dev-worker*!), (2) Chạy lệnh test thật (Jest kèm --forceExit; khi lệnh chuyển sang background task-XX CẤM poll manage_task liên tục) VÀ kiểm toán trực tiếp "
         "TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, "
         "(3) Nếu vướng môi trường phải hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json; "
-        "nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs hay DB ➔ BẮT BUỘC trình ngay lên Coordinator bằng "
+        "nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs, DB hoặc thấy Dev làm thiếu tính năng so với yêu cầu test ➔ BẮT BUỘC trình ngay lên Coordinator bằng "
         "orca orchestration send --from <worker_handle> --type escalation --subject 'QA Runtime/Test Failure' "
-        "--body '<Trích xuất log lỗi trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt QA_VERDICT: FAIL!"
+        "--body '<Trích xuất log lỗi / mục làm thiếu trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json và chốt QA_VERDICT: FAIL!"
     ),
     "benchSpecialist": (
         "[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: {task}. "
@@ -218,11 +218,11 @@ ROLE_SPEC_TEMPLATES = {
     ),
     "uiSpecialist": (
         "[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: {task}. "
-        "Chuẩn: CSS/DOM chuẩn xác, Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. "
+        "Chuẩn: Hoàn thiện ĐẦY ĐỦ 100% mọi hạng mục UI/UX được giao (Leader sẽ đối chiếu git diff với Plan ở Bước 3), CSS/DOM chuẩn xác, Responsive (Mobile/Tablet/Desktop), Accessibility (a11y), Loading/Empty/Error states. "
         "CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend core/DB schema. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: Đồng bộ nhánh mới nhất (git merge --no-edit main), Build/typecheck EXIT_CODE=0, không lỗi Console, "
         "kiểm tra snapshot/screenshot Mobile/Desktop, git commit kèm Commit Hash vào nhánh worktree hiện tại ({slot_branch}) và gộp gửi handoff + worker-done trong cùng 1 lệnh (&&): "
         "orca orchestration send --from <worker_handle> --type handoff --subject 'UI Ready: {slot_branch} (<commit_hash>)' "
-        "--body '<Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json."
+        "--body '<Tóm tắt từng hạng mục UI trong Plan đã hoàn thành, Branch/Commit/Routes>' --task-id <task_id> --dispatch-id <dispatch_id> --json && orca orchestration worker-done --terminal <worker_handle> --outcome succeeded --summary '...' --task-id <task_id> --dispatch-id <dispatch_id> --json."
     ),
     "prReviewer": (
         "[ROLE: PRINCIPAL PR REVIEWER] Nhiệm vụ: {task}. "
@@ -249,12 +249,12 @@ GOAL_MODE_CLAUSE = (
 
 
 def _is_goal_mode_enabled(role_cfg: dict = None, config: dict = None) -> bool:
-    """Kiểm tra chế độ /goal cho vai trò (mặc định BẬT = True trên toàn bộ các vai trò)."""
+    """Kiểm tra chế độ /goal cho vai trò (mặc định TẮT = False để tiết kiệm token; Leader chịu trách nhiệm kiểm đếm Plan ở Bước 3)."""
     if isinstance(role_cfg, dict) and "goalMode" in role_cfg and role_cfg.get("goalMode") is not None:
         return bool(role_cfg.get("goalMode"))
     if isinstance(config, dict) and "goalMode" in config and config.get("goalMode") is not None:
         return bool(config.get("goalMode"))
-    return True
+    return False
 
 
 def _infer_canonical_from_role_header(raw_task: str) -> str:
@@ -2613,9 +2613,9 @@ def _ensure_critic_defaults(config: dict) -> dict:
     if not isinstance(config, dict):
         return config
     if "goalMode" not in config:
-        config["goalMode"] = True
+        config["goalMode"] = False
     if isinstance(config.get("coordinator"), dict) and "goalMode" not in config["coordinator"]:
-        config["coordinator"]["goalMode"] = config.get("goalMode", True)
+        config["coordinator"]["goalMode"] = config.get("goalMode", False)
     if not isinstance(config.get("roles"), dict):
         config["roles"] = {}
     roles = config["roles"]
@@ -2627,12 +2627,12 @@ def _ensure_critic_defaults(config: dict) -> dict:
             "agent": sec_cfg.get("agent") or coord.get("agent") or "antigravity",
             "model": sec_cfg.get("model") or coord.get("model") or "gemini-4-argon-high",
             "effort": sec_cfg.get("effort") or "high",
-            "goalMode": config.get("goalMode", True),
+            "goalMode": config.get("goalMode", False),
             "utilities": ["git-worktrees", "diff-viewer", "orca-skills-registry"],
         }
     for r_cfg in roles.values():
         if isinstance(r_cfg, dict) and "goalMode" not in r_cfg:
-            r_cfg["goalMode"] = config.get("goalMode", True)
+            r_cfg["goalMode"] = config.get("goalMode", False)
     return config
 
 REA_REPO_URL = "https://github.com/morluto/rea.git"
@@ -3011,7 +3011,7 @@ def sync_gemini_directive(root: Path, config: dict):
             "agent": sec.get("agent") or coord.get("agent") or "antigravity",
             "model": sec.get("model") or coord.get("model") or "gemini-4-argon-high",
             "effort": sec.get("effort") or "high",
-            "goalMode": config.get("goalMode", True),
+            "goalMode": config.get("goalMode", False),
             "utilities": ["git-worktrees", "diff-viewer", "orca-skills-registry"],
         }
         try:
@@ -3028,7 +3028,7 @@ def sync_gemini_directive(root: Path, config: dict):
 
     table_text = "\n".join(rows)
 
-    # Đồng bộ dòng BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN, LUẬT CHỐNG ĐỘC ĐOÁN & CHẾ ĐỘ /goal ở đầu file
+    # Đồng bộ dòng BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN, LUẬT CHỐNG ĐỘC ĐOÁN & TRÁCH NHIỆM KIỂM ĐẾM PLAN ở đầu file
     routing_parts = ['Code ứng dụng ➔ **`dev-worker` (`dev-worker-2`... auto-scale)**']
     if devops_enabled:
         routing_parts.append('Docker, K8s, Helm, DB migration, `.env`, infra ➔ **`devops-worker`**')
@@ -3083,11 +3083,23 @@ def sync_gemini_directive(root: Path, config: dict):
             "đính kèm hậu tố kích hoạt `/goal` (`GoalStopHook` + checklist nghiệm thu) buộc hoàn tất 100% yêu cầu và gửi `worker_done` trước khi xuất `<!-- GOAL_COMPLETE -->`."
         )
     else:
-        goal_rule_line = ""
+        goal_rule_line = (
+            "> - **TRÁCH NHIỆM KIỂM ĐẾM & ĐỐI CHIẾU 100% KẾ HOẠCH CỦA LEADER (LEADER PLAN-COMPLETION AUDIT — TẮT `/goal` ĐỂ TIẾT KIỆM TOKEN):** "
+            "Mặc định tắt chế độ `/goal` trên toàn bộ vai trò (`goalMode: false`) để tránh tiêu tốn token lặp vòng; thay vào đó, "
+            "**Lead Coordinator chịu trách nhiệm 100% trong việc lập Checklist Hạng mục Bàn giao (Plan Deliverables) ở Bước 1 và trực tiếp kiểm đếm/đối chiếu "
+            "từng hạng mục với `git diff`/`git log`/kết quả test thực tế của Worker ở Bước 3 & Bước 4**. Nếu Worker làm thiếu bất kỳ yêu cầu nào trong Plan/Spec, "
+            "làm sơ sài (còn `TODO`/stub/mock giả) hoặc sót edge-case ➔ Leader **BẮT BUỘC** bác bỏ và điều phối Worker làm bù cho đủ 100% Plan trước khi qua Wave 2 hoặc mở Human Gate!"
+        )
     header_rules_block = routing_line + "\n" + anti_autocracy_line + ("\n" + goal_rule_line if goal_rule_line else "")
     content = re.sub(
-        r"^> - \*\*BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN[^\n]*\n(?:> - \*\*LUẬT CHỐNG ĐỘC ĐOÁN[^\n]*\n?)?(?:> - \*\*CHẾ ĐỘ LÀM TRIỆT ĐỂ[^\n]*)?",
+        r"^> - \*\*BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN[^\n]*\n(?:> - \*\*LUẬT CHỐNG ĐỘC ĐOÁN[^\n]*\n?)?(?:> - \*\*(?:CHẾ ĐỘ LÀM TRIỆT ĐỂ|TRÁCH NHIỆM KIỂM ĐẾM)[^\n]*)?",
         header_rules_block,
+        content,
+        flags=re.M
+    )
+    content = re.sub(
+        r"^> - Tại root workspace, Leader \*\*CHỈ ĐƯỢC PHÉP\*\*[^\n]*",
+        lambda m: "> - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy lệnh `orca orchestration ...`, `orca-team ...`, `git log`/`git diff` (để kiểm đếm Plan của Worker) và `git merge` (sau khi qua Human Gate).",
         content,
         flags=re.M
     )
@@ -3120,14 +3132,15 @@ def sync_gemini_directive(root: Path, config: dict):
     step1_lines = [
         "### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS ĐỘC LẬP THEO VAI TRÒ (CẤM GỘP VIỆC — TỰ ĐỘNG TIÊM SỔ TAY WORKER)",
         "- Tạo Run mới và **tách Task riêng cho từng vai trò chuyên môn**. Dùng `$(orca-team spec <role> '...')` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (`[ROLE: PRINCIPAL ...]`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **CẤM** gọi `view_file` đọc hàng loạt file source code ở root workspace trước khi giao việc — chỉ dùng lệnh nhẹ như `ls` để định vị cấu trúc thư mục/package; **KHÔNG** thêm `--json` vào `task-create` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng `orca orchestration task-list --brief`).",
+        "- 📋 **LẬP CHECKLIST HẠNG MỤC BÀN GIAO THEO PLAN (PLAN DELIVERABLES CHECKLIST):** Trước khi tạo Task, Leader **BẮT BUỘC** phân rã yêu cầu/Plan của sếp thành danh sách các hạng mục cụ thể (file/module, hàm/API endpoint, DB schema, UI state, edge cases và tiêu chí test) và ghi rõ từng hạng mục vào trong Spec của từng Task tương ứng để làm căn cứ kiểm đếm 1-1 ở Bước 3.",
         "- 🔴 **LUẬT CHIA TẢI SONG SONG & AUTO-SCALE WORKTREE (`DISJOINT FILE OWNERSHIP`):** Khi bài toán có ≥ 2 hạng mục/module/nhóm file độc lập thuộc cùng một vai trò (đặc biệt là `dev`), Leader **BẮT BUỘC chia thành nhiều Task độc lập (`DEV_TASK_1`, `DEV_TASK_2`...) với phạm vi file tách biệt hoàn toàn (mỗi Task sở hữu trọn vẹn code + unit test `__tests__/*`, `*.test.*` của module mình, cấm đụng sang module của Task khác)** để khởi chạy đồng thời ở Bước 2 (tuyệt đối **CẤM** gom toàn bộ việc lớn vào 1 task bắt 1 agent gánh một mình!):",
         "  ```bash",
         '  orca orchestration run-create --objective "[Mô tả tổng thể]"',
         "",
         "  # 1. Principal Dev (Code/API/Logic — Khi có ≥2 module/hạng mục độc lập, BẮT BUỘC tạo nhiều Task tách biệt phạm vi file để chạy song song):",
-        "  orca orchestration task-create --spec \"$(orca-team spec dev '[Module/Hạng mục 1 - Phạm vi file & unit test riêng: Chi tiết code & yêu cầu]')\"",
+        "  orca orchestration task-create --spec \"$(orca-team spec dev '[Module/Hạng mục 1 - Phạm vi file & unit test riêng: Liệt kê rõ từng hạng mục trong Plan cần hoàn thiện]')\"",
         "  # (Nếu có thêm module/hạng mục độc lập thứ 2, thứ 3... tiếp tục tạo Task riêng để Bước 2 tự động đẻ thêm dev-worker-2, dev-worker-3...):",
-        "  # orca orchestration task-create --spec \"$(orca-team spec dev '[Module/Hạng mục 2 - Phạm vi file & unit test riêng: Chi tiết code & yêu cầu]')\"",
+        "  # orca orchestration task-create --spec \"$(orca-team spec dev '[Module/Hạng mục 2 - Phạm vi file & unit test riêng: Liệt kê rõ từng hạng mục trong Plan cần hoàn thiện]')\"",
     ]
     step_num = 2
     if devops_enabled:
@@ -3141,7 +3154,7 @@ def sync_gemini_directive(root: Path, config: dict):
     step1_lines.append(f"  # {step_num}. Principal AppSec Auditor (BẮT BUỘC khi có API mới, Auth/JWT, input validation, concurrency, OWASP):")
     step1_lines.append("  orca orchestration task-create --spec \"$(orca-team spec sec 'Kiểm toán Red-Team cho [module/diff]')\"")
     step1_lines.append(f"  # {step_num + 1}. Principal SDET / QA (Kiểm thử độc lập, Nghiệm thu & Kiểm toán Runtime Logs):")
-    step1_lines.append("  orca orchestration task-create --spec \"$(orca-team spec qa 'Kiểm thử nghiệm thu, Adversarial Testing & Runtime Logs cho [chi tiết]')\"")
+    step1_lines.append("  orca orchestration task-create --spec \"$(orca-team spec qa 'Kiểm thử nghiệm thu 100% hạng mục trong Plan, Adversarial Testing & Runtime Logs cho [chi tiết]')\"")
     step_num += 2
     if bench_enabled:
         step1_lines.append(f"  # {step_num}. Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):")
@@ -3163,7 +3176,7 @@ def sync_gemini_directive(root: Path, config: dict):
         flags=re.M
     )
 
-    # Bước 2: Elastic Auto-Scale Worktree Slots qua $(orca-team worktree-arg <role>)
+    # Bước 2: Elastic Auto-Scale Worktree Slots qua $(orca-team worktree-arg <role> --task <TASK_ID>)
     active_wt_names = ["`dev-worker`"]
     if devops_enabled:
         active_wt_names.append("`devops-worker`")
@@ -3183,7 +3196,7 @@ def sync_gemini_directive(root: Path, config: dict):
         f'- 🔴 **QUY TẮC ELASTIC WORKTREE SLOTS & QUYỀN SỞ HỮU THEO RUN (`$(orca-team worktree-arg <role> --task <TASK_ID>)`):** Mọi lệnh `worker-start` **BẮT BUỘC** dùng `$(orca-team worktree-arg <role> --task <TASK_ID>)` để cấp phát Worktree Slot thông minh cho các vai trò ({", ".join(active_wt_names)}): (1) **Khóa Chéo Giữa Các Leader (`WORKING` & `RETAINED`):** Khi một slot đang làm việc (`working`) HOẶC đã xong nhưng vẫn đang được giữ (`retained` — chưa merge vào `main` ở Bước 4) bởi `Run A`, slot đó bị **KHÓA đối với mọi Leader khác (`Run B`)**, buộc `Run B` tự động nhảy sang `<role>-worker-2`, `<role>-worker-3`... để không bao giờ ghi đè lên nhánh chưa merge của `Run A`; (2) **Tái Sử Dụng Nội Bộ Cùng Run (Same-Run Affinity):** Trong cùng một `Run A`, khi giao task fix lỗi / re-test vòng 2, truyền `--task <TASK_ID>` giúp `Run A` tự động tái sử dụng lại chính slot của mình (giữ nguyên các commit vòng 1); (3) **Nhả Slot & Tự Làm Sạch Khi Sang Run Mới (`RELEASED`):** Sau khi hoàn tất Bước 4 (`orca-team merge-upstream --to-main` + `orca-team release-workers`), slot chuyển sang `RELEASED` để các Leader sau tái sử dụng và tự động đồng bộ sạch về `main`!',
         '- 🔴 **PHÂN ĐỢT THEO SÓNG (WAVE ORDERING — CẤM CHẠY QA/SEC/BENCH KHI DEV CHƯA XONG 100%) & CÔ LẬP MERGE THEO RUN (`orca-team merge-upstream`):**\n'
         '  1. **Wave 1 (Khảo sát & Lập trình):** Khởi chạy `critic-worker`, `re-worker`, `dev-worker*`, `ui-worker*`. **CẤM TUYỆT ĐỐI** gọi `worker-start` cho `qa-worker`, `sec-worker`, `bench-worker`, `devops-worker` cùng lúc với `dev-worker*` hoặc khi bất kỳ `dev-worker*`/`ui-worker*` nào trong cùng Run vẫn đang làm việc (`working`)!\n'
-        '  2. **Wave 2 (Triển khai & Kiểm thử Nghiệm thu):** Chỉ sau khi **100% `dev-worker*` / `ui-worker*` thuộc cùng Run của Leader này đã báo `worker-done` (`succeeded`)**, Leader mới khởi chạy `devops-worker`, `sec-worker`, `qa-worker`, `bench-worker`. Bên trong mỗi worker này, lệnh `orca-team merge-upstream --role <role> --task-id <task_id> --dispatch-id <dispatch_id>` tự động kiểm tra mọi nhánh Dev trong cùng Run đã hoàn tất 100% và **chỉ merge duy nhất các nhánh thuộc Run của Leader đó** (tuyệt đối không merge nhầm nhánh của Leader khác đang chạy song song!).',
+        '  2. **Wave 2 (Triển khai & Kiểm thử Nghiệm thu):** Chỉ sau khi **100% `dev-worker*` / `ui-worker*` thuộc cùng Run của Leader này đã báo `worker-done` (`succeeded`) VÀ đã được Leader kiểm đếm đủ 100% hạng mục trong Plan**, Leader mới khởi chạy `devops-worker`, `sec-worker`, `qa-worker`, `bench-worker`. Bên trong mỗi worker này, lệnh `orca-team merge-upstream --role <role> --task-id <task_id> --dispatch-id <dispatch_id>` tự động kiểm tra mọi nhánh Dev trong cùng Run đã hoàn tất 100% và **chỉ merge duy nhất các nhánh thuộc Run của Leader đó** (tuyệt đối không merge nhầm nhánh của Leader khác đang chạy song song!).',
         '- ⚠️ **CHỜ TẤT CẢ LỆNH `worker-start` TRẢ VỀ `dispatchId` TRƯỚC KHI SANG BƯỚC 3 (CHỐNG RACE CONDITION):** Mỗi lệnh `orca orchestration worker-start` mất khoảng 15–40 giây để khởi tạo worktree & PTY (có thể chuyển sang background `task-XX`). Leader **BẮT BUỘC** chờ toàn bộ các lệnh `worker-start` của đợt Fan-out hoàn tất và trả về `dispatchId` rồi mới gọi `orca orchestration check --wait` ở Bước 3:',
         "  ```bash",
         "  # Dev Worker (gọi cho từng DEV_TASK_ID độc lập — tự động dùng dev-worker khi rảnh và tự đẻ dev-worker-2, dev-worker-3... khi chạy song song):",
@@ -3261,11 +3274,11 @@ def sync_gemini_directive(root: Path, config: dict):
             '  - **Chống quy kết vội vàng:** Leader **CẤM** quy kết lỗi cho bất kỳ role nào khi chưa có bằng chứng `file:line` + log thực tế.\n'
         )
         + '  - **Nhận `question` (từ `ask`):** Coordinator phản hồi qua `orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json`.\n'
-        f'  - **Nhận `handoff` (từ {handoff_roles}):** Coordinator kiểm duyệt bằng chứng ({handoff_ev}) rồi quyết định bàn giao cho role kế tiếp.\n'
+        f'  - **Nhận `handoff` (từ {handoff_roles}):** Coordinator kiểm duyệt bằng chứng ({handoff_ev}) và **đối chiếu 1-1 với Checklist Plan ở Bước 1** rồi mới quyết định bàn giao cho role kế tiếp.\n'
         f'  - **Nhận `escalation` (từ {esc_roles}):** Coordinator phân xử dựa trên bằng chứng{" (gặp trigger Anti-Autocracy ➔ qua `critic-worker` trước)" if critic_enabled else ""} và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` với `$(orca-team worktree-arg <role> --task <TASK_ID>)`, rồi điều phối {reverify_w} kiểm toán lại.\n'
-        '- **Nghiệm thu Zero-Trust:** Đọc trực tiếp nội dung báo cáo trong trường `messages` trả về từ `orca orchestration check --wait --json` kết hợp đối chiếu độc lập bằng `git log -n 1 --stat <ten-worktree>` (chỉ gọi `orca orchestration worker-read --dispatch <DISPATCH_ID> --json` khi worker bị treo/timeout không gửi tin nhắn; **CẤM** gọi `orca orchestration inbox --json` vì lệnh này tải lại toàn bộ lịch sử tin nhắn cũ gây phình context). '
+        '- **Nghiệm thu Zero-Trust & Kiểm đếm Hoàn thiện 100% theo Plan (Plan-Completion Audit):** Đọc trực tiếp nội dung báo cáo trong trường `messages` trả về từ `orca orchestration check --wait --json` kết hợp **kiểm tra độc lập trên nhánh của Worker bằng `git log -n 1 --stat <ten-worktree>` và `git diff main...<ten-worktree>` để đối chiếu 1-1 từng hạng mục trong Plan/Spec đã giao ở Bước 1 với code thực tế** (chỉ gọi `orca orchestration worker-read --dispatch <DISPATCH_ID> --json` khi worker bị treo/timeout không gửi tin nhắn; **CẤM** gọi `orca orchestration inbox --json` vì lệnh này tải lại toàn bộ lịch sử tin nhắn cũ gây phình context). '
         '**BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:\n'
-        '  1. **Báo sạch giả (Fake Clean):** Báo `succeeded` nhưng thiếu `EXIT_CODE=0`, thiếu `git commit` (Commit Hash), '
+        '  1. **Làm thiếu Plan hoặc Báo sạch giả (Incomplete Plan / Fake Clean):** Worker báo `succeeded` nhưng **chưa hoàn thiện đủ 100% các hạng mục/yêu cầu trong Plan/Spec mà Leader đã giao** (bỏ sót tính năng phụ, thiếu API/field/validation/UI state, chỉ làm phần dễ bỏ phần khó, để lại `TODO`/`FIXME`/stub/mock giả, hoặc chưa viết test phủ đủ các kịch bản trong Spec), HOẶC thiếu `EXIT_CODE=0`, thiếu `git commit` (Commit Hash), '
         f'`Tests Run = 0`'
         f'{", thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99)" if bench_enabled else ""}'
         f'{", thiếu Evidence từ `rea` (`re-worker`)" if re_enabled else ""}'
@@ -3283,7 +3296,7 @@ def sync_gemini_directive(root: Path, config: dict):
         f'{", `RE_VERDICT: BLOCKED_BY_UNKNOWN`" if re_enabled else ""}'
         f'{", hoặc pod `CrashLoopBackOff`/`ErrImagePull`" if devops_enabled else ""}.\n'
         f'  4. **Vượt rào (Boundary Crossing):** {zt4_ro_roles} tự sửa code app, Dev xóa/skip test cũ{", DevOps sửa business logic" if devops_enabled else ""}, hoặc Worker tự ý đổi kiến trúc không qua Coordinator.\n'
-        f'- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao {self_heal_fixers} sửa qua `$(orca-team worktree-arg <role> --task <TASK_ID>)` và bắt buộc chạy lại {self_heal_verifiers} xác nhận đến khi PASS 100%.\n'
+        f'- **Tự chữa lỗi & Bắt làm bù khi thiếu Plan:** Nếu bị bác bỏ, test fail hoặc **Leader kiểm đếm `git diff` thấy còn thiếu bất kỳ mục nào so với Plan đã giao**, **cấm tự sửa ở root và cấm cho qua!** Lập tức liệt kê rõ những hạng mục còn thiếu/lỗi, tạo Task bổ sung giao {self_heal_fixers} sửa qua `$(orca-team worktree-arg <role> --task <TASK_ID>)` (tự động tái sử dụng đúng worktree cũ của Run đó) và bắt buộc chạy lại {self_heal_verifiers} xác nhận đến khi hoàn thiện 100% Plan.\n'
         '- ⚠️ **GIỮ TERMINAL WORKER SỐNG Ở BƯỚC 3 BẰNG `worker-retain` (KHÔNG GỌI `worker-release` Ở BƯỚC 3):** Khi một worker đã hoàn tất (`worker_done`), gọi `orca orchestration worker-retain --dispatch <DISPATCH_ID> --json` để thỏa mãn Completion Accounting của Orca đồng thời giữ nguyên quyền sở hữu slot của Run (chặn Leader khác ghi đè trước khi merge vào `main`) và giữ nguyên terminal worker trên Orca Sidebar (hiển thị **chấm xanh `🟢`**, **icon Agent `✓`** và **chuông thông báo `🔔`** cho tới Bước 4)!\n\n'
     )
     content = re.sub(
@@ -3293,7 +3306,7 @@ def sync_gemini_directive(root: Path, config: dict):
         flags=re.M
     )
 
-    step4_ev_items = ["Dev (`Commit Hash` + `Build OK`)"]
+    step4_ev_items = ["Dev (`Commit Hash` + `Build OK` + đủ 100% hạng mục Plan)"]
     if devops_enabled:
         step4_ev_items.append("DevOps (`Pod/Infra Ready`)")
     step4_ev_items.append("Security (`PASS`)")
@@ -3331,10 +3344,10 @@ def sync_gemini_directive(root: Path, config: dict):
     )
 
     step4_full = (
-        '### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)\n'
-        f'- Chỉ khi {"đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` khi có trigger Anti-Autocracy) và " if critic_enabled else ""}đủ bằng chứng thép của {step4_ev_str}, mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge){goal_gate_hint}:\n'
+        '### BƯỚC 4: KIỂM ĐẾM TỔNG KẾT PLAN, HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)\n'
+        f'- Chỉ khi **Leader đã đối chiếu hoàn tất 100% mọi hạng mục trong Plan ban đầu (không bỏ sót bất kỳ yêu cầu nào của sếp)**, {"đã thống nhất kiến trúc/root-cause (`CRITIC_VERDICT: CONSENSUS_REACHED` khi có trigger Anti-Autocracy) và " if critic_enabled else ""}đủ bằng chứng thép của {step4_ev_str}, mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge){goal_gate_hint}:\n'
         '  ```bash\n'
-        f'  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng đủ bằng chứng {"Đồng thuận (Critic), " if critic_enabled else ""}{gate_q_str}. Merge code vào nhánh chính chứ sếp?" --options \'["yes","wait"]\' --json\n'
+        f'  orca orchestration gate-create --task <FINAL_TASK_ID> --question "Đã kiểm chứng hoàn tất 100% Plan, {"Đồng thuận (Critic), " if critic_enabled else ""}{gate_q_str}. Merge code vào nhánh chính chứ sếp?" --options \'["yes","wait"]\' --json\n'
         '  ```\n'
         '- Chỉ khi người dùng phản hồi `"yes"`:\n'
         '  1. Đóng Gate và khôi phục trạng thái `completed` cho `<FINAL_TASK_ID>` (vì `gate-create` chuyển task sang `blocked` và `gate-resolve` trong Orca đưa task về `ready`):\n'
@@ -6465,8 +6478,8 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
             size_str = f"{size_b/1024:.1f} KB" if size_b > 1024 else f"{size_b} B"
             tokens_str = f"~{tokens} tokens"
             base_tokens += tokens
-            if tokens > 5900:
-                status = "WARN (>5.9k tok)"
+            if tokens > 6400:
+                status = "WARN (>6.4k tok)"
                 warning_issues.append(f"File '{rel_name}' nặng ~{tokens} tokens (nạp lại vào context trên mỗi turn).")
             else:
                 status = "OK"
@@ -6506,6 +6519,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 missing_goal_directive = (
                     "CHẾ ĐỘ LÀM TRIỆT ĐỂ" in g_txt
                     or "(`goalMode: true` trên `coordinator`)" in g_txt
+                    or "TRÁCH NHIỆM KIỂM ĐẾM & ĐỐI CHIẾU 100% KẾ HOẠCH CỦA LEADER" not in g_txt
                 )
             if missing_elastic_wt or missing_goal_directive:
                 if auto_fix:
@@ -6514,7 +6528,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     if missing_elastic_wt:
                         fix_parts.append("Tự động co giãn Worktree Slots (orca-team worktree-arg)")
                     if missing_goal_directive:
-                        fix_parts.append("Chế độ /goal mặc định (goalMode)")
+                        fix_parts.append("Kiểm đếm Plan 100% của Leader & trạng thái goalMode")
                     actions_taken.append(
                         f"Đồng bộ lại '.agents/GEMINI.md' bổ sung đầy đủ: {' & '.join(fix_parts)}."
                     )
@@ -6526,7 +6540,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         )
                     if missing_goal_directive:
                         warning_issues.append(
-                            "File '.agents/GEMINI.md' chưa đồng bộ chỉ dẫn Chế độ /goal mặc định (chạy 'orca-team sync' hoặc 'orca-monitor --fix' để cập nhật)."
+                            "File '.agents/GEMINI.md' chưa đồng bộ chỉ dẫn Kiểm đếm Plan 100% của Leader / trạng thái goalMode (chạy 'orca-team sync' hoặc 'orca-monitor --fix' để cập nhật)."
                         )
         except Exception:
             pass

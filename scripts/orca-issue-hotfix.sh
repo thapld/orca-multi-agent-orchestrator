@@ -77,12 +77,12 @@ else
 fi
 WORKTREE_NAME="hotfix-issue-$ISSUE_NUM"
 
-GOAL_ENABLED="true"
+GOAL_ENABLED="false"
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   GOAL_ROLE_QUERY="issue"
   [[ "$ROLE_OR_AGENT" =~ $KNOWN_ROLES_RE ]] && GOAL_ROLE_QUERY="$ROLE_OR_AGENT"
   GOAL_CFG=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$GOAL_ROLE_QUERY" --field goal 2>/dev/null || true)
-  [[ "$GOAL_CFG" == "false" ]] && GOAL_ENABLED="false"
+  [[ "$GOAL_CFG" == "true" ]] && GOAL_ENABLED="true"
 fi
 ISSUE_PROMPT="[ROLE: PRINCIPAL ISSUE RESOLVER & BUGFIX ENGINEER] Nhiệm vụ: Xử lý triệt để GitHub Issue #${ISSUE_NUM}. Chuẩn mực bắt buộc: (0) Đồng bộ code mới nhất (git merge --no-edit main nếu worktree tái sử dụng từ lần sửa trước), (1) Đọc kỹ mô tả Issue và tìm đúng nguyên nhân gốc rễ (Root Cause Analysis), (2) BẮT BUỘC viết Reproduction Test tái hiện đúng lỗi (chạy test xác nhận FAIL trước khi sửa), (3) Sửa mã nguồn tối thiểu, chuẩn kiến trúc cho đến khi Reproduction Test chuyển sang PASS, (4) Chạy toàn bộ regression test suite đảm bảo EXIT_CODE=0 và không làm vỡ tính năng cũ. CẤM VƯỢT RÀO: CẤM xóa/skip test cũ để lách lỗi; CẤM refactor lan man ngoài phạm vi Issue. BẰNG CHỨNG BẮT BUỘC: Commit sạch với thông điệp 'fix(#${ISSUE_NUM}): <mô tả>' và xuất đầy đủ Commit Hash + log chạy test."
 

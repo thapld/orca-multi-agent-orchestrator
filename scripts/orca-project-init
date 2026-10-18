@@ -36,7 +36,7 @@ SHOW_HELP=false
 FORCE_SELF=false
 PRESET_MODE=""
 PROJECT_DIR=""
-GOAL_MODE=true
+GOAL_MODE=false
 
 while [[ $# -gt 0 ]]; do
   arg="$1"
@@ -142,7 +142,7 @@ if [[ "$SHOW_HELP" == true ]]; then
   echo "Tùy chọn:"
   echo "  -y, --yes               Khởi tạo tự động với cấu hình khuyến nghị (không hỏi tương tác)"
   echo "  --preset <mode>         Chọn cấu hình preset nhanh: high, balanced, cost, minimal, full"
-  echo "  --goal / --no-goal      Bật (mặc định) hoặc tắt chế độ /goal trên toàn bộ các role"
+  echo "  --goal / --no-goal      Bật hoặc tắt (mặc định: tắt để tối ưu token) chế độ /goal trên các role"
   echo "  --path, -C <dir>        Chỉ định thư mục dự án đích"
   echo "  -u, --uninstall         Gỡ bỏ cấu hình Orchestrator khỏi dự án"
   echo "  -h, --help              Hiển thị hướng dẫn sử dụng"
@@ -1076,6 +1076,8 @@ cat > "$TARGET_CONFIG" << JSON
 JSON
 
 # Chuẩn bị các dòng bảng tùy chọn và lệnh điều phối theo đúng vai trò đã bật
+GOAL_BADGE=""
+[[ "$GOAL_MODE" == true ]] && GOAL_BADGE=" (🎯 \`/goal\`)"
 EXTRA_TABLE_ROWS=""
 EXTRA_STEP1_PRE_SEC=""
 EXTRA_STEP1_POST_QA=""
@@ -1085,84 +1087,85 @@ ROUTING_LINE='Code ứng dụng ➔ **`dev-worker`**'
 
 if [[ "$ENABLE_DEVOPS" == true ]]; then
   ROUTING_LINE="${ROUTING_LINE} | Docker, K8s, Helm, DB migration, \`.env\`, infra ➔ **\`devops-worker\`**"
-  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **DevOps Specialist** | $(fmt_md_cell "$DEVOPS_AGENT" "$DEVOPS_MODEL") | Auto-scale (🎯 \`/goal\`) | Docker/K8s rollout, DB migrations, SSH worktrees |"$'\n'
+  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **DevOps Specialist** | $(fmt_md_cell "$DEVOPS_AGENT" "$DEVOPS_MODEL") | Auto-scale${GOAL_BADGE} | Docker/K8s rollout, DB migrations, SSH worktrees |"$'\n'
   EXTRA_STEP1_PRE_SEC="${EXTRA_STEP1_PRE_SEC}  # Principal DevOps/SRE (BẮT BUỘC khi có Docker, K8s, pod, Helm, CI/CD, DB migration, .env, infra):
   orca orchestration task-create --spec \"\$(orca-team spec devops '[Docker/K8s/DB/Infra cần triển khai]')\""$'\n'
   EXTRA_STEP2_PRE_SEC="${EXTRA_STEP2_PRE_SEC}  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):
-  orca orchestration worker-start --task <DEVOPS_TASK_ID> \$(orca-team worktree-arg devops) $(fmt_worker_args "$DEVOPS_AGENT" "$DEVOPS_MODEL" "$DEVOPS_EFFORT") --json"$'\n'
+  orca orchestration worker-start --task <DEVOPS_TASK_ID> \$(orca-team worktree-arg devops --task <DEVOPS_TASK_ID>) $(fmt_worker_args "$DEVOPS_AGENT" "$DEVOPS_MODEL" "$DEVOPS_EFFORT") --json"$'\n'
 fi
 
 ROUTING_LINE="${ROUTING_LINE} | Kiểm toán bảo mật & rò rỉ ➔ **\`sec-worker\`** | Kiểm thử nghiệm thu ➔ **\`qa-worker\`**"
 
 if [[ "$ENABLE_BENCH" == true ]]; then
   ROUTING_LINE="${ROUTING_LINE} | Đo tải RPS/EPS & tối ưu hiệu năng ➔ **\`bench-worker\`**"
-  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **Bench & Perf Specialist** | $(fmt_md_cell "$BENCH_AGENT" "$BENCH_MODEL") | Auto-scale (🎯 \`/goal\`) | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |"$'\n'
+  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **Bench & Perf Specialist** | $(fmt_md_cell "$BENCH_AGENT" "$BENCH_MODEL") | Auto-scale${GOAL_BADGE} | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |"$'\n'
 fi
 
 if [[ "$ENABLE_RE" == true ]]; then
   ROUTING_LINE="${ROUTING_LINE} | Dịch ngược Binary/ASAR/Protocol (\`rea\`) ➔ **\`re-worker\`**"
-  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **Reverse Eng (REA)** | $(fmt_md_cell "$RE_AGENT" "$RE_MODEL") | Auto-scale (🎯 \`/goal\`) | Binary/Package/ASAR/Protocol decompile (\`rea\` skill) |"$'\n'
+  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **Reverse Eng (REA)** | $(fmt_md_cell "$RE_AGENT" "$RE_MODEL") | Auto-scale${GOAL_BADGE} | Binary/Package/ASAR/Protocol decompile (\`rea\` skill) |"$'\n'
 fi
 
 if [[ "$ENABLE_UI" == true ]]; then
   ROUTING_LINE="${ROUTING_LINE} | Giao diện CSS/DOM ➔ **\`ui-worker\`**"
-  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | $(fmt_md_cell "$UI_AGENT" "$UI_MODEL") | Auto-scale (🎯 \`/goal\`) | Design Mode (Click-to-code), responsive & a11y |"$'\n'
+  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **UI/UX Specialist** | $(fmt_md_cell "$UI_AGENT" "$UI_MODEL") | Auto-scale${GOAL_BADGE} | Design Mode (Click-to-code), responsive & a11y |"$'\n'
 fi
 
 if [[ "$ENABLE_CRITIC" == true ]]; then
   ROUTING_LINE="${ROUTING_LINE} | Khảo sát sâu, phản biện giả thuyết/kế hoạch của Leader & truy tìm root-cause ➔ **\`critic-worker\`**"
-  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **Research & Critic** | $(fmt_md_cell "$CRITIC_AGENT" "$CRITIC_MODEL") | Auto-scale (🎯 \`/goal\`) | Deep research, Devil's Advocate critique, root-cause consensus |"$'\n'
+  EXTRA_TABLE_ROWS="${EXTRA_TABLE_ROWS}| **Research & Critic** | $(fmt_md_cell "$CRITIC_AGENT" "$CRITIC_MODEL") | Auto-scale${GOAL_BADGE} | Deep research, Devil's Advocate critique, root-cause consensus |"$'\n'
   EXTRA_STEP1_PRE_SEC="${EXTRA_STEP1_PRE_SEC}  # Principal Research & Adversarial Critic (BẮT BUỘC khi gặp 1 trong 4 trigger Anti-Autocracy ở Bước 3):
   orca orchestration task-create --spec \"\$(orca-team spec critic 'Triệu chứng & bằng chứng thô: [...] | Giả thuyết/Kế hoạch của Leader: [...]')\""$'\n'
   EXTRA_STEP2_PRE_SEC="${EXTRA_STEP2_PRE_SEC}  # Research & Critic Worker (khi cần khảo sát sâu, phản biện kế hoạch Leader & thống nhất root-cause):
-  orca orchestration worker-start --task <CRITIC_TASK_ID> \$(orca-team worktree-arg critic) $(fmt_worker_args "$CRITIC_AGENT" "$CRITIC_MODEL" "$CRITIC_EFFORT") --json"$'\n'
+  orca orchestration worker-start --task <CRITIC_TASK_ID> \$(orca-team worktree-arg critic --task <CRITIC_TASK_ID>) $(fmt_worker_args "$CRITIC_AGENT" "$CRITIC_MODEL" "$CRITIC_EFFORT") --json"$'\n'
 fi
 
 if [[ "$ENABLE_BENCH" == true ]]; then
   EXTRA_STEP1_POST_QA="${EXTRA_STEP1_POST_QA}  # Principal Benchmark & Perf (BẮT BUỘC khi đo tải RPS/EPS, tối ưu hiệu năng, latency p95/p99, batch/queue/DB tuning):
   orca orchestration task-create --spec \"\$(orca-team spec bench '[Đo tải, benchmark & profiling]')\""$'\n'
   EXTRA_STEP2_POST_QA="${EXTRA_STEP2_POST_QA}  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):
-  orca orchestration worker-start --task <BENCH_TASK_ID> \$(orca-team worktree-arg bench) $(fmt_worker_args "$BENCH_AGENT" "$BENCH_MODEL" "$BENCH_EFFORT") --json"$'\n'
+  orca orchestration worker-start --task <BENCH_TASK_ID> \$(orca-team worktree-arg bench --task <BENCH_TASK_ID>) $(fmt_worker_args "$BENCH_AGENT" "$BENCH_MODEL" "$BENCH_EFFORT") --json"$'\n'
 fi
 
 if [[ "$ENABLE_RE" == true ]]; then
   EXTRA_STEP1_POST_QA="${EXTRA_STEP1_POST_QA}  # Principal Reverse Engineer - REA (BẮT BUỘC khi dịch ngược binary/JAR/ASAR/APK/firmware/network capture hoặc tái tạo giao thức đóng):
   orca orchestration task-create --spec \"\$(orca-team spec re '[Giải phẫu artifact/binary/protocol với rea]')\""$'\n'
   EXTRA_STEP2_POST_QA="${EXTRA_STEP2_POST_QA}  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):
-  orca orchestration worker-start --task <RE_TASK_ID> \$(orca-team worktree-arg re) $(fmt_worker_args "$RE_AGENT" "$RE_MODEL" "$RE_EFFORT") --json"$'\n'
+  orca orchestration worker-start --task <RE_TASK_ID> \$(orca-team worktree-arg re --task <RE_TASK_ID>) $(fmt_worker_args "$RE_AGENT" "$RE_MODEL" "$RE_EFFORT") --json"$'\n'
 fi
 
 if [[ "$ENABLE_UI" == true ]]; then
   EXTRA_STEP1_POST_QA="${EXTRA_STEP1_POST_QA}  # Principal UI/UX (Khi có Frontend, CSS/DOM, Design Mode):
   orca orchestration task-create --spec \"\$(orca-team spec ui '[Giao diện, CSS/DOM, Responsive & a11y]')\""$'\n'
   EXTRA_STEP2_POST_QA="${EXTRA_STEP2_POST_QA}  # UI Worker (khi có Task Frontend/UI):
-  orca orchestration worker-start --task <UI_TASK_ID> \$(orca-team worktree-arg ui) $(fmt_worker_args "$UI_AGENT" "$UI_MODEL" "$UI_EFFORT") --json"$'\n'
+  orca orchestration worker-start --task <UI_TASK_ID> \$(orca-team worktree-arg ui --task <UI_TASK_ID>) $(fmt_worker_args "$UI_AGENT" "$UI_MODEL" "$UI_EFFORT") --json"$'\n'
 fi
 
 # ── Các đoạn chỉ dẫn phụ thuộc Research & Critic (đồng bộ 1:1 với `orca-team sync`) ──
-C_STEP2_RULE="- 🔴 **CƠ CHẾ TỰ ĐỘNG CO GIÃN WORKTREE & GOM NHÓM TERMINAL TABS (\`orca-team worktree-arg <role>\` — TÁI SỬ DỤNG KHI RẢNH, TỰ ĐẺ SLOT MỚI \`-2\`, \`-3\` KHI BẬN):** Khi gọi \`worker-start\`, **BẮT BUỘC dùng \`\$(orca-team worktree-arg <role>)\`**. Lệnh này tự động kiểm tra trạng thái thực tế của toàn bộ worktree trong repo (kể cả khi nhiều Leader chạy song song):
-  1. Nếu worktree hiện có của role đó (\`<role>-worker\`) **đang rảnh (\`done\` / \`settled\` / \`released\`)** ➔ tự động trả về \`--worktree path:<abs_path>\` để Orca **mở + gom nhóm Terminal Tab mới ngay bên trong worktree đó**.
-  2. Nếu worktree \`<role>-worker\` **đang bận chạy task khác (\`working\` / \`live\`)** (do fan-out nhiều task song song hoặc do 2 Leader cùng gọi) ➔ tự động cấp phát sang slot kế tiếp (\`<role>-worker-2\`, \`<role>-worker-3\`...): tái sử dụng nếu slot đó đã tồn tại và đang rảnh, hoặc tự tạo \`--worktree new-child --name <role>-worker-<N>\` mới tinh hoàn toàn cô lập!"
+C_STEP2_RULE="- 🔴 **CƠ CHẾ ĐỊNH TUYẾN THEO SỞ HỮU RUN & KỶ LUẬT THEO ĐỢT (WAVE-ORDER GATE — \`orca-team worktree-arg <role> --task <TASK_ID>\`):** Khi gọi \`worker-start\`, **BẮT BUỘC dùng \`\$(orca-team worktree-arg <role> --task <TASK_ID>)\`**. Lệnh này tự động quản lý vòng đời worktree theo Run (\`WORKING\` ➔ \`RETAINED\` ➔ \`RELEASED\`):
+  1. **Tái sử dụng trong cùng Run:** Nếu Run hiện tại của bạn đã sở hữu một worktree của role đó và task trước trên đó đã xong (\`RETAINED\`), tự động tái sử dụng chính worktree đó (mở Terminal Tab mới gom nhóm bên trong và giữ nguyên code vừa làm).
+  2. **Cô lập tuyệt đối giữa các Leader:** Nếu worktree \`<role>-worker\` đang thuộc quyền sở hữu (\`WORKING\` hoặc \`RETAINED\` chưa \`release-workers\`) của **một Run khác (Leader khác)**, hoặc đang bận chạy song song trong cùng Run ➔ tự động cấp phát sang slot rảnh (\`RELEASED\`) kế tiếp (\`<role>-worker-2\`, \`<role>-worker-3\`...) để không bao giờ ghi đè lên nhánh chưa merge của Leader khác!
+  3. **Cổng chặn theo Đợt (Wave-Order Gate):** **TUYỆT ĐỐI KHÔNG** gọi \`worker-start\` cho các role kiểm định/triển khai (**Đợt 2**: \`qa-worker\`, \`sec-worker\`, \`devops-worker\`, \`bench-worker\`) khi bất kỳ worker viết code nào (**Đợt 1**: \`dev-worker\`, \`ui-worker\`, \`fix-worker\`) trong cùng Run còn đang chạy! Phải đợi toàn bộ Đợt 1 hoàn tất 100% ở Bước 3 rồi mới khởi chạy Đợt 2."
 
 if [[ "$ENABLE_CRITIC" == true ]]; then
   C_RULE_LINE="> - **LUẬT CHỐNG ĐỘC ĐOÁN & QUY KẾT VỘI VÀNG (ANTI-AUTOCRACY):** Leader **CẤM** quy kết lỗi cho bất kỳ role nào hoặc khóa thiết kế/root-cause khi chưa có bằng chứng \`file:line\` + log. Gặp 1 trong 4 trigger ở Bước 3 ➔ **BẮT BUỘC** qua vòng phản biện với **\`critic-worker\`** tới \`CRITIC_VERDICT: CONSENSUS_REACHED\` mới khóa Spec; bất đồng sau 3 vòng ➔ Human Gate, Leader **CẤM** tự phán quyết."
   C_STEP3_BULLET="  - **Phản biện 2 chiều với \`critic-worker\` (Anti-Autocracy):** BẮT BUỘC giao \`critic-worker\` TRƯỚC khi khóa Spec/kết luận root-cause nếu gặp 1 trong 4 trigger: (a) bug đã fix ≥1 lần vẫn tái phát, (b) escalation quy lỗi sang role khác hoặc bug liên tầng App↔DB↔Infra↔Network, (c) thay đổi schema/API contract/auth/payment hoặc chạm ≥2 tầng, (d) các worker báo cáo mâu thuẫn. Spec giao Critic phải tách riêng *Triệu chứng + bằng chứng thô* và *Giả thuyết Leader*. Nhận \`question\` \`CRITIC_CHALLENGE\` ➔ trả lời bằng \`orca orchestration reply --id <MSG_ID> --body \"...\" --json\` kèm phản chứng \`file:line\`/log HOẶC chấp nhận & sửa kế hoạch (CẤM bác bỏ suông hoặc lờ câu hỏi). \`Critic Consensus\` ➔ khóa Spec giao việc; \`Critic Deadlock\` ➔ Leader CẤM tự quyết, BẮT BUỘC \`orca orchestration gate-create --task <CRITIC_TASK_ID> --question \"Leader vs Critic bất đồng: <2 phương án + bằng chứng>\" --options '[\"leader\",\"critic\",\"wait\"]' --json\` cho sếp chọn."
   C_HANDOFF_LINE="  - **Nhận \`handoff\` (từ Critic/RE/Dev/DevOps/UI):** Coordinator kiểm duyệt bằng chứng (\`CONSENSUS_REACHED\`, Commit Hash, Clean-Room Spec, Pod/Port/Log sạch) rồi quyết định bàn giao cho role kế tiếp."
-  C_ESCALATION_LINE="  - **Nhận \`escalation\` (từ DevOps/QA/Sec/Bench):** Coordinator phân xử dựa trên bằng chứng (gặp trigger Anti-Autocracy ➔ qua \`critic-worker\` trước) và điều phối bản vá: nếu worker cần sửa **đang chạy (\`live\`)** thì gửi \`orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject \"Coordinator Directive\" --body \"...\" --json\`; nếu worker **đã kết thúc (\`settled\` / đã \`worker_done\`)** thì tạo Task fix mới (\`task-create\`) + \`worker-start\` với \`\$(orca-team worktree-arg <role>)\` (tự động tái sử dụng worktree rảnh hoặc đẻ slot mới nếu đang bận), rồi điều phối \`devops-worker\` & \`qa-worker\` kiểm toán lại."
-  C_ZT1_LINE="  1. **Báo sạch giả (Fake Clean):** Báo \`succeeded\` nhưng thiếu \`EXIT_CODE=0\`, thiếu \`git commit\` (Commit Hash), \`Tests Run = 0\`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence từ \`rea\` (\`re-worker\`), thiếu bằng chứng \`file:line\` khi phản biện (\`critic-worker\`), hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ chưa merge commit mới của Dev."
+  C_ESCALATION_LINE="  - **Nhận \`escalation\` (từ DevOps/QA/Sec/Bench):** Coordinator phân xử dựa trên bằng chứng (gặp trigger Anti-Autocracy ➔ qua \`critic-worker\` trước) và điều phối bản vá: nếu worker cần sửa **đang chạy (\`live\`)** thì gửi \`orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject \"Coordinator Directive\" --body \"...\" --json\`; nếu worker **đã kết thúc (\`settled\` / đã \`worker_done\`)** thì tạo Task fix mới (\`task-create\`) + \`worker-start\` với \`\$(orca-team worktree-arg <role> --task <FIX_TASK_ID>)\` (tự động tái sử dụng worktree thuộc Run hiện tại hoặc đẻ slot mới nếu đang bận), rồi điều phối \`devops-worker\` & \`qa-worker\` kiểm toán lại."
+  C_ZT1_LINE="  1. **Chưa hoàn thành đủ Plan hoặc Báo sạch giả (Incomplete Plan / Fake Clean):** Chưa hoàn thành 100% mọi hạng mục trong **Kế hoạch (Plan) mà Leader đã giao** (thiếu bất kỳ file, hàm, endpoint, edge case, migration hoặc test case nào trong Plan; để lại \`TODO\`/\`FIXME\`/stub/mock tạm bợ), hoặc báo \`succeeded\` nhưng thiếu \`EXIT_CODE=0\`, thiếu \`git commit\` (Commit Hash), \`Tests Run = 0\`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence từ \`rea\` (\`re-worker\`), thiếu bằng chứng \`file:line\` khi phản biện (\`critic-worker\`), hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ chưa merge commit mới của Dev."
   C_ZT3_LINE="  3. **Còn lỗi tồn đọng hoặc Chưa đạt Đồng thuận:** Lỗi compile, test fail, lỗi runtime logs, \`Critic Deadlock\` chưa được sếp phân xử qua Gate, \`SECURITY_VERDICT: BLOCK\`, \`QA_VERDICT: FAIL\`, \`PERF_VERDICT: BOTTLENECK_FOUND\`, \`RE_VERDICT: BLOCKED_BY_UNKNOWN\`, hoặc pod \`CrashLoopBackOff\`/\`ErrImagePull\`."
   C_ZT4_LINE="  4. **Vượt rào (Boundary Crossing):** Critic/QA/Bench/RE tự sửa code app, Dev xóa/skip test cũ, DevOps sửa business logic, hoặc Worker tự ý đổi kiến trúc không qua Coordinator."
-  C_STEP4_COND="- Chỉ khi đã thống nhất kiến trúc/root-cause (\`CRITIC_VERDICT: CONSENSUS_REACHED\` khi có trigger Anti-Autocracy) và đủ bằng chứng thép của Dev (\`Commit Hash\` + \`Build OK\`), DevOps (\`Pod/Infra Ready\`), Security (\`PASS\`), QA (\`PASS 100%\`), Benchmark (\`PERF_VERDICT: PASS\`) và Reverse Eng (\`RE_VERDICT: EVIDENCE_COMPLETE\` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):"
+  C_STEP4_COND="- Chỉ khi đã **đối chiếu 100% các hạng mục trong Kế hoạch (Plan Checklist) đều đã hoàn thiện đầy đủ**, thống nhất kiến trúc/root-cause (\`CRITIC_VERDICT: CONSENSUS_REACHED\` khi có trigger Anti-Autocracy) và đủ bằng chứng thép của Dev (\`Commit Hash\` + \`Build OK\`), DevOps (\`Pod/Infra Ready\`), Security (\`PASS\`), QA (\`PASS 100%\`), Benchmark (\`PERF_VERDICT: PASS\`) và Reverse Eng (\`RE_VERDICT: EVIDENCE_COMPLETE\` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):"
   C_GATE_LINE="  orca orchestration gate-create --task <FINAL_TASK_ID> --question \"Đã kiểm chứng đủ bằng chứng Đồng thuận (Critic), Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?\" --options '[\"yes\",\"wait\"]' --json"
 else
   C_RULE_LINE="> - **LUẬT CHỐNG ĐỘC ĐOÁN & QUY KẾT VỘI VÀNG:** Leader **CẤM** quy kết lỗi cho bất kỳ role nào hoặc khóa thiết kế/root-cause khi chưa có bằng chứng \`file:line\` + log."
   C_STEP3_BULLET="  - **Chống quy kết vội vàng:** Leader **CẤM** quy kết lỗi cho bất kỳ role nào khi chưa có bằng chứng \`file:line\` + log thực tế."
   C_HANDOFF_LINE="  - **Nhận \`handoff\` (từ RE/Dev/DevOps/UI):** Coordinator kiểm duyệt bằng chứng (Commit Hash, Clean-Room Spec, Pod/Port/Log sạch) rồi quyết định bàn giao cho role kế tiếp."
-  C_ESCALATION_LINE="  - **Nhận \`escalation\` (từ DevOps/QA/Sec/Bench):** Coordinator phân xử dựa trên bằng chứng và điều phối bản vá: nếu worker cần sửa **đang chạy (\`live\`)** thì gửi \`orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject \"Coordinator Directive\" --body \"...\" --json\`; nếu worker **đã kết thúc (\`settled\` / đã \`worker_done\`)** thì tạo Task fix mới (\`task-create\`) + \`worker-start\` với \`\$(orca-team worktree-arg <role>)\` (tự động tái sử dụng worktree rảnh hoặc đẻ slot mới nếu đang bận), rồi điều phối \`devops-worker\` & \`qa-worker\` kiểm toán lại."
-  C_ZT1_LINE="  1. **Báo sạch giả (Fake Clean):** Báo \`succeeded\` nhưng thiếu \`EXIT_CODE=0\`, thiếu \`git commit\` (Commit Hash), \`Tests Run = 0\`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence từ \`rea\` (\`re-worker\`), hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ chưa merge commit mới của Dev."
+  C_ESCALATION_LINE="  - **Nhận \`escalation\` (từ DevOps/QA/Sec/Bench):** Coordinator phân xử dựa trên bằng chứng và điều phối bản vá: nếu worker cần sửa **đang chạy (\`live\`)** thì gửi \`orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject \"Coordinator Directive\" --body \"...\" --json\`; nếu worker **đã kết thúc (\`settled\` / đã \`worker_done\`)** thì tạo Task fix mới (\`task-create\`) + \`worker-start\` với \`\$(orca-team worktree-arg <role> --task <FIX_TASK_ID>)\` (tự động tái sử dụng worktree thuộc Run hiện tại hoặc đẻ slot mới nếu đang bận), rồi điều phối \`devops-worker\` & \`qa-worker\` kiểm toán lại."
+  C_ZT1_LINE="  1. **Chưa hoàn thành đủ Plan hoặc Báo sạch giả (Incomplete Plan / Fake Clean):** Chưa hoàn thành 100% mọi hạng mục trong **Kế hoạch (Plan) mà Leader đã giao** (thiếu bất kỳ file, hàm, endpoint, edge case, migration hoặc test case nào trong Plan; để lại \`TODO\`/\`FIXME\`/stub/mock tạm bợ), hoặc báo \`succeeded\` nhưng thiếu \`EXIT_CODE=0\`, thiếu \`git commit\` (Commit Hash), \`Tests Run = 0\`, thiếu bảng số liệu Benchmark (RPS/EPS, p95/p99), thiếu Evidence từ \`rea\` (\`re-worker\`), hoặc QA/DevOps/Sec/Bench chạy trên nhánh cũ chưa merge commit mới của Dev."
   C_ZT3_LINE="  3. **Còn lỗi tồn đọng:** Lỗi compile, test fail, lỗi runtime logs, \`SECURITY_VERDICT: BLOCK\`, \`QA_VERDICT: FAIL\`, \`PERF_VERDICT: BOTTLENECK_FOUND\`, \`RE_VERDICT: BLOCKED_BY_UNKNOWN\`, hoặc pod \`CrashLoopBackOff\`/\`ErrImagePull\`."
   C_ZT4_LINE="  4. **Vượt rào (Boundary Crossing):** QA/Bench/RE tự sửa code app, Dev xóa/skip test cũ, DevOps sửa business logic, hoặc Worker tự ý đổi kiến trúc không qua Coordinator."
-  C_STEP4_COND="- Chỉ khi đủ bằng chứng thép của Dev (\`Commit Hash\` + \`Build OK\`), DevOps (\`Pod/Infra Ready\`), Security (\`PASS\`), QA (\`PASS 100%\`), Benchmark (\`PERF_VERDICT: PASS\`) và Reverse Eng (\`RE_VERDICT: EVIDENCE_COMPLETE\` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):"
+  C_STEP4_COND="- Chỉ khi đã **đối chiếu 100% các hạng mục trong Kế hoạch (Plan Checklist) đều đã hoàn thiện đầy đủ** và đủ bằng chứng thép của Dev (\`Commit Hash\` + \`Build OK\`), DevOps (\`Pod/Infra Ready\`), Security (\`PASS\`), QA (\`PASS 100%\`), Benchmark (\`PERF_VERDICT: PASS\`) và Reverse Eng (\`RE_VERDICT: EVIDENCE_COMPLETE\` nếu có), mới tạo Gate báo chuông xin phép người dùng (cấm tự ý merge):"
   C_GATE_LINE="  orca orchestration gate-create --task <FINAL_TASK_ID> --question \"Đã kiểm chứng đủ bằng chứng Build, DevOps, Security (PASS), QA (PASS 100%) và Benchmark/RE. Merge code vào nhánh chính chứ sếp?\" --options '[\"yes\",\"wait\"]' --json"
 fi
 
@@ -1182,8 +1185,8 @@ cat > "$TARGET_RULE" << RULE
 > - Tuyệt đối **KHÔNG** tự chạy lệnh build, test, benchmark, dịch ngược, đóng gói hay hạ tầng (\`docker\`, \`kubectl\`, \`helm\`, \`mvn\`, \`gradle\`, \`npm/pytest\`, \`k6\`, \`wrk\`, \`rea\`, \`psql\`, \`curl\` test...) trực tiếp trên terminal của Leader!
 > - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** ${ROUTING_LINE}.
 ${C_RULE_LINE}
-> - **CHẾ ĐỘ LÀM TRIỆT ĐỂ MẶC ĐỊNH (\`/goal\` MODE ON ALL ROLES):** Toàn bộ các vai trò (Lead Coordinator & mọi Worker) đều bật sẵn chế độ \`/goal\` (\`goalMode: true\` trong \`orca-team.json\`). Mọi spec tạo qua \`orca-team spec <role> '...'\` tự động đính kèm chỉ dẫn \`/goal\` (bắt buộc Worker tự kiểm chứng 100% tiêu chí trước khi kết thúc và xuất thẻ \`<!-- GOAL_COMPLETE -->\` ở câu trả lời cuối cùng). Bản thân Lead Coordinator cũng vận hành theo kỷ luật \`/goal\` (tự đối chiếu 100% yêu cầu của sếp với bằng chứng thực tế từ các Worker, tuyệt đối không dừng giữa chừng khi chưa qua đủ các bước); khi tạm dừng tại **Human Gate (\`gate-create\`)** chờ sếp phản hồi trên chat hoặc sau khi hoàn tất trọn vẹn **BƯỚC 4** (\`git merge\` + \`worker-release\`), nếu phiên của Leader được kích hoạt \`/goal\`, hãy xuất thẻ \`<!-- GOAL_COMPLETE -->\` ở cuối câu trả lời để trả quyền điều khiển về cho sếp.
-> - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy lệnh \`orca orchestration ...\` và \`git merge\` (sau khi qua Human Gate).
+> - **TRÁCH NHIỆM KIỂM ĐẾM & ĐỐI CHIẾU 100% KẾ HOẠCH CỦA LEADER (PLAN-COMPLETION AUDIT — THAY THẾ \`/goal\` MODE):** Chế độ \`/goal\` đã được tắt (\`goalMode: false\`) để tiết kiệm tối đa token. Đổi lại, **Lead Coordinator chịu trách nhiệm 100% trong việc rà soát và đối chiếu từng hạng mục trong Kế hoạch (Plan) đã giao cho Worker**: ở **BƯỚC 1**, Leader phải liệt kê rõ **Checklist các hạng mục cần hoàn thành (Plan Deliverables Checklist)** trong spec của từng Task; ở **BƯỚC 3**, khi Worker báo \`worker_done\`, Leader **BẮT BUỘC** kiểm tra thực tế bằng \`git log -n 1 --stat <ten-worktree>\` và \`git diff main...<ten-worktree>\` để đối chiếu 1-1 từng hạng mục trong Plan với code/test thực tế mà Worker đã làm — nếu thiếu bất kỳ hạng mục nào, làm dở dang, để lại \`TODO\`/\`FIXME\`/mock tạm bợ hoặc chưa đáp ứng đúng thiết kế trong Plan, Leader **PHẢI BÁC BỎ NGAY** và giao tiếp Task bổ sung trên cùng worktree cho tới khi hoàn thiện 100% Plan mới được chuyển sang bước kế tiếp!
+> - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy lệnh \`orca orchestration ...\`, \`git log\`/\`git diff\` (để kiểm đếm Plan của Worker) và \`git merge\` (sau khi qua Human Gate).
 
 ---
 
@@ -1191,12 +1194,12 @@ ${C_RULE_LINE}
 
 | Role | Agent & Model | Concurrency | Capabilities & Orca Utilities |
 | :--- | :--- | :--- | :--- |
-| **Lead Coordinator** | $(fmt_md_cell "$COORD_AGENT" "$COORD_MODEL") | 1 (🎯 \`/goal\`) | Task DAG, Zero-Trust Audit, Decision Gates, Release |
-| **Full-Stack Devs** | $(fmt_md_cell "$DEV_AGENT" "$DEV_MODEL") | Auto-scale (🎯 \`/goal\`) | Child worktrees, clean architecture, unit tests |
-| **QA & Testers** | $(fmt_md_cell "$QA_AGENT" "$QA_MODEL") | Auto-scale (🎯 \`/goal\`) | Integration/E2E suites, adversarial edge-case testing |
-| **Security & Bug Hunter** | $(fmt_md_cell "$SEC_AGENT" "$SEC_MODEL") | Auto-scale (🎯 \`/goal\`) | OWASP Top 10, concurrency/race conditions, leak audit |
-| **PR Reviewer** | $(fmt_md_cell "$PR_AGENT" "$PR_MODEL") | On-demand (🎯 \`/goal\`) | PR checkout (\`--pr\`), line-by-line diff audit |
-| **Issue Resolver** | $(fmt_md_cell "$ISSUE_AGENT" "$ISSUE_MODEL") | On-demand (🎯 \`/goal\`) | Issue checkout (\`--issue\`), reproduction test & fix |
+| **Lead Coordinator** | $(fmt_md_cell "$COORD_AGENT" "$COORD_MODEL") | 1${GOAL_BADGE} | Task DAG, Zero-Trust Audit, Decision Gates, Release |
+| **Full-Stack Devs** | $(fmt_md_cell "$DEV_AGENT" "$DEV_MODEL") | Auto-scale${GOAL_BADGE} | Child worktrees, clean architecture, unit tests |
+| **QA & Testers** | $(fmt_md_cell "$QA_AGENT" "$QA_MODEL") | Auto-scale${GOAL_BADGE} | Integration/E2E suites, adversarial edge-case testing |
+| **Security & Bug Hunter** | $(fmt_md_cell "$SEC_AGENT" "$SEC_MODEL") | Auto-scale${GOAL_BADGE} | OWASP Top 10, concurrency/race conditions, leak audit |
+| **PR Reviewer** | $(fmt_md_cell "$PR_AGENT" "$PR_MODEL") | On-demand${GOAL_BADGE} | PR checkout (\`--pr\`), line-by-line diff audit |
+| **Issue Resolver** | $(fmt_md_cell "$ISSUE_AGENT" "$ISSUE_MODEL") | On-demand${GOAL_BADGE} | Issue checkout (\`--issue\`), reproduction test & fix |
 ${EXTRA_TABLE_ROWS}
 - **Execution Host:** \`$EXEC_HOST\` ($HOST_LABEL) | **Orca CLI:** \`/usr/local/bin/orca\`
 
@@ -1204,28 +1207,29 @@ ${EXTRA_TABLE_ROWS}
 
 ## ⚡ QUY TRÌNH 4 BƯỚC & HIẾN PHÁP KỸ SƯ TRƯỞNG (CHỐNG VƯỢT RÀO, ĐỘC ĐOÁN & BÁO SẠCH GIẢ)
 
-### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ (CẤM GỘP VIỆC — TỰ ĐỘNG TIÊM SỔ TAY WORKER)
-- Tạo Run mới và **tách Task riêng cho từng vai trò** (nếu yêu cầu có nhiều hạng mục/module độc lập ➔ tách thành nhiều Task riêng với **Disjoint File Ownership** để chạy song song). Dùng \`\$(orca-team spec <role> '...')\` để tự động tiêm **Sổ tay Hiến pháp & Cấm vượt rào (\`[ROLE: PRINCIPAL ...]\`)** vào Worker (Leader **CHỈ** truyền mô tả nhiệm vụ thực tế; **KHÔNG** thêm \`--json\` vào \`task-create\` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng \`orca orchestration task-list --brief\`):
+### BƯỚC 1: KHỞI TẠO RUN & TÁCH TASKS THEO VAI TRÒ (KÈM CHECKLIST KẾ HOẠCH CHI TIẾT — CẤM GỘP VIỆC)
+- Tạo Run mới và **tách Task riêng cho từng vai trò** (nếu yêu cầu có nhiều hạng mục/module độc lập ➔ tách thành nhiều Task riêng với **Disjoint File Ownership** để chạy song song). Trong phần mô tả nhiệm vụ truyền vào \`\$(orca-team spec <role> '...')\`, Leader **BẮT BUỘC ghi rõ Danh sách Hạng mục Bàn giao (Plan Deliverables Checklist: liệt kê cụ thể từng file/module, API/hàm, DB schema, trạng thái UI, edge cases và test cases phải hoàn thành)** làm căn cứ đối chiếu 1-1 ở Bước 3 (**KHÔNG** thêm \`--json\` vào \`task-create\` để tránh in lặp lại toàn bộ spec gây tràn stdout; khi cần tra cứu danh sách task dùng \`orca orchestration task-list --brief\`):
   \`\`\`bash
   orca orchestration run-create --objective "[Mô tả tổng thể]"
 
   # Principal Dev (Code/API/Logic — nếu có nhiều module độc lập, tạo nhiều Task Dev với Disjoint File Ownership để chạy song song):
-  orca orchestration task-create --spec "\$(orca-team spec dev '[Chi tiết code, file paths được phép sửa & yêu cầu]')"
+  orca orchestration task-create --spec "\$(orca-team spec dev '[Checklist Kế hoạch (Plan): (1) File/module được phép sửa, (2) Chi tiết các hàm/API/logic cần hoàn thiện, (3) Edge cases & Unit tests bắt buộc]')"
 ${EXTRA_STEP1_PRE_SEC}  # Principal AppSec Auditor (BẮT BUỘC khi có API mới, Auth/JWT, input validation, concurrency, OWASP):
   orca orchestration task-create --spec "\$(orca-team spec sec 'Kiểm toán Red-Team cho [module/diff]')"
   # Principal SDET / QA (Kiểm thử độc lập, Nghiệm thu & Kiểm toán Runtime Logs):
   orca orchestration task-create --spec "\$(orca-team spec qa 'Kiểm thử nghiệm thu, Adversarial Testing & Runtime Logs cho [chi tiết]')"
 ${EXTRA_STEP1_POST_QA}  \`\`\`
 
-### BƯỚC 2: FAN-OUT & TỰ ĐỘNG CO GIÃN WORKTREE SLOTS (TÁI SỬ DỤNG KHI RẢNH — ĐẺ SLOT MỚI KHI BẬN)
+### BƯỚC 2: FAN-OUT THEO ĐỢT (WAVE 1: DEV/UI ➔ WAVE 2: QA/SEC/DEVOPS/BENCH) & CÔ LẬP WORKTREE THEO RUN
 ${C_STEP2_RULE}
   \`\`\`bash
-  # Dev Worker (tự động tái sử dụng dev-worker nếu rảnh, hoặc tự đẻ dev-worker-2, dev-worker-3... nếu đang bận):
-  orca orchestration worker-start --task <DEV_TASK_ID> \$(orca-team worktree-arg dev) $(fmt_worker_args "$DEV_AGENT" "$DEV_MODEL" "$DEV_EFFORT") --json
-${EXTRA_STEP2_PRE_SEC}  # Security Worker (khi có Task Security Audit):
-  orca orchestration worker-start --task <SEC_TASK_ID> \$(orca-team worktree-arg sec) $(fmt_worker_args "$SEC_AGENT" "$SEC_MODEL" "$SEC_EFFORT") --json
-  # QA Worker (Test nghiệm thu):
-  orca orchestration worker-start --task <QA_TASK_ID> \$(orca-team worktree-arg qa) $(fmt_worker_args "$QA_AGENT" "$QA_MODEL" "$QA_EFFORT") --json
+  # [ĐỢT 1 — CODE] Khởi chạy Dev/UI Worker trước (tái sử dụng worktree thuộc Run hiện tại nếu đã RETAINED, hoặc cấp slot RELEASED mới nếu slot cũ thuộc Run khác / đang WORKING):
+  orca orchestration worker-start --task <DEV_TASK_ID> \$(orca-team worktree-arg dev --task <DEV_TASK_ID>) $(fmt_worker_args "$DEV_AGENT" "$DEV_MODEL" "$DEV_EFFORT") --json
+  # [ĐỢT 2 — KIỂM ĐỊNH / TRIỂN KHAI] CHỈ chạy các lệnh dưới đây SAU KHI toàn bộ Đợt 1 đã báo worker_done ở Bước 3!
+${EXTRA_STEP2_PRE_SEC}  # Security Worker (chạy ở Đợt 2 sau khi Dev đã hoàn tất):
+  orca orchestration worker-start --task <SEC_TASK_ID> \$(orca-team worktree-arg sec --task <SEC_TASK_ID>) $(fmt_worker_args "$SEC_AGENT" "$SEC_MODEL" "$SEC_EFFORT") --json
+  # QA Worker (chạy ở Đợt 2 sau khi Dev đã hoàn tất):
+  orca orchestration worker-start --task <QA_TASK_ID> \$(orca-team worktree-arg qa --task <QA_TASK_ID>) $(fmt_worker_args "$QA_AGENT" "$QA_MODEL" "$QA_EFFORT") --json
 ${EXTRA_STEP2_POST_QA}  \`\`\`
   *(On-demand Git: Review PR dùng \`orca-review-pr <PR_NUM>\` | Sửa Issue dùng \`orca-hotfix <ISSUE_ID>\`)*
 
@@ -1240,12 +1244,12 @@ ${C_STEP3_BULLET}
   - **Nhận \`question\` (từ \`ask\`):** Coordinator phản hồi qua \`orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json\`.
 ${C_HANDOFF_LINE}
 ${C_ESCALATION_LINE}
-- **Nghiệm thu Zero-Trust:** Đọc trực tiếp nội dung báo cáo trong trường \`messages\` trả về từ \`orca orchestration check --wait --json\` kết hợp đối chiếu độc lập bằng \`git log -n 1 --stat <ten-worktree>\` (chỉ gọi \`orca orchestration worker-read --dispatch <DISPATCH_ID> --json\` khi worker bị treo/timeout không gửi tin nhắn; **CẤM** gọi \`orca orchestration inbox --json\` vì lệnh này tải lại toàn bộ lịch sử tin nhắn cũ gây phình context). **BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:
+- **Nghiệm thu Zero-Trust & Kiểm đếm 100% Kế hoạch (Plan-to-Diff Audit):** Đọc trực tiếp nội dung báo cáo trong trường \`messages\` trả về từ \`orca orchestration check --wait --json\`, đồng thời **Leader BẮT BUỘC chạy \`git log -n 1 --stat <ten-worktree>\` và \`git diff main...<ten-worktree>\` để kiểm đếm từng hạng mục trong Kế hoạch (Plan Checklist) đã giao ở Bước 1** (chỉ gọi \`orca orchestration worker-read --dispatch <DISPATCH_ID> --json\` khi worker bị treo/timeout không gửi tin nhắn; **CẤM** gọi \`orca orchestration inbox --json\` vì lệnh này tải lại toàn bộ lịch sử tin nhắn cũ gây phình context). **BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:
 ${C_ZT1_LINE}
   2. **Bỏ sót/Che giấu Lỗi Runtime (Log Blindness/Masking):** DevOps/QA báo \`PASS\` nhưng thiếu bằng chứng quét **Full Container/Pod Logs** (từ lúc start trên toàn bộ App + DB + Kafka/Broker sau chu kỳ background job), dùng \`--since\` ngắn cắt lỗi, bỏ sót pod phụ trợ (\`postgres\`, \`kafka\`), hoặc QA sửa test script nới lỏng assert / phớt lờ trạng thái lỗi (\`ERROR\`, \`FATAL\`, \`Exception\`, \`SQL error\`, \`SSLHandshakeException\`, \`health: ERROR\`, \`close_status: FAILED\`) thay vì gửi \`escalation\`.
 ${C_ZT3_LINE}
 ${C_ZT4_LINE}
-- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao \`dev-worker\`/\`devops-worker\` sửa bằng \`\$(orca-team worktree-arg <role>)\` và bắt buộc chạy lại \`qa-worker\`/\`sec-worker\`/\`bench-worker\` xác nhận đến khi PASS 100%.
+- **Tự chữa lỗi & Bù đắp Hạng mục Thiếu sót:** Nếu phát hiện Worker làm thiếu bất kỳ mục nào trong Plan hoặc test/build fail, **cấm tự sửa ở root!** Tạo ngay Task bổ sung/fix chỉ rõ các hạng mục còn thiếu trong Plan (hoặc log lỗi), giao \`dev-worker\`/\`devops-worker\` hoàn thiện tiếp trên cùng worktree của Run bằng \`\$(orca-team worktree-arg <role> --task <FIX_TASK_ID>)\` và bắt buộc chạy lại \`qa-worker\`/\`sec-worker\`/\`bench-worker\` xác nhận đến khi hoàn thành 100% Plan & PASS 100%.
 - ⚠️ **GIỮ TERMINAL WORKER SỐNG Ở BƯỚC 3 BẰNG \`worker-retain\` (KHÔNG GỌI \`worker-release\` Ở BƯỚC 3):** Khi một worker đã hoàn tất (\`worker_done\`), gọi \`orca orchestration worker-retain --dispatch <DISPATCH_ID> --json\` để thỏa mãn Completion Accounting của Orca đồng thời giữ nguyên terminal worker trên Orca Sidebar (hiển thị **chấm xanh \`🟢\`**, **icon Agent \`✓\`** và **chuông thông báo \`🔔\`** cho tới Bước 4)!
 
 ### BƯỚC 4: HUMAN GATE & DỌN DẸP SAU MERGE (CHỐT CHẶN CUỐI)
@@ -1253,14 +1257,13 @@ ${C_STEP4_COND}
   \`\`\`bash
 ${C_GATE_LINE}
   \`\`\`
-- Khi tạm dừng tại **Human Gate** chờ sếp phản hồi trên chat (vì \`gate-create\` trả kết quả ngay không tạo background task nên \`GoalStopHook\` sẽ kích hoạt nếu đang bật \`/goal\`), nếu phiên của Leader đang ở chế độ \`/goal\`, hãy đính kèm \`<!-- GOAL_COMPLETE -->\` ở cuối tin nhắn xin phép merge để dừng chờ sếp.
 - Chỉ khi người dùng phản hồi \`"yes"\`:
   1. Đóng Gate và khôi phục trạng thái \`completed\` cho \`<FINAL_TASK_ID>\` (vì \`gate-create\` chuyển task sang \`blocked\` và \`gate-resolve\` trong Orca đưa task về \`ready\`):
      \`\`\`bash
      orca orchestration gate-resolve --id <GATE_ID> --resolution "yes"
      orca orchestration task-update --id <FINAL_TASK_ID> --status completed
      \`\`\`
-  2. Đồng bộ an toàn **CHỈ các nhánh worker thuộc Run hiện tại (\`\$RUN_ID\`)** vào nhánh chính bằng \`orca-team merge-upstream --to-main --run "\$RUN_ID"\` (tuyệt đối không merge nhầm nhánh từ Run của Leader khác!), sau đó chạy \`orca-team release-workers --run "\$RUN_ID"\` (hoặc \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\`) để giải phóng toàn bộ retention qua các đợt (waves) và đóng các terminal worker; cuối cùng báo cáo tổng kết và xuất thẻ \`<!-- GOAL_COMPLETE -->\` ở câu trả lời cuối cùng để đóng Goal (\`goalMode: true\` trên \`coordinator\`).
+  2. Đồng bộ an toàn **CHỈ các nhánh worker thuộc Run hiện tại (\`\$RUN_ID\`)** vào nhánh chính bằng \`orca-team merge-upstream --to-main --run "\$RUN_ID"\` (tuyệt đối không merge nhầm nhánh từ Run của Leader khác!), sau đó chạy \`orca-team release-workers --run "\$RUN_ID"\` (hoặc \`orca orchestration worker-release --dispatch <DISPATCH_ID> --json\`) để giải phóng toàn bộ retention qua các đợt (waves) và đóng các terminal worker; cuối cùng báo cáo tổng kết đối chiếu từng hạng mục trong Plan đã hoàn thành 100% cho sếp.
 RULE
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   python3 "$ORCA_TEAM_BIN" --path "$PROJECT_PATH" sync >/dev/null 2>&1 || true

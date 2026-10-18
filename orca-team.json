@@ -4,18 +4,18 @@
   "description": "Configuration schema for Orca Multi-Agent Orchestration Team",
   "projectPath": ".",
   "executionHost": "local",
-  "goalMode": true,
+  "goalMode": false,
   "coordinator": {
     "agent": "antigravity",
     "description": "Lead Architect & DAG Coordinator",
     "model": "claude-opus-5-5-high",
     "effort": "high",
-    "goalMode": true
+    "goalMode": false
   },
   "roles": {
     "developer": {
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "git-worktrees",
         "browser-design-mode",
@@ -26,7 +26,7 @@
     },
     "qa": {
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "git-worktrees",
         "browser-design-mode",
@@ -37,7 +37,7 @@
     },
     "security": {
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "git-worktrees",
         "orca-skills-registry"
@@ -47,7 +47,7 @@
     },
     "prReviewer": {
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "git-worktrees",
         "diff-viewer",
@@ -58,7 +58,7 @@
     },
     "issueResolver": {
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "git-worktrees",
         "issue-metadata",
@@ -70,7 +70,7 @@
     "uiSpecialist": {
       "enabled": true,
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "browser-design-mode",
         "per-worktree-browser"
@@ -81,7 +81,7 @@
     "devopsSpecialist": {
       "enabled": true,
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "ssh-remote-execution",
         "orca-per-workspace-env"
@@ -92,7 +92,7 @@
     "benchSpecialist": {
       "enabled": true,
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "git-worktrees",
         "ssh-remote-execution",
@@ -104,7 +104,7 @@
     "reSpecialist": {
       "enabled": true,
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "git-worktrees",
         "orca-skills-registry",
@@ -116,7 +116,7 @@
     "criticSpecialist": {
       "enabled": true,
       "agent": "antigravity",
-      "goalMode": true,
+      "goalMode": false,
       "utilities": [
         "git-worktrees",
         "diff-viewer",

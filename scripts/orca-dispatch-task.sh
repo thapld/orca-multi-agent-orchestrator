@@ -194,10 +194,10 @@ else
 fi
 
 # Tự động chọn Worktree Slot đang rảnh (<role>-worker) hoặc tự đẻ slot mới (<role>-worker-2, <role>-worker-3...) nếu bận
-ROLE_GOAL_MODE="true"
+ROLE_GOAL_MODE="false"
 if [[ -x "$ORCA_TEAM_BIN" ]]; then
   RAW_GOAL=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" get "$ROLE_QUERY" --field goal 2>/dev/null || true)
-  [[ "$RAW_GOAL" == "false" ]] && ROLE_GOAL_MODE="false"
+  [[ "$RAW_GOAL" == "true" ]] && ROLE_GOAL_MODE="true"
   SLOT_QUERY="$ROLE_QUERY"
   [[ "$EXPLICIT_SLOT" == true ]] && SLOT_QUERY="$ROLE_WORKTREE"
   CHOSEN_SLOT=$("$ORCA_TEAM_BIN" --path "$REPO_ROOT" worktree-arg "$SLOT_QUERY" --slot-only 2>/dev/null || true)
