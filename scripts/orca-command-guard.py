@@ -2188,7 +2188,14 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
         is_new_child = any(w in ("new-child", "new", "new-top-level") for w in wt_tokens)
         seg_slot = ""
         for w in wt_tokens:
-            if w in ("current", "new-child", "new", "new-top-level", "parent"):
+            if w in ("current", "parent"):
+                task_flag_hint = f" --task {seg_task_id}" if seg_task_id else " --task <TASK_ID>"
+                return (
+                    f"[ORCA ELASTIC WORKTREE GUARD] CẤM dùng '--worktree {w}' khi gọi 'orca orchestration worker-start' "
+                    f"(sẽ chạy Worker trực tiếp trên nhánh gốc main của Leader, gây bẩn git status và xung đột nhánh)! "
+                    f"Cách sửa bắt buộc: Thay '--worktree {w}' bằng $(orca-team worktree-arg <role>{task_flag_hint})."
+                )
+            if w in ("new-child", "new", "new-top-level"):
                 continue
             cand = _extract_canonical_worker_slot(w)
             if cand:
@@ -2553,7 +2560,29 @@ def main() -> None:
             sys.stdout.flush()
             return
 
-        # Guard 5: Wave-Order Gate & Run-Scoped Elastic Worktree Guard on `worker-start`
+        # Guard 5: Anti-Token-Leak Guard for `orca orchestration inbox` and `orca orchestration task-create --json`
+        sanitized_orch = _strip_quoted_heredocs(_strip_non_exec_prose_flags(cmd[:200000]))
+        if re.search(r"(?:^|[;&|()\n]|\b(?:do|then|else|elif|env|command|sudo)\s+)\s*(?:\S*/)?orca\s+orchestration\s+inbox\b", sanitized_orch):
+            reason = (
+                "[ORCA TOKEN-LEAK GUARD] CẤM gọi 'orca orchestration inbox' vì lệnh này xả toàn bộ lịch sử hòm thư đa Run làm phình Context Window! "
+                "Cách sửa: "
+                "• Nếu là Worker: dùng 'orca orchestration check [--ack <DELIVERY_ID>] --terminal <worker_handle> --json'. "
+                "• Nếu là Leader: dùng 'orca orchestration check [--ack <DELIVERY_ID>] --wait --types \"worker_done,escalation,question,handoff\" --timeout-ms 900000 --json'."
+            )
+            sys.stdout.write(_deny_json(reason))
+            sys.stdout.flush()
+            return
+
+        if re.search(r"(?:^|[;&|()\n]|\b(?:do|then|else|elif|env|command|sudo)\s+)\s*(?:\S*/)?orca\s+orchestration\s+task-create\b[^\n;|&]*\s--json\b", sanitized_orch):
+            reason = (
+                "[ORCA TOKEN-LEAK GUARD] CẤM truyền cờ '--json' vào 'orca orchestration task-create' (vì '--json' sẽ in lặp lại toàn bộ chuỗi Spec 700+ tokens vào Context mỗi lần tạo task)! "
+                "Cách sửa: Bỏ cờ '--json' ở cuối lệnh 'orca orchestration task-create' (lệnh vẫn in ra 'Created task_xxxxxxxxxxxx' chỉ tốn 4 tokens)."
+            )
+            sys.stdout.write(_deny_json(reason))
+            sys.stdout.flush()
+            return
+
+        # Guard 6: Wave-Order Gate & Run-Scoped Elastic Worktree Guard on `worker-start`
         collision_reason = _check_hardcoded_worker_start_collision(cmd[:200000], payload, args)
         if collision_reason:
             sys.stdout.write(_deny_json(collision_reason))

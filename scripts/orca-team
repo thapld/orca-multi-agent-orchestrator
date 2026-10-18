@@ -1008,7 +1008,42 @@ def _strip_leader_directives_in_child_worktree(child_wt, main_root, dry_run: boo
                 removed.append(rel_f)
             except Exception:
                 pass
+    if not dry_run:
+        try:
+            main_orca = m_res / ".orca"
+            child_orca = c_res / ".orca"
+            if main_orca.is_dir():
+                if child_orca.is_symlink():
+                    child_orca.unlink(missing_ok=True)
+                child_orca.mkdir(parents=True, exist_ok=True)
+                main_runs = main_orca / "runs"
+                main_runs.mkdir(parents=True, exist_ok=True)
+                child_runs = child_orca / "runs"
+                if not child_runs.exists() and not child_runs.is_symlink():
+                    os.symlink(str(main_runs), str(child_runs))
+        except Exception:
+            pass
     return removed
+
+
+def _sync_orca_runs_into_child_worktrees(main_root: Path):
+    """Đảm bảo mọi child worktree của dự án đều có symlink .orca (hoặc .orca/runs) trỏ về main_root/.orca
+    để Worker gọi view_file('.orca/runs/<RUN_ID>/master-plan.md') từ bên trong child worktree luôn thành công ngay lập tức."""
+    import subprocess
+    try:
+        m_res = Path(main_root).resolve()
+        wt_res = subprocess.run(
+            ["git", "-C", str(m_res), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        if wt_res.returncode == 0 and wt_res.stdout:
+            for ln in wt_res.stdout.splitlines():
+                if ln.startswith("worktree "):
+                    cwt = ln[9:].strip()
+                    if cwt and os.path.realpath(cwt) != str(m_res) and os.path.isdir(cwt):
+                        _strip_leader_directives_in_child_worktree(Path(cwt), m_res, dry_run=False)
+    except Exception:
+        pass
 
 
 def resolve_elastic_worktree_slot(
@@ -1489,7 +1524,7 @@ def resolve_elastic_worktree_slot(
                         slot_owner_map.setdefault(s_n, rid_d)
                     elif (
                         rid_d in unreleased_runs
-                        and d_item["ownershipState"] == "owned"
+                        and d_item["ownershipState"] in ("owned", "")
                         and d_item["releaseState"] != "released"
                     ):
                         slot_owner_map.setdefault(s_n, rid_d)
@@ -3114,6 +3149,7 @@ def cmd_plan(args: list, caller_dir: Path = None):
             latest_file.write_text(formatted_plan, encoding="utf-8")
         except Exception:
             pass
+        _sync_orca_runs_into_child_worktrees(main_root)
 
         if as_json:
             print(json.dumps({"runId": resolved_run, "pinnedPlanPath": str(plan_file), "content": formatted_plan.strip()}, ensure_ascii=False, indent=2))
@@ -3315,9 +3351,10 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
         if as_json:
             print(json.dumps(info, ensure_ascii=False, indent=2))
         else:
+            _print_run_plan_and_peers_summary(info, show_all_tasks=False)
             print(
-                f"⛔ [ORCA RUN-SCOPED MERGE GUARD] Từ chối merge cho Run {info.get('runId') or '(không xác định)'} "
-                f"vì các nhánh upstream trong cùng Run CHƯA HOÀN TẤT 100%:",
+                f"\n⛔ [ORCA RUN-SCOPED MERGE GUARD] Chưa thể merge cho Run {info.get('runId') or '(không xác định)'} "
+                f"vì các nhánh upstream phía trước trong cùng Run vẫn đang chạy hoặc chưa gửi P2P handoff:",
                 file=sys.stderr,
             )
             for b in info.get("blockingActiveUpstream") or []:
@@ -3337,7 +3374,8 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
                     file=sys.stderr,
                 )
             print(
-                "👉 Hãy chờ toàn bộ dev-worker*/ui-worker* trong cùng Run báo worker-done (succeeded) hoặc gửi P2P handoff (DEV_READY) rồi mới chạy lại `orca-team merge-upstream`.",
+                "⏳ [TRẠNG THÁI CHỜ P2P BÌNH THƯỜNG]: Hãy chờ các worker upstream ở trên gửi tín hiệu P2P handoff (DEV_READY / INFRA_READY) hoặc báo worker-done, "
+                "sau đó chạy lại `orca-team merge-upstream`. Tuyệt đối KHÔNG cần chạy `orca-team --help` hay đọc mã nguồn `orca-team`.",
                 file=sys.stderr,
             )
         sys.exit(1)
