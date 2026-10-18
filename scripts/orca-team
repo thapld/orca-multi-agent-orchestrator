@@ -1923,16 +1923,66 @@ def _extract_user_task_from_spec(spec_str: str) -> str:
 
 
 def _ensure_orca_dir_git_excluded(main_root: Path):
-    """Đảm bảo thư mục .orca/ được thêm vào .git/info/exclude để không bao giờ làm bẩn git status."""
-    try:
-        excl = Path(main_root) / ".git" / "info" / "exclude"
-        if excl.parent.is_dir():
-            cur = excl.read_text(encoding="utf-8", errors="ignore") if excl.exists() else ""
-            if ".orca/" not in cur.splitlines() and ".orca" not in cur.splitlines():
-                with open(excl, "a", encoding="utf-8") as f:
-                    if cur and not cur.endswith("\n"):
+    """Đảm bảo .orca/, .orca-cache/, *.orca.log và cấu hình Orchestrator luôn có mặt trong cả .gitignore lẫn .git/info/exclude."""
+    import subprocess
+
+    root_p = Path(main_root)
+    orca_entries = [
+        ".agents/",
+        "GEMINI.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "orca-team.json",
+        ".orca/",
+        ".orca-cache/",
+        "*.orca.log",
+    ]
+    is_orca_proj = (root_p / "orca-team.json").is_file() or (root_p / ".agents" / "GEMINI.md").is_file()
+    is_orchestrator_source_repo = (root_p / "scripts" / "orca-team").is_file() and (root_p / "templates" / "GEMINI.md").is_file()
+    entries_to_check = (
+        orca_entries
+        if (is_orca_proj and not is_orchestrator_source_repo)
+        else [".orca/", ".orca-cache/", "*.orca.log"]
+    )
+
+    # 1. Cập nhật .gitignore ở root dự án
+    gi_file = root_p / ".gitignore"
+    if is_orca_proj or gi_file.is_file():
+        try:
+            cur_gi = gi_file.read_text(encoding="utf-8", errors="ignore") if gi_file.is_file() else ""
+            gi_lines = {ln.strip().rstrip("/") for ln in cur_gi.splitlines() if ln.strip() and not ln.strip().startswith("#")}
+            missing_gi = [e for e in entries_to_check if e.rstrip("/") not in gi_lines]
+            if missing_gi:
+                with open(gi_file, "a", encoding="utf-8") as f:
+                    if cur_gi and not cur_gi.endswith("\n"):
                         f.write("\n")
-                    f.write(".orca/\n")
+                    if "# Orca Multi-Agent Orchestrator" not in cur_gi:
+                        f.write("\n# Orca Multi-Agent Orchestrator (Directives & Runtime)\n")
+                    for m_e in missing_gi:
+                        f.write(f"{m_e}\n")
+        except Exception:
+            pass
+
+    # 2. Cập nhật .git/info/exclude (dùng chung cho mọi Child Worktrees ngay cả khi .gitignore chưa được commit)
+    try:
+        excl = root_p / ".git" / "info" / "exclude"
+        if not excl.parent.is_dir():
+            gc_res = subprocess.run(
+                ["git", "-C", str(root_p), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if gc_res.returncode == 0 and gc_res.stdout.strip():
+                excl = Path(gc_res.stdout.strip()) / "info" / "exclude"
+        if excl.parent.is_dir():
+            cur_ex = excl.read_text(encoding="utf-8", errors="ignore") if excl.exists() else ""
+            ex_lines = {ln.strip().rstrip("/") for ln in cur_ex.splitlines() if ln.strip() and not ln.strip().startswith("#")}
+            missing_ex = [e for e in entries_to_check if e.rstrip("/") not in ex_lines]
+            if missing_ex:
+                with open(excl, "a", encoding="utf-8") as f:
+                    if cur_ex and not cur_ex.endswith("\n"):
+                        f.write("\n")
+                    for m_e in missing_ex:
+                        f.write(f"{m_e}\n")
     except Exception:
         pass
 
@@ -4247,6 +4297,7 @@ def sync_gemini_directive(root: Path, config: dict):
 
     gemini_file.write_text(content, encoding="utf-8")
     _sync_discovery_links(root, config, create_missing=upgraded_from_template)
+    _ensure_orca_dir_git_excluded(root)
 
 
 def _build_discovery_env():

@@ -1312,27 +1312,56 @@ case "$COORD_AGENT" in
     LINK_MSG="GEMINI.md & AGENTS.md -> .agents/GEMINI.md"
     ;;
 esac
-# ── Đảm bảo .gitignore bỏ qua cấu hình Orchestrator & runtime Orca (Mặc định) ──
+# ── Đảm bảo .gitignore & .git/info/exclude bỏ qua cấu hình Orchestrator & runtime Orca (.orca/) ──
 GITIGNORE_FILE="$PROJECT_PATH/.gitignore"
-ORCA_IGNORE_BLOCK="
-# Orca Multi-Agent Orchestrator (Directives & Team Config)
-.agents/
-GEMINI.md
-AGENTS.md
-CLAUDE.md
-orca-team.json
-.orca/
-.orca-cache/
-*.orca.log"
+ORCA_IGNORE_ENTRIES=(
+  ".agents/"
+  "GEMINI.md"
+  "AGENTS.md"
+  "CLAUDE.md"
+  "orca-team.json"
+  ".orca/"
+  ".orca-cache/"
+  "*.orca.log"
+)
 
 if [[ -f "$GITIGNORE_FILE" ]]; then
-  if ! grep -q "orca-team\.json" "$GITIGNORE_FILE" 2>/dev/null; then
-    printf "%s\n" "$ORCA_IGNORE_BLOCK" >> "$GITIGNORE_FILE"
-    echo "   🛡️  Đã thêm cấu hình Orchestrator (.agents/, GEMINI.md, orca-team.json...) vào .gitignore."
+  MISSING_GI=()
+  for entry in "${ORCA_IGNORE_ENTRIES[@]}"; do
+    base_e="${entry%/}"
+    if ! grep -Fqx "$entry" "$GITIGNORE_FILE" 2>/dev/null && ! grep -Fqx "$base_e" "$GITIGNORE_FILE" 2>/dev/null; then
+      MISSING_GI+=("$entry")
+    fi
+  done
+  if (( ${#MISSING_GI[@]} > 0 )); then
+    if ! grep -q "Orca Multi-Agent Orchestrator" "$GITIGNORE_FILE" 2>/dev/null; then
+      printf "\n# Orca Multi-Agent Orchestrator (Directives & Team Config)\n" >> "$GITIGNORE_FILE"
+    fi
+    for m_e in "${MISSING_GI[@]}"; do
+      printf "%s\n" "$m_e" >> "$GITIGNORE_FILE"
+    done
+    echo "   🛡️  Đã bổ sung (${MISSING_GI[*]}) vào .gitignore."
   fi
 else
-  printf "%s\n" "${ORCA_IGNORE_BLOCK#$'\n'}" > "$GITIGNORE_FILE"
-  echo "   🛡️  Đã tạo .gitignore và thêm cấu hình Orchestrator."
+  {
+    printf "# Orca Multi-Agent Orchestrator (Directives & Team Config)\n"
+    for entry in "${ORCA_IGNORE_ENTRIES[@]}"; do
+      printf "%s\n" "$entry"
+    done
+  } > "$GITIGNORE_FILE"
+  echo "   🛡️  Đã tạo .gitignore và thêm cấu hình Orchestrator (.agents/, .orca/, orca-team.json...)."
+fi
+
+GIT_COMMON_DIR_INIT=$(git -C "$PROJECT_PATH" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$PROJECT_PATH/.git")
+if [[ -d "$GIT_COMMON_DIR_INIT/info" ]]; then
+  EXCLUDE_FILE="$GIT_COMMON_DIR_INIT/info/exclude"
+  touch "$EXCLUDE_FILE" 2>/dev/null || true
+  for entry in "${ORCA_IGNORE_ENTRIES[@]}"; do
+    base_e="${entry%/}"
+    if ! grep -Fqx "$entry" "$EXCLUDE_FILE" 2>/dev/null && ! grep -Fqx "$base_e" "$EXCLUDE_FILE" 2>/dev/null; then
+      printf "%s\n" "$entry" >> "$EXCLUDE_FILE" 2>/dev/null || true
+    fi
+  done
 fi
 
 # ── Đảm bảo Orca Agent Status Hooks được kích hoạt đầy đủ (hiện loading spinner & chuông thông báo) ──
