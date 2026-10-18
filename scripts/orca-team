@@ -148,8 +148,8 @@ ROLE_SPEC_TEMPLATES = {
         "CẤM TUYỆT ĐỐI tự ý dịch ngược hoặc đọc/cat/strings/grep trực tiếp file binary trong container (nếu cần giải phẫu binary phải báo Coordinator giao re-worker); "
         "CẤM đặt dấu backtick (`) bên trong chuỗi nháy kép (\"...\") của bash/zsh/python -c vì shell sẽ thực thi command substitution gây biến rỗng và treo vòng lặp stdout! "
         "RÀ SOÁT RUNTIME LOGS & BÁO CÁO COORDINATOR (BẮT BUỘC giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble): "
-        "(1) Đầu ca chạy git merge --no-edit main và orca orchestration check --terminal <worker_handle> --json; khi hộp thư có bàn giao nhánh Dev đã được Coordinator duyệt cần build/rollout thì merge toàn bộ nhánh Dev hiện có bằng "
-        "(for _br in $(git for-each-ref --format='%(refname:short)' 'refs/heads/dev-worker*'); do git merge --no-edit \"$_br\" || exit 1; done), (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! "
+        "(1) Đầu ca chạy orca orchestration check --terminal <worker_handle> --json và đồng bộ CHỈ các nhánh thuộc cùng Run của Leader này (khi mọi nhánh Dev/UI trong Run đã xong 100%) bằng "
+        "orca-team merge-upstream --role devops --task-id <task_id> --dispatch-id <dispatch_id> (CẤM tự gõ vòng lặp merge dev-worker* để tránh trộn code từ Run của Leader khác hoặc khi dev-worker-2 chưa xong!), (2) CẤM chỉ nhìn Pod Running (1/1 Ready) hay /health 200 lúc mới bật rồi báo xong! "
         "Bắt buộc chờ qua chu kỳ chạy thật của background worker/@Scheduled/consumer và quét TOÀN BỘ Runtime Logs từ lúc container start "
         "(kubectl logs/docker logs KHÔNG dùng --since ngắn cắt lỗi) trên TẤT CẢ các pod/container (App + DB + Kafka/Broker + Sidecar) "
         "cùng trạng thái DB, (3) Nếu phát hiện BẤT KỲ dòng ERROR, FATAL, PANIC, Exception, Stacktrace, lỗi SQL, "
@@ -177,7 +177,7 @@ ROLE_SPEC_TEMPLATES = {
         "[ROLE: PRINCIPAL SECURITY AUDITOR] Nhiệm vụ: {task}. "
         "Chuẩn: Soi git diff theo OWASP Top 10 (SQLi, Injection, Auth/JWT, IDOR, SSRF, XSS), Race Conditions/Deadlock, Resource/Memory Leaks "
         "và Secret Leaks. CẤM VƯỢT RÀO: Read-Only Audit & PoC; CẤM tự sửa code tính năng của Dev. GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: "
-        "Chạy git merge --no-edit main && (for _br in $(git for-each-ref --format='%(refname:short)' 'refs/heads/dev-worker*'); do git merge --no-edit \"$_br\" || exit 1; done) để diff đúng toàn bộ commit mới (nếu có xung đột merge chỉ giữ code từ nhánh được kiểm toán, CẤM tạo commit mới sửa code tính năng); nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng "
+        "Chạy orca-team merge-upstream --role sec --task-id <task_id> --dispatch-id <dispatch_id> để kiểm tra mọi worker Dev/UI/DevOps thuộc CÙNG Run đã xong 100% và chỉ merge đúng các nhánh thuộc Run của Leader này (CẤM tự chạy vòng lặp merge dev-worker* để tránh trộn code từ Leader khác; nếu có xung đột merge chỉ giữ code từ nhánh được kiểm toán, CẤM tạo commit mới sửa code tính năng); nếu phát hiện lỗ hổng phải trình ngay lên Coordinator bằng "
         "orca orchestration send --from <worker_handle> --type escalation --subject 'Security Vulnerability Found' "
         "--body '<file:line & PoC trình Coordinator ra quyết định>' --task-id <task_id> --dispatch-id <dispatch_id> --json; "
         "liệt kê rõ file:line theo 4 mục [OWASP, Concurrency, Leaks, Secrets] và chốt SECURITY_VERDICT: PASS hoặc BLOCK."
@@ -188,7 +188,7 @@ ROLE_SPEC_TEMPLATES = {
         "CẤM VƯỢT RÀO & CẤM CHE GIẤU LỖI: Chỉ viết/chạy test; CẤM TUYỆT ĐỐI sửa business logic của Dev; CẤM xóa/nới lỏng assert (vd: chỉ check HTTP 200 hay attempts>=1 mà lờ đi "
         "status=FAILED/health=ERROR/last_error/SSLHandshakeException); CẤM dùng --since ngắn để cắt bỏ log lỗi cũ hoặc bỏ sót "
         "không quét pod DB/Kafka! GIAO TIẾP & BÁO CÁO COORDINATOR (BẮT BUỘC): (1) Kiểm tra hộp thư (orca orchestration check --terminal <worker_handle> --json) "
-        "nhận nhánh/môi trường từ Coordinator và chạy git merge --no-edit main && (for _br in $(git for-each-ref --format='%(refname:short)' 'refs/heads/dev-worker*'); do git merge --no-edit \"$_br\" || exit 1; done) trước khi test, (2) Chạy lệnh test thật (Jest kèm --forceExit) VÀ kiểm toán trực tiếp "
+        "nhận nhánh/môi trường từ Coordinator và chạy orca-team merge-upstream --role qa --task-id <task_id> --dispatch-id <dispatch_id> trước khi test (lệnh này tự xác minh mọi dev-worker* trong CÙNG Run đã succeeded 100% và CHỈ merge đúng các nhánh thuộc Run của Leader này, CẤM tự chạy vòng lặp merge dev-worker*!), (2) Chạy lệnh test thật (Jest kèm --forceExit) VÀ kiểm toán trực tiếp "
         "TOÀN BỘ Runtime Logs (kubectl logs/docker logs từ lúc start trên MỌI container App + DB + Broker) trong & sau khi chạy E2E/scheduled jobs, "
         "(3) Nếu vướng môi trường phải hỏi Coordinator qua orca orchestration ask --from <worker_handle> --question '...' --json; "
         "nếu phát hiện BẤT KỲ lỗi ERROR/Exception/FATAL/SQL/SSL/health=ERROR nào trong Runtime Logs hay DB ➔ BẮT BUỘC trình ngay lên Coordinator bằng "
@@ -199,7 +199,7 @@ ROLE_SPEC_TEMPLATES = {
         "[ROLE: PRINCIPAL BENCHMARK & PERF] Nhiệm vụ: {task}. "
         "Chuẩn: Có bước warm-up, dùng công cụ chuẩn (k6/wrk/JMH/pytest-benchmark/go test -bench/EXPLAIN ANALYZE), đo Before vs After. "
         "CẤM VƯỢT RÀO: Chỉ viết/chạy benchmark & phân tích bottleneck; CẤM tự sửa business logic hoặc drop dữ liệu/bỏ validate để ăn gian điểm số! "
-        "GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và chạy git merge --no-edit main && (for _br in $(git for-each-ref --format='%(refname:short)' 'refs/heads/dev-worker*'); do git merge --no-edit \"$_br\" || exit 1; done) để đo trên code mới nhất, "
+        "GIAO TIẾP & BẰNG CHỨNG BẮT BUỘC: (1) Nhận chỉ đạo nhánh/môi trường từ Coordinator và chạy orca-team merge-upstream --role bench --task-id <task_id> --dispatch-id <dispatch_id> để xác minh mọi nhánh Dev/UI/DevOps thuộc CÙNG Run đã xong 100% và chỉ merge đúng các nhánh của Run này trước khi đo, "
         "(2) Xuất bảng số liệu thật: Concurrency, Throughput (req/s hoặc EPS), Latency (p50/p95/p99), Error Rate (0%), CPU/RAM; "
         "nếu phát hiện nghẽn cổ chai, gửi ngay orca orchestration send --from <worker_handle> --type escalation --subject 'Perf Bottleneck Found' "
         "--body '<file:line/query gây nghẽn trình Coordinator phán quyết>' --task-id <task_id> --dispatch-id <dispatch_id> --json "
@@ -411,16 +411,10 @@ def build_role_spec(role_input: str, task_desc: str, config: dict = None, goal_o
             downstream.append("Bench")
         tpl = tpl.replace("điều phối cho DevOps/QA/Sec/Bench", f"điều phối cho {'/'.join(downstream)}")
         if canonical in ("devopsSpecialist", "security", "qa", "benchSpecialist"):
-            ref_patterns = ["'refs/heads/dev-worker*'"]
-            if devops_on and canonical != "devopsSpecialist":
-                ref_patterns.append("'refs/heads/devops-worker*'")
-            if ui_on:
-                ref_patterns.append("'refs/heads/ui-worker*'")
-            if len(ref_patterns) > 1:
-                tpl = tpl.replace(
-                    "'refs/heads/dev-worker*'",
-                    " ".join(ref_patterns),
-                )
+            if not devops_on and canonical != "devopsSpecialist":
+                tpl = tpl.replace("Dev/UI/DevOps", "Dev/UI")
+            if not ui_on:
+                tpl = tpl.replace("Dev/UI/DevOps", "Dev/DevOps").replace("Dev/UI", "Dev")
     base_wt = BASE_WORKTREE_MAP.get(canonical, "dev-worker")
     slot_display = f"{base_wt} / {base_wt}-N" if slot_branch == base_wt else slot_branch
     rendered = tpl.replace("{slot_branch}", slot_display).replace("{task}", clean_task)
@@ -967,17 +961,21 @@ def resolve_elastic_worktree_slot(
     check_exact_slot: str = "",
     clean_idle_tabs: bool = True,
     reservation_ttl_secs: float = 45.0,
+    run_id: str = "",
+    task_id: str = "",
 ) -> dict:
     """
-    Cấp phát Worktree Slot tự động co giãn (Elastic Auto-Scale):
-    - Nếu slot hiện có (<role>-worker, <role>-worker-2...) đang rảnh (done / settled / released):
-      tự động đóng các tab worker cũ đã hoàn tất trên slot đó rồi tái sử dụng (--worktree path:<abs_path>).
-    - Nếu slot hiện có đang bận (working / live ở bất kỳ Leader/Run nào hoặc vừa được đặt chỗ trong 45s):
-      tự động nhảy sang slot kế tiếp (<role>-worker-2, <role>-worker-3...) — tái sử dụng nếu đã có trên đĩa và đang rảnh,
-      hoặc tạo mới (--worktree new-child --name <slot>) nếu chưa tồn tại.
+    Cấp phát Worktree Slot tự động co giãn (Elastic Auto-Scale) kèm Khóa Sở Hữu theo Run (Run-Scoped Ownership):
+    - Một slot đang WORKING hoặc đang RETAINED (ở Bước 3, chưa merge vào main & chưa release ở Bước 4)
+      bởi một Run A sẽ bị KHÓA đối với mọi Leader/Run khác (Run B buộc phải nhảy sang <role>-worker-2, -3...).
+    - Trong nội bộ CÙNG Run A (khi sửa lỗi vòng 2 hoặc re-test), Run A được ưu tiên tái sử dụng lại chính các slot
+      đã settled của mình (Same-Run Affinity) để giữ nguyên các commit của Run A trên nhánh đó.
+    - Khi một slot đã RELEASED ở Bước 4 được cấp phát mới cho một Run khác, hệ thống tự động đóng tab cũ
+      và đồng bộ sạch về nhánh chính (main) trước khi giao.
     """
     from concurrent.futures import ThreadPoolExecutor
     import fcntl
+    import sqlite3
     import subprocess
     import time
 
@@ -1268,6 +1266,201 @@ def resolve_elastic_worktree_slot(
             except Exception:
                 pass
 
+        # 3b. Kiểm tra Khóa Sở Hữu theo Run (Run-Scoped Ownership) & Same-Run Affinity qua SQLite orchestration.db (~3ms):
+        #     - Slot đang WORKING hoặc RETAINED (ownership_state='owned' / release_state='retained') của Run A
+        #       bị KHÓA cứng đối với mọi Run B khác cho tới khi Run A hoàn tất Bước 4 (release-workers).
+        #     - Trong nội bộ cùng Run A (vá lỗi vòng 2 / re-test), ưu tiên tái sử dụng lại chính slot đã settled của Run A.
+        caller_run_id = (run_id or os.environ.get("ORCA_RUN_ID") or "").strip()
+        caller_task_id = (task_id or "").strip()
+        task_slot_hint = ""
+        same_run_owned_slots: list[str] = []
+        locked_by_run: dict[str, str] = {}
+        role_prefix_target = base_wt.split("-worker")[0]
+
+        db_path = _find_orca_orchestration_db()
+        if db_path is not None:
+            try:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+                conn.row_factory = sqlite3.Row
+
+                if caller_task_id:
+                    t_row = conn.execute(
+                        "SELECT run_id, task_title, spec FROM tasks WHERE id = ? LIMIT 1",
+                        (caller_task_id,),
+                    ).fetchone()
+                    if t_row:
+                        if not caller_run_id:
+                            caller_run_id = str(t_row["run_id"] or "").strip()
+                        combined_txt = f"{t_row['task_title'] or ''} {t_row['spec'] or ''}"
+                        m_sh = re.findall(rf"\b({re.escape(base_wt)}(?:-\d+)?)\b", combined_txt)
+                        for cand_sh in reversed(m_sh):
+                            if cand_sh != base_wt or len(m_sh) == 1:
+                                task_slot_hint = cand_sh
+                                break
+
+                d_rows = conn.execute(
+                    """
+                    SELECT dc.run_id, dc.id AS dispatch_id, dc.task_id, dc.status AS dc_status,
+                           CAST(strftime('%s', dc.created_at) AS INTEGER) AS created_epoch,
+                           wd.state AS wd_state, wd.worktree_id,
+                           wtr.ownership_state, wtr.release_state
+                    FROM dispatch_contexts dc
+                    LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id
+                    LEFT JOIN worker_terminal_resources wtr ON (wtr.owner_dispatch_id = dc.id OR wtr.origin_dispatch_id = dc.id)
+                    ORDER BY dc.created_at DESC LIMIT 200
+                    """
+                ).fetchall()
+
+                repo_dispatches: list[dict] = []
+                repo_run_ids: list[str] = []
+                dispatched_tids: set[str] = set()
+                user_ws_prefix = f"/Users/{os.environ.get('USER', 'macbook')}/orca/workspaces/{main_root.name}/"
+
+                for dr in d_rows:
+                    ws_id = str(dr["worktree_id"] or "").strip()
+                    wt_part = ws_id.split("::", 1)[1] if "::" in ws_id else ws_id
+                    if wt_part.startswith("path:"):
+                        wt_part = wt_part[5:]
+                    norm_wt = os.path.realpath(wt_part) if (wt_part and os.path.isabs(wt_part)) else wt_part
+                    belongs = (
+                        (norm_wt and norm_wt in existing_path_set)
+                        or (wt_part and wt_part in existing_path_set)
+                        or (norm_wt and norm_wt.startswith(user_ws_prefix))
+                    )
+                    if not belongs:
+                        continue
+                    rid_d = str(dr["run_id"] or "").strip()
+                    tid_d = str(dr["task_id"] or "").strip()
+                    if tid_d:
+                        dispatched_tids.add(tid_d)
+                    if rid_d and rid_d not in repo_run_ids:
+                        repo_run_ids.append(rid_d)
+                    s_name = _slot_for_path(norm_wt or wt_part)
+                    if s_name and norm_wt and norm_wt != main_root_str and Path(norm_wt).is_dir():
+                        existing_wt_paths.setdefault(s_name, norm_wt)
+                        existing_path_set.add(norm_wt)
+                    dc_st = str(dr["dc_status"] or "").strip().lower()
+                    wd_st = str(dr["wd_state"] or "").strip().lower()
+                    own_st = str(dr["ownership_state"] or "").strip().lower()
+                    rel_st = str(dr["release_state"] or "").strip().lower()
+                    is_settled = wd_st in ("succeeded", "failed", "canceled", "cancelled", "blocked", "stopped", "timed_out") or dc_st in (
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "canceled",
+                    )
+                    try:
+                        c_epoch = int(dr["created_epoch"] or 0)
+                    except Exception:
+                        c_epoch = 0
+                    repo_dispatches.append({
+                        "runId": rid_d,
+                        "dispatchId": str(dr["dispatch_id"] or ""),
+                        "taskId": tid_d,
+                        "slot": s_name,
+                        "isSettled": is_settled,
+                        "ownershipState": own_st,
+                        "releaseState": rel_st,
+                        "createdEpoch": c_epoch,
+                    })
+
+                # Nếu chưa truyền --run / --task, tự động suy luận caller_run_id từ các task `ready` chưa dispatch của role này
+                if not caller_run_id and repo_run_ids:
+                    placeholders = ",".join("?" for _ in repo_run_ids[:12])
+                    t_rows = conn.execute(
+                        f"SELECT id, run_id, task_title, spec, status, created_at FROM tasks WHERE run_id IN ({placeholders}) ORDER BY created_at ASC",
+                        tuple(repo_run_ids[:12]),
+                    ).fetchall()
+                else:
+                    t_rows = []
+                    if not repo_run_ids:
+                        # Có thể là Run hoàn toàn mới chưa có dispatch nào trên repo
+                        t_rows = conn.execute(
+                            "SELECT id, run_id, task_title, spec, status, created_at FROM tasks WHERE status = 'ready' ORDER BY created_at DESC LIMIT 20"
+                        ).fetchall()
+
+                ready_role_runs: list[str] = []
+                ready_role_tasks: list[ sqlite3.Row ] = []
+                for tr in t_rows:
+                    tid_r = str(tr["id"] or "").strip()
+                    rid_r = str(tr["run_id"] or "").strip()
+                    st_r = str(tr["status"] or "").strip().lower()
+                    if st_r == "ready" and tid_r not in dispatched_tids:
+                        t_pref = _infer_task_role_prefix(str(tr["task_title"] or ""), str(tr["spec"] or ""))
+                        if t_pref == role_prefix_target:
+                            ready_role_tasks.append(tr)
+                            if rid_r and rid_r not in ready_role_runs:
+                                ready_role_runs.append(rid_r)
+
+                if not caller_run_id and len(ready_role_runs) == 1:
+                    caller_run_id = ready_role_runs[0]
+                    if not task_slot_hint:
+                        for tr in ready_role_tasks:
+                            combined_txt = f"{tr['task_title'] or ''} {tr['spec'] or ''}"
+                            m_sh = re.findall(rf"\b({re.escape(base_wt)}-\d+)\b", combined_txt)
+                            for cand_sh in m_sh:
+                                if cand_sh not in reservations:
+                                    task_slot_hint = cand_sh
+                                    break
+                            if task_slot_hint:
+                                break
+
+                # Xác định các Run vẫn đang giữ tài nguyên (unreleased): còn worker đang chạy HOẶC còn worker owned/retained trong 6h gần nhất
+                now_sec = int(now)
+                unreleased_runs: set[str] = set()
+                for d_item in repo_dispatches:
+                    rid_d = d_item["runId"]
+                    if not rid_d:
+                        continue
+                    if not d_item["isSettled"]:
+                        unreleased_runs.add(rid_d)
+                    elif d_item["ownershipState"] == "owned" and d_item["releaseState"] != "released":
+                        if d_item["createdEpoch"] <= 0 or (now_sec - d_item["createdEpoch"]) < 6 * 3600:
+                            unreleased_runs.add(rid_d)
+
+                # Ánh xạ mỗi slot tới Run đang sở hữu nó (ưu tiên dispatch mới nhất còn owned/retained hoặc đang chạy)
+                slot_owner_map: dict[str, str] = {}
+                for d_item in repo_dispatches:
+                    s_n = d_item["slot"]
+                    rid_d = d_item["runId"]
+                    if not s_n or not rid_d:
+                        continue
+                    if not d_item["isSettled"]:
+                        busy_slots.add(s_n)
+                        hard_busy_slots.add(s_n)
+                        slot_owner_map.setdefault(s_n, rid_d)
+                    elif (
+                        rid_d in unreleased_runs
+                        and d_item["ownershipState"] == "owned"
+                        and d_item["releaseState"] != "released"
+                    ):
+                        slot_owner_map.setdefault(s_n, rid_d)
+
+                for s_n, owner_rid in slot_owner_map.items():
+                    if not caller_run_id or caller_run_id != owner_rid:
+                        # Slot đang thuộc quyền sở hữu (WORKING hoặc RETAINED chưa merge vào main) của một Leader/Run khác!
+                        busy_slots.add(s_n)
+                        hard_busy_slots.add(s_n)
+                        locked_by_run[s_n] = owner_rid
+                    else:
+                        # Cùng thuộc caller_run_id và đã settled: ưu tiên tái sử dụng lại cho chính Run này (Same-Run Affinity)
+                        if s_n not in hard_busy_slots and (s_n == base_wt or s_n.startswith(base_wt + "-")):
+                            if s_n not in same_run_owned_slots:
+                                same_run_owned_slots.append(s_n)
+
+                def _slot_sort_key(s_val: str) -> int:
+                    if s_val == base_wt:
+                        return 1
+                    try:
+                        return int(s_val.rsplit("-", 1)[1])
+                    except Exception:
+                        return 999
+
+                same_run_owned_slots.sort(key=_slot_sort_key)
+                conn.close()
+            except Exception:
+                pass
+
         # 4. Áp dụng bảng đặt chỗ tạm thời (chống race condition khi fan-out nhiều lệnh worker-start liên tiếp)
         cleaned_reservations = {}
         for s_key, r_ts in reservations.items():
@@ -1281,18 +1474,30 @@ def resolve_elastic_worktree_slot(
         if check_exact_slot:
             requested_slot_hard_busy = check_exact_slot in hard_busy_slots
             # Đối với `--check-slot` (do PreToolUse guard gọi):
-            # - Nếu slot đang thực sự chạy worker (`hard_busy_slots`), báo bận ngay.
+            # - Nếu slot đang thực sự chạy worker hoặc đang bị khóa bởi Run khác (`hard_busy_slots`), báo bận ngay.
             # - Nếu chỉ có reservation mềm: chỉ coi là bận nếu reservation mới tạo trong < 3.0s (hai lệnh fan-out sát nhau);
             #   nếu reservation đã > 3.0s mà chưa có worker thực sự chạy trên slot đó (ví dụ gọi `orca-team worktree-arg`
             #   trước rồi mới gọi `worker-start`), cho phép sử dụng để tránh tự chặn chính mình.
             res_age = (now - cleaned_reservations[check_exact_slot]) if check_exact_slot in cleaned_reservations else 999.0
             requested_slot_busy = requested_slot_hard_busy or (res_age < 3.0)
 
-        for k in range(min_slot, min_slot + 32):
-            cand_slot = base_wt if k == 1 else f"{base_wt}-{k}"
-            if cand_slot not in busy_slots:
-                chosen_slot = cand_slot
-                break
+        picked_own = ""
+        if task_slot_hint and task_slot_hint in same_run_owned_slots and task_slot_hint not in busy_slots:
+            picked_own = task_slot_hint
+        elif min_slot == 1:
+            for s_own in same_run_owned_slots:
+                if s_own not in busy_slots:
+                    picked_own = s_own
+                    break
+
+        if picked_own:
+            chosen_slot = picked_own
+        else:
+            for k in range(min_slot, min_slot + 32):
+                cand_slot = base_wt if k == 1 else f"{base_wt}-{k}"
+                if cand_slot not in busy_slots:
+                    chosen_slot = cand_slot
+                    break
 
         if check_exact_slot and not requested_slot_busy:
             chosen_slot = check_exact_slot
@@ -1326,7 +1531,10 @@ def resolve_elastic_worktree_slot(
 
     existing_path = existing_wt_paths.get(chosen_slot)
     # Khi tái sử dụng một worktree đã tồn tại và đang rảnh để chạy task mới:
-    # tự động đóng các tab worker cũ (state=done) trên worktree đó để tránh chồng chất nhiều tab cũ
+    # 1) Đóng các tab worker cũ (state=done) trên worktree đó để tránh chồng chất nhiều tab cũ.
+    # 2) Nếu worktree này là một slot đã RELEASED từ Run cũ (không thuộc same_run_owned_slots của Run hiện tại)
+    #    và working tree đang sạch (git status --porcelain rỗng), tự động đồng bộ sạch về nhánh chính (main)
+    #    để không bao giờ bị lẫn commit thử nghiệm từ các Run cũ!
     if (
         clean_idle_tabs
         and reserve
@@ -1343,6 +1551,43 @@ def resolve_elastic_worktree_slot(
             )
         except Exception:
             pass
+        if chosen_slot not in same_run_owned_slots:
+            try:
+                st_proc = subprocess.run(
+                    ["git", "-C", str(existing_path), "status", "--porcelain"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if st_proc.returncode == 0 and not st_proc.stdout.strip():
+                    main_br_proc = subprocess.run(
+                        ["git", "-C", str(main_root), "rev-parse", "--abbrev-ref", "HEAD"],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                    main_br_name = (main_br_proc.stdout or "").strip() or "main"
+                    if main_br_name != "HEAD":
+                        if role_prefix_target in ("qa", "sec", "bench", "critic", "re"):
+                            subprocess.run(
+                                ["git", "-C", str(existing_path), "reset", "--hard", main_br_name],
+                                capture_output=True, text=True, timeout=4,
+                            )
+                        else:
+                            # Với dev/ui/devops: nếu HEAD hiện tại đã nằm trong main (đã merge ở Bước 4) thì reset sạch về main,
+                            # hoặc fast-forward/merge main để bắt đầu trên nền code mới nhất
+                            anc_proc = subprocess.run(
+                                ["git", "-C", str(existing_path), "merge-base", "--is-ancestor", "HEAD", main_br_name],
+                                capture_output=True, text=True, timeout=2,
+                            )
+                            if anc_proc.returncode == 0:
+                                subprocess.run(
+                                    ["git", "-C", str(existing_path), "reset", "--hard", main_br_name],
+                                    capture_output=True, text=True, timeout=4,
+                                )
+                            else:
+                                subprocess.run(
+                                    ["git", "-C", str(existing_path), "merge", "--no-edit", main_br_name],
+                                    capture_output=True, text=True, timeout=5,
+                                )
+            except Exception:
+                pass
 
     if not has_commit:
         wt_args = ["--worktree", "current"]
@@ -1361,6 +1606,9 @@ def resolve_elastic_worktree_slot(
         "requestedSlot": check_exact_slot or None,
         "slotBusy": requested_slot_busy if check_exact_slot else False,
         "hardBusy": requested_slot_hard_busy if check_exact_slot else False,
+        "lockedByRun": locked_by_run.get(check_exact_slot) if check_exact_slot else None,
+        "callerRunId": caller_run_id or None,
+        "sameRunOwnedSlots": same_run_owned_slots,
         "exists": bool(existing_path),
         "path": existing_path,
         "args": wt_args,
@@ -1373,16 +1621,18 @@ def resolve_elastic_worktree_slot(
 
 def cmd_worktree_arg(root: Path, args: list):
     """
-    CLI: orca-team worktree-arg <role> [--slot-only] [--no-reserve] [--release] [--check-slot <slot>] [--json]
+    CLI: orca-team worktree-arg <role> [--task <TASK_ID>] [--run <RUN_ID>] [--slot-only] [--no-reserve] [--release] [--check-slot <slot>] [--json]
     Trả về chuỗi đối số --worktree cho `orca orchestration worker-start`:
-    - Khi slot hiện có đang rảnh: tự động đóng tab worker cũ (done) và trả về `--worktree path:/abs/path/to/<role>-worker`
-    - Khi slot hiện có đang bận: tự động đẻ/chọn slot kế tiếp (`--worktree new-child --name <role>-worker-2 [--setup skip]` hoặc `path:...`)
+    - Khi slot hiện có đang rảnh (RELEASED hoặc thuộc cùng Run đã settled): tự động đóng tab worker cũ (done) và trả về `--worktree path:/abs/path/to/<role>-worker`
+    - Khi slot hiện có đang bận (WORKING hoặc đang RETAINED bởi Run của Leader khác): tự động đẻ/chọn slot kế tiếp (`--worktree new-child --name <role>-worker-2 [--setup skip]` hoặc `path:...`)
     """
     role_arg = "dev"
     slot_only = False
     reserve = True
     release_only = False
     check_exact_slot = ""
+    run_id = ""
+    task_id = ""
     as_json = False
     target_root = root
 
@@ -1390,8 +1640,8 @@ def cmd_worktree_arg(root: Path, args: list):
     while idx < len(args):
         tok = args[idx]
         if tok in ("-h", "--help", "help"):
-            print("Sử dụng: orca-team worktree-arg <role> [--slot-only] [--no-reserve] [--release] [--check-slot <slot>] [--json]")
-            print("Ví dụ:   orca orchestration worker-start --task <ID> $(orca-team worktree-arg dev) --agent antigravity --json")
+            print("Sử dụng: orca-team worktree-arg <role> [--task <TASK_ID>] [--run <RUN_ID>] [--slot-only] [--no-reserve] [--release] [--check-slot <slot>] [--json]")
+            print("Ví dụ:   orca orchestration worker-start --task <ID> $(orca-team worktree-arg dev --task <ID>) --agent antigravity --json")
             return
         elif tok in ("--slot-only", "--slot", "--name-only"):
             slot_only = True
@@ -1407,6 +1657,18 @@ def cmd_worktree_arg(root: Path, args: list):
             idx += 2
         elif tok.startswith("--check-slot="):
             check_exact_slot = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--run", "--run-id") and idx + 1 < len(args):
+            run_id = args[idx + 1].strip()
+            idx += 2
+        elif tok.startswith("--run=") or tok.startswith("--run-id="):
+            run_id = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--task", "--task-id", "-t") and idx + 1 < len(args):
+            task_id = args[idx + 1].strip()
+            idx += 2
+        elif tok.startswith("--task=") or tok.startswith("--task-id="):
+            task_id = tok.split("=", 1)[1].strip()
             idx += 1
         elif tok == "--json":
             as_json = True
@@ -1433,6 +1695,8 @@ def cmd_worktree_arg(root: Path, args: list):
         reserve=reserve,
         release_only=release_only,
         check_exact_slot=check_exact_slot,
+        run_id=run_id,
+        task_id=task_id,
     )
     if as_json:
         print(json.dumps(info, ensure_ascii=False, indent=2))
@@ -1524,6 +1788,696 @@ def cmd_release_workers(root: Path, args: list):
     for c_item in res.get("closedTerminals") or []:
         print(f"   • Đã đóng tab: {c_item.get('worktree')} / {c_item.get('title')} ({c_item.get('handle')})")
 
+
+def _find_orca_orchestration_db() -> Path | None:
+    """Tìm đường dẫn tới SQLite orchestration.db của Orca để truy vấn Run/Dispatch tức thì (~3ms)."""
+    env_db = os.environ.get("ORCA_ORCHESTRATION_DB", "").strip()
+    if env_db:
+        p = Path(env_db).expanduser()
+        if p.is_file():
+            return p
+    candidates = [
+        Path.home() / "Library" / "Application Support" / "orca" / "orchestration.db",
+        Path.home() / ".config" / "orca" / "orchestration.db",
+    ]
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        candidates.append(Path(appdata) / "orca" / "orchestration.db")
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+def _infer_task_role_prefix(title: str, spec: str) -> str:
+    """Suy luận tiền tố role ('dev', 'ui', 'fix', 'devops', 'qa', 'sec', 'bench', 're', 'critic', 'pr') từ spec hoặc title."""
+    s_up = (spec or "").upper()
+    if "[ROLE: PRINCIPAL FULL-STACK" in s_up or "[ROLE: PRINCIPAL DEV]" in s_up or "[ROLE: DEVELOPER]" in s_up:
+        return "dev"
+    if "[ROLE: PRINCIPAL UI/UX]" in s_up or "[ROLE: UI" in s_up:
+        return "ui"
+    if "[ROLE: PRINCIPAL ISSUE RESOLVER]" in s_up:
+        return "fix"
+    if "[ROLE: PRINCIPAL DEVOPS/SRE]" in s_up:
+        return "devops"
+    if "[ROLE: PRINCIPAL QA/SDET]" in s_up:
+        return "qa"
+    if "[ROLE: PRINCIPAL SECURITY AUDITOR]" in s_up:
+        return "sec"
+    if "[ROLE: PRINCIPAL BENCHMARK & PERF]" in s_up:
+        return "bench"
+    if "[ROLE: PRINCIPAL REVERSE ENGINEER" in s_up:
+        return "re"
+    if "[ROLE: PRINCIPAL RESEARCH & ADVERSARIAL CRITIC]" in s_up:
+        return "critic"
+    if "[ROLE: PRINCIPAL PR REVIEWER]" in s_up:
+        return "pr"
+    t_low = (title or "").strip().lower()
+    m = re.match(r"^(dev|ui|fix|devops|qa|sec|security|bench|re|critic)(?:[-_\s\d:]|$)", t_low)
+    if m:
+        tok = m.group(1)
+        return "sec" if tok == "security" else tok
+    return ""
+
+
+def resolve_run_upstream_branches(
+    caller_dir: Path,
+    run_id: str = "",
+    dispatch_id: str = "",
+    task_id: str = "",
+    terminal_handle: str = "",
+    caller_role: str = "",
+    to_main: bool = False,
+) -> dict:
+    """
+    Xác định danh sách các nhánh git worktree thuộc ĐÚNG Run của Leader hiện tại,
+    đồng thời kiểm tra xem còn bất kỳ upstream worker nào (dev-worker*, ui-worker*, fix-worker*, devops-worker*)
+    trong cùng Run đang chạy dở hoặc chưa được khởi chạy hay không.
+    - Ngăn chặn QA/Sec/DevOps/Bench hoặc Leader (Step 4) merge nhầm nhánh của Leader khác khi chạy đa Leader.
+    - Ngăn chặn QA/Sec/DevOps/Bench chạy hoặc merge sớm khi dev-worker-2 trong cùng Run vẫn đang làm việc.
+    """
+    import sqlite3
+    import subprocess
+
+    caller_dir = Path(caller_dir).resolve()
+    caller_wt_real = os.path.realpath(str(caller_dir))
+    main_root = caller_dir
+    git_wt_map: dict[str, str] = {}
+    try:
+        wt_res = subprocess.run(
+            ["git", "-C", str(caller_dir), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        if wt_res.returncode == 0 and wt_res.stdout:
+            cur_wt = ""
+            cur_br = ""
+            first_seen = False
+            for ln in wt_res.stdout.splitlines() + [""]:
+                if ln.startswith("worktree "):
+                    cur_wt = ln[9:].strip()
+                    if not first_seen and cur_wt:
+                        first_seen = True
+                        try:
+                            main_root = Path(cur_wt).resolve()
+                        except Exception:
+                            main_root = Path(cur_wt)
+                elif ln.startswith("branch "):
+                    cur_br = ln[7:].strip()
+                elif not ln.strip() and cur_wt:
+                    wt_r = os.path.realpath(cur_wt)
+                    br_short = cur_br[len("refs/heads/"):] if cur_br.startswith("refs/heads/") else ""
+                    if not br_short and wt_r != os.path.realpath(str(main_root)):
+                        br_short = _extract_canonical_slot_name(Path(cur_wt).name) or Path(cur_wt).name
+                    git_wt_map[wt_r] = br_short
+                    cur_wt = ""
+                    cur_br = ""
+    except Exception:
+        pass
+
+    main_root_real = os.path.realpath(str(main_root))
+    main_branch = git_wt_map.get(main_root_real, "main")
+    if not main_branch or main_branch == "HEAD":
+        main_branch = "main"
+
+    caller_branch = git_wt_map.get(caller_wt_real, "")
+    is_in_worker_wt = caller_wt_real != main_root_real and caller_wt_real in git_wt_map
+
+    norm_role = (caller_role or "").strip().lower()
+    if norm_role in ROLE_ALIASES:
+        canon_r = ROLE_ALIASES[norm_role]
+        norm_role = BASE_WORKTREE_MAP.get(canon_r, "dev-worker").split("-worker")[0]
+    elif norm_role.endswith("-worker"):
+        norm_role = norm_role.split("-worker")[0]
+
+    if not norm_role and not to_main and caller_branch:
+        m_br = re.match(r"^([a-z]+)-worker(?:-\d+)?$", caller_branch)
+        if m_br:
+            norm_role = m_br.group(1)
+
+    def _compute_role_prefixes(r_name: str, is_to_main: bool):
+        if is_to_main or r_name in ("main", "leader", "coordinator"):
+            all_p = ("dev", "ui", "fix", "devops", "qa", "sec", "bench")
+            return all_p, all_p, all_p
+        if r_name == "devops":
+            p = ("dev", "ui", "fix")
+            return p, p, p
+        if r_name == "sec":
+            return ("dev", "ui", "fix", "devops"), ("dev", "ui", "fix"), ("dev", "ui", "fix")
+        # Mặc định cho qa, bench (hoặc bất kỳ downstream verifier nào)
+        return ("dev", "ui", "fix", "devops"), ("dev", "ui", "fix", "devops"), ("dev", "ui", "fix")
+
+    if to_main or norm_role in ("main", "leader", "coordinator"):
+        to_main = True
+        norm_role = "main"
+    upstream_prefixes, active_blocking_prefixes, unstarted_blocking_prefixes = _compute_role_prefixes(norm_role, to_main)
+
+    resolved_run_id = (run_id or "").strip()
+    resolved_dispatch_id = (dispatch_id or "").strip()
+    resolved_task_id = (task_id or "").strip()
+    resolved_term = (terminal_handle or "").strip()
+
+    tasks_in_run: dict[str, dict] = {}
+    dispatches_in_run: list[dict] = []
+    db_path = _find_orca_orchestration_db()
+    used_sqlite = False
+
+    def _extract_slot_and_branch(wt_id_str: str) -> tuple[str, str, str]:
+        raw = (wt_id_str or "").strip()
+        if not raw:
+            return "", "", ""
+        wt_p = raw.split("::", 1)[-1] if "::" in raw else raw
+        if wt_p.startswith("path:"):
+            wt_p = wt_p[5:]
+        wt_real = os.path.realpath(wt_p) if os.path.isabs(wt_p) else ""
+        br = git_wt_map.get(wt_real, "") if wt_real else ""
+        base_n = os.path.basename((wt_real or wt_p).rstrip("/"))
+        slot = _extract_canonical_slot_name(br) or _extract_canonical_slot_name(base_n) or br or base_n
+        if not br and slot and re.match(r"^[a-z]+-worker(?:-\d+)?$", slot):
+            br = slot
+        return wt_real, slot, br
+
+    if db_path is not None:
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+            conn.row_factory = sqlite3.Row
+            used_sqlite = True
+
+            if not resolved_run_id and resolved_dispatch_id:
+                row = conn.execute(
+                    "SELECT run_id, task_id FROM dispatch_contexts WHERE id = ? LIMIT 1",
+                    (resolved_dispatch_id,),
+                ).fetchone()
+                if row:
+                    resolved_run_id = str(row["run_id"] or "")
+                    if not resolved_task_id:
+                        resolved_task_id = str(row["task_id"] or "")
+
+            if not resolved_run_id and resolved_task_id:
+                row = conn.execute(
+                    "SELECT run_id FROM tasks WHERE id = ? LIMIT 1",
+                    (resolved_task_id,),
+                ).fetchone()
+                if row:
+                    resolved_run_id = str(row["run_id"] or "")
+
+            if not resolved_run_id and resolved_term:
+                row = conn.execute(
+                    """
+                    SELECT dc.run_id, dc.id AS dispatch_id, dc.task_id
+                    FROM worker_dispatches wd
+                    JOIN dispatch_contexts dc ON dc.id = wd.dispatch_id
+                    WHERE wd.agent_terminal_handle = ?
+                    ORDER BY dc.created_at DESC LIMIT 1
+                    """,
+                    (resolved_term,),
+                ).fetchone()
+                if row:
+                    resolved_run_id = str(row["run_id"] or "")
+                    if not resolved_dispatch_id:
+                        resolved_dispatch_id = str(row["dispatch_id"] or "")
+                    if not resolved_task_id:
+                        resolved_task_id = str(row["task_id"] or "")
+
+            if not resolved_run_id and is_in_worker_wt:
+                rows = conn.execute(
+                    """
+                    SELECT dc.run_id, dc.id AS dispatch_id, dc.task_id, dc.status, wd.state, wd.worktree_id
+                    FROM dispatch_contexts dc
+                    JOIN worker_dispatches wd ON wd.dispatch_id = dc.id
+                    ORDER BY dc.created_at DESC LIMIT 80
+                    """
+                ).fetchall()
+                fallback_row = None
+                for r in rows:
+                    wt_real, _, _ = _extract_slot_and_branch(str(r["worktree_id"] or ""))
+                    if wt_real == caller_wt_real:
+                        st = str(r["state"] or "").lower()
+                        dc_st = str(r["status"] or "").lower()
+                        if st in ("starting", "ready", "busy", "waiting") or dc_st == "dispatched":
+                            resolved_run_id = str(r["run_id"] or "")
+                            if not resolved_dispatch_id:
+                                resolved_dispatch_id = str(r["dispatch_id"] or "")
+                            if not resolved_task_id:
+                                resolved_task_id = str(r["task_id"] or "")
+                            break
+                        if fallback_row is None:
+                            fallback_row = r
+                if not resolved_run_id and fallback_row is not None:
+                    resolved_run_id = str(fallback_row["run_id"] or "")
+                    if not resolved_dispatch_id:
+                        resolved_dispatch_id = str(fallback_row["dispatch_id"] or "")
+                    if not resolved_task_id:
+                        resolved_task_id = str(fallback_row["task_id"] or "")
+
+            if not resolved_run_id:
+                # Tìm run gần nhất thuộc về main_root này
+                rows = conn.execute(
+                    """
+                    SELECT dc.run_id, wd.worktree_id, dc.created_at
+                    FROM dispatch_contexts dc
+                    JOIN worker_dispatches wd ON wd.dispatch_id = dc.id
+                    ORDER BY dc.created_at DESC LIMIT 120
+                    """
+                ).fetchall()
+                candidate_runs: list[str] = []
+                for r in rows:
+                    rid = str(r["run_id"] or "")
+                    wt_real, _, _ = _extract_slot_and_branch(str(r["worktree_id"] or ""))
+                    if rid and wt_real and wt_real in git_wt_map and rid not in candidate_runs:
+                        candidate_runs.append(rid)
+                if candidate_runs:
+                    resolved_run_id = candidate_runs[0]
+
+            if resolved_run_id:
+                t_rows = conn.execute(
+                    "SELECT id, task_title, spec, status, deps, created_at FROM tasks WHERE run_id = ? ORDER BY created_at ASC",
+                    (resolved_run_id,),
+                ).fetchall()
+                for tr in t_rows:
+                    tid = str(tr["id"] or "")
+                    t_title = str(tr["task_title"] or "")
+                    t_spec = str(tr["spec"] or "")
+                    t_role = _infer_task_role_prefix(t_title, t_spec)
+                    if tid == resolved_task_id and t_role and not caller_role and not to_main:
+                        norm_role = t_role
+                        upstream_prefixes, active_blocking_prefixes, unstarted_blocking_prefixes = _compute_role_prefixes(norm_role, to_main)
+                    tasks_in_run[tid] = {
+                        "id": tid,
+                        "title": t_title,
+                        "rolePrefix": t_role,
+                        "status": str(tr["status"] or "").lower(),
+                        "createdAt": tr["created_at"],
+                    }
+
+                d_rows = conn.execute(
+                    """
+                    SELECT dc.id AS dispatch_id, dc.task_id, dc.status AS dc_status, dc.created_at, dc.completed_at,
+                           wd.state AS wd_state, wd.worktree_id, wd.agent_terminal_handle
+                    FROM dispatch_contexts dc
+                    LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id
+                    WHERE dc.run_id = ?
+                    ORDER BY dc.created_at ASC
+                    """,
+                    (resolved_run_id,),
+                ).fetchall()
+                for dr in d_rows:
+                    did = str(dr["dispatch_id"] or "")
+                    tid = str(dr["task_id"] or "")
+                    dc_st = str(dr["dc_status"] or "").lower()
+                    wd_st = str(dr["wd_state"] or "").lower()
+                    wt_real, slot, br = _extract_slot_and_branch(str(dr["worktree_id"] or ""))
+                    slot_prefix = ""
+                    m_sp = re.match(r"^([a-z]+)-worker(?:-\d+)?$", slot or br)
+                    if m_sp:
+                        slot_prefix = m_sp.group(1)
+                    if not slot_prefix and tid in tasks_in_run:
+                        slot_prefix = tasks_in_run[tid].get("rolePrefix") or ""
+
+                    is_settled = wd_st in ("succeeded", "failed", "canceled", "blocked") or dc_st in (
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "canceled",
+                    )
+                    is_succeeded = wd_st == "succeeded" or (dc_st == "completed" and wd_st not in ("failed", "canceled", "blocked"))
+                    dispatches_in_run.append({
+                        "dispatchId": did,
+                        "taskId": tid,
+                        "dcStatus": dc_st,
+                        "state": wd_st or dc_st,
+                        "isSettled": is_settled,
+                        "isSucceeded": is_succeeded,
+                        "worktreePath": wt_real,
+                        "slotName": slot,
+                        "branch": br,
+                        "rolePrefix": slot_prefix,
+                        "terminalHandle": str(dr["agent_terminal_handle"] or ""),
+                        "createdAt": dr["created_at"],
+                    })
+            conn.close()
+        except Exception:
+            used_sqlite = False
+
+    if not used_sqlite:
+        # Fallback qua Orca CLI nếu không đọc được SQLite
+        if not resolved_run_id:
+            rc_rl, out_rl, _ = run_orca_json(["orchestration", "run-list", "--json"], cwd=main_root, timeout=6)
+            if rc_rl == 0 and isinstance(out_rl, dict):
+                runs = out_rl.get("runs") if isinstance(out_rl.get("runs"), list) else []
+                if runs and isinstance(runs[0], dict):
+                    resolved_run_id = str(runs[0].get("id") or "")
+        if resolved_run_id:
+            rc_wl, out_wl, _ = run_orca_json(
+                ["orchestration", "worker-list", "--run", resolved_run_id, "--json"],
+                cwd=main_root,
+                timeout=6,
+            )
+            if rc_wl == 0 and isinstance(out_wl, dict):
+                w_list = out_wl.get("workers") if isinstance(out_wl.get("workers"), list) else []
+                for w in w_list:
+                    if not isinstance(w, dict):
+                        continue
+                    did = str(w.get("dispatchId") or w.get("id") or "")
+                    tid = str(w.get("taskId") or "")
+                    st = str(w.get("state") or w.get("status") or "").lower()
+                    wt_real, slot, br = _extract_slot_and_branch(str(w.get("worktreeId") or w.get("worktreePath") or ""))
+                    slot_prefix = ""
+                    m_sp = re.match(r"^([a-z]+)-worker(?:-\d+)?$", slot or br)
+                    if m_sp:
+                        slot_prefix = m_sp.group(1)
+                    is_settled = bool(w.get("isSettled")) or st in ("succeeded", "failed", "canceled", "blocked", "completed")
+                    is_succeeded = st in ("succeeded", "completed")
+                    dispatches_in_run.append({
+                        "dispatchId": did,
+                        "taskId": tid,
+                        "dcStatus": st,
+                        "state": st,
+                        "isSettled": is_settled,
+                        "isSucceeded": is_succeeded,
+                        "worktreePath": wt_real,
+                        "slotName": slot,
+                        "branch": br,
+                        "rolePrefix": slot_prefix,
+                        "terminalHandle": str(w.get("agentTerminalHandle") or ""),
+                    })
+
+    # Phân tích trạng thái upstream trong Run này
+    blocking_active_upstream: list[dict] = []
+    blocking_unstarted_upstream: list[dict] = []
+    blocking_failed_upstream: list[dict] = []
+    upstream_branches: list[str] = []
+    upstream_dispatches: list[dict] = []
+
+    dispatched_task_ids: set[str] = set()
+    succeeded_task_ids: set[str] = set()
+    succeeded_role_prefixes: set[str] = set()
+    latest_dispatch_by_task: dict[str, dict] = {}
+
+    for d in dispatches_in_run:
+        tid = d.get("taskId") or ""
+        if tid:
+            dispatched_task_ids.add(tid)
+            latest_dispatch_by_task[tid] = d
+        if d.get("isSucceeded"):
+            if tid:
+                succeeded_task_ids.add(tid)
+            if d.get("rolePrefix"):
+                succeeded_role_prefixes.add(d["rolePrefix"])
+
+    for d in dispatches_in_run:
+        did = d.get("dispatchId") or ""
+        tid = d.get("taskId") or ""
+        r_pref = d.get("rolePrefix") or ""
+        br = d.get("branch") or ""
+
+        # Bỏ qua chính dispatch/task hoặc nhánh hiện tại của caller
+        if (resolved_dispatch_id and did == resolved_dispatch_id) or (resolved_task_id and tid == resolved_task_id):
+            continue
+        if is_in_worker_wt and caller_branch and br == caller_branch:
+            continue
+
+        if r_pref in active_blocking_prefixes:
+            if not d.get("isSettled"):
+                blocking_active_upstream.append({
+                    "dispatchId": did,
+                    "taskId": tid,
+                    "slot": d.get("slotName") or br,
+                    "branch": br,
+                    "role": r_pref,
+                    "state": d.get("state"),
+                })
+
+        if r_pref in upstream_prefixes and d.get("isSucceeded") and br and br != main_branch:
+            if br not in upstream_branches:
+                upstream_branches.append(br)
+            upstream_dispatches.append({
+                "dispatchId": did,
+                "taskId": tid,
+                "slot": d.get("slotName") or br,
+                "branch": br,
+                "role": r_pref,
+            })
+
+    # Kiểm tra các task upstream trong cùng Run chưa từng được dispatch hoặc bị failed mà chưa có task/dispatch thay thế
+    for tid, t_info in tasks_in_run.items():
+        if resolved_task_id and tid == resolved_task_id:
+            continue
+        t_role = t_info.get("rolePrefix") or ""
+        t_status = t_info.get("status") or ""
+        if tid not in dispatched_task_ids and t_role in unstarted_blocking_prefixes and t_status in ("ready", "pending", "in_progress", "dispatched"):
+            blocking_unstarted_upstream.append({
+                "taskId": tid,
+                "title": t_info.get("title"),
+                "role": t_role,
+                "status": t_status,
+            })
+        elif tid in latest_dispatch_by_task and t_role in active_blocking_prefixes:
+            ld = latest_dispatch_by_task[tid]
+            if ld.get("isSettled") and not ld.get("isSucceeded") and tid not in succeeded_task_ids:
+                # Nếu task đã bị canceled hoặc đã có một task cùng role chạy succeeded sau đó thì không chặn cứng
+                if ld.get("state") not in ("canceled", "cancelled") and t_status not in ("cancelled", "canceled", "completed"):
+                    blocking_failed_upstream.append({
+                        "taskId": tid,
+                        "dispatchId": ld.get("dispatchId"),
+                        "slot": ld.get("slotName") or ld.get("branch"),
+                        "role": t_role,
+                        "state": ld.get("state"),
+                    })
+
+    ready_to_merge = (
+        bool(resolved_run_id)
+        and len(blocking_active_upstream) == 0
+        and len(blocking_unstarted_upstream) == 0
+        and len(blocking_failed_upstream) == 0
+    )
+
+    return {
+        "runId": resolved_run_id,
+        "callerRole": norm_role,
+        "toMain": to_main,
+        "mainRoot": main_root_real,
+        "mainBranch": main_branch,
+        "callerWorktree": caller_wt_real,
+        "callerBranch": caller_branch,
+        "isInWorkerWorktree": is_in_worker_wt,
+        "readyToMerge": ready_to_merge,
+        "upstreamBranches": upstream_branches,
+        "upstreamDispatches": upstream_dispatches,
+        "blockingActiveUpstream": blocking_active_upstream,
+        "blockingUnstartedUpstream": blocking_unstarted_upstream,
+        "blockingFailedUpstream": blocking_failed_upstream,
+    }
+
+
+def cmd_merge_upstream(args: list, caller_dir: Path = None):
+    """
+    CLI: orca-team merge-upstream [--run <RUN_ID>] [--dispatch <CTX_ID>] [--task <TASK_ID>]
+         [--terminal <TERM_ID>] [--role <ROLE>] [--to-main] [--check-only|--list-only] [--json]
+    Đồng bộ (git merge --no-edit) nhánh main và CHỈ các nhánh upstream thuộc ĐÚNG Run hiện tại
+    sau khi đã xác minh 100% upstream worker trong cùng Run đã hoàn tất (succeeded).
+    """
+    target_dir = (caller_dir or Path.cwd()).resolve()
+    run_id = ""
+    dispatch_id = ""
+    task_id = ""
+    terminal_handle = ""
+    role_str = ""
+    to_main = False
+    check_only = False
+    list_only = False
+    as_json = False
+
+    idx = 0
+    while idx < len(args):
+        tok = str(args[idx])
+        if tok in ("-h", "--help", "help"):
+            print(
+                "Sử dụng: orca-team merge-upstream [--role <devops|sec|qa|bench>] [--run <RUN_ID>]\n"
+                "         [--task-id <TASK_ID>] [--dispatch-id <DISPATCH_ID>] [--terminal <HANDLE>]\n"
+                "         [--to-main] [--check-only] [--list-only] [--json]"
+            )
+            return
+        if tok in ("--run", "--run-id") and idx + 1 < len(args):
+            run_id = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--run="):
+            run_id = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--dispatch", "--dispatch-id") and idx + 1 < len(args):
+            dispatch_id = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--dispatch=") or tok.startswith("--dispatch-id="):
+            dispatch_id = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--task", "--task-id") and idx + 1 < len(args):
+            task_id = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--task=") or tok.startswith("--task-id="):
+            task_id = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--terminal", "--from") and idx + 1 < len(args):
+            terminal_handle = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--terminal=") or tok.startswith("--from="):
+            terminal_handle = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--role", "-r") and idx + 1 < len(args):
+            role_str = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--role="):
+            role_str = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok == "--to-main":
+            to_main = True
+            idx += 1
+        elif tok == "--check-only":
+            check_only = True
+            idx += 1
+        elif tok == "--list-only":
+            list_only = True
+            idx += 1
+        elif tok == "--json":
+            as_json = True
+            idx += 1
+        else:
+            idx += 1
+
+    info = resolve_run_upstream_branches(
+        target_dir,
+        run_id=run_id,
+        dispatch_id=dispatch_id,
+        task_id=task_id,
+        terminal_handle=terminal_handle,
+        caller_role=role_str,
+        to_main=to_main,
+    )
+
+    if list_only:
+        if as_json:
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+        else:
+            print(" ".join(info.get("upstreamBranches") or []))
+        return
+
+    if check_only:
+        if as_json:
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+        else:
+            if info.get("readyToMerge"):
+                brs = ", ".join(info.get("upstreamBranches") or []) or "(không có nhánh phụ)"
+                print(f"✅ Run {info.get('runId')}: 100% upstream đã hoàn tất. Các nhánh cần merge: {brs}")
+            else:
+                print(f"⛔ Run {info.get('runId') or '(không xác định)'}: CHƯA SẴN SÀNG MERGE!")
+                for b in info.get("blockingActiveUpstream") or []:
+                    print(f"   • Worker đang làm việc: {b.get('slot')} ({b.get('dispatchId')}, state={b.get('state')})")
+                for u in info.get("blockingUnstartedUpstream") or []:
+                    print(f"   • Task chưa chạy: {u.get('taskId')} ({u.get('role')} - {u.get('title')})")
+                for f_item in info.get("blockingFailedUpstream") or []:
+                    print(f"   • Task bị lỗi chưa khắc phục: {f_item.get('slot')} ({f_item.get('taskId')}, state={f_item.get('state')})")
+        if not info.get("readyToMerge"):
+            sys.exit(1)
+        return
+
+    if not info.get("readyToMerge"):
+        if as_json:
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"⛔ [ORCA RUN-SCOPED MERGE GUARD] Từ chối merge cho Run {info.get('runId') or '(không xác định)'} "
+                f"vì các nhánh upstream trong cùng Run CHƯA HOÀN TẤT 100%:",
+                file=sys.stderr,
+            )
+            for b in info.get("blockingActiveUpstream") or []:
+                print(
+                    f"   • Worker '{b.get('slot')}' ({b.get('dispatchId')}) vẫn đang làm việc (state={b.get('state')}). "
+                    f"Nếu merge lúc này sẽ bị thiếu code của '{b.get('slot')}'!",
+                    file=sys.stderr,
+                )
+            for u in info.get("blockingUnstartedUpstream") or []:
+                print(
+                    f"   • Task upstream '{u.get('taskId')}' ({u.get('role')}: {u.get('title')}) vẫn đang ở trạng thái '{u.get('status')}' (chưa chạy).",
+                    file=sys.stderr,
+                )
+            for f_item in info.get("blockingFailedUpstream") or []:
+                print(
+                    f"   • Worker upstream '{f_item.get('slot')}' ({f_item.get('taskId')}) kết thúc với trạng thái '{f_item.get('state')}'.",
+                    file=sys.stderr,
+                )
+            print(
+                "👉 Hãy chờ toàn bộ dev-worker*/ui-worker* trong cùng Run báo worker-done (succeeded) rồi mới chạy lại `orca-team merge-upstream`.",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+    git_cwd = Path(info["mainRoot"]) if to_main else Path(info["callerWorktree"])
+    merged_branches: list[str] = []
+    main_br = info.get("mainBranch") or "main"
+
+    # Bước 1: Nếu đang đứng trong worktree của worker (không phải --to-main), merge nhánh main trước
+    if not to_main and info.get("callerBranch") != main_br:
+        rc_v = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", main_br],
+            cwd=str(git_cwd),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        if rc_v == 0:
+            proc_m = subprocess.run(
+                ["git", "merge", "--no-edit", main_br],
+                cwd=str(git_cwd),
+                capture_output=True,
+                text=True,
+            )
+            if proc_m.returncode != 0:
+                err_msg = (proc_m.stderr or proc_m.stdout or "").strip()
+                if as_json:
+                    info["mergeError"] = f"Conflict/error merging {main_br}: {err_msg}"
+                    print(json.dumps(info, ensure_ascii=False, indent=2))
+                else:
+                    print(f"❌ Lỗi khi merge nhánh '{main_br}' vào '{info.get('callerBranch')}':\n{err_msg}", file=sys.stderr)
+                sys.exit(proc_m.returncode or 1)
+            merged_branches.append(main_br)
+
+    # Bước 2: Merge CHỈ các nhánh upstream đã succeeded thuộc ĐÚNG Run hiện tại
+    for br in info.get("upstreamBranches") or []:
+        if not br or br == info.get("callerBranch"):
+            continue
+        rc_v = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", br],
+            cwd=str(git_cwd),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        if rc_v != 0:
+            continue
+        proc_b = subprocess.run(
+            ["git", "merge", "--no-edit", br],
+            cwd=str(git_cwd),
+            capture_output=True,
+            text=True,
+        )
+        if proc_b.returncode != 0:
+            err_msg = (proc_b.stderr or proc_b.stdout or "").strip()
+            if as_json:
+                info["mergedBranches"] = merged_branches
+                info["mergeError"] = f"Conflict/error merging {br}: {err_msg}"
+                print(json.dumps(info, ensure_ascii=False, indent=2))
+            else:
+                print(f"❌ Lỗi/xung đột khi merge nhánh '{br}' (thuộc Run {info.get('runId')}):\n{err_msg}", file=sys.stderr)
+            sys.exit(proc_b.returncode or 1)
+        merged_branches.append(br)
+
+    info["mergedBranches"] = merged_branches
+    if as_json:
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+    else:
+        br_summary = ", ".join(merged_branches) if merged_branches else "(không có nhánh mới cần merge)"
+        target_lbl = main_br if to_main else (info.get("callerBranch") or str(git_cwd))
+        print(
+            f"✅ [Run {info.get('runId')}] Đã đồng bộ an toàn các nhánh thuộc Run hiện tại vào '{target_lbl}': {br_summary}"
+        )
 
 
 def cmd_spec(args: list, explicit_root: Path = None):
@@ -2226,40 +3180,43 @@ def sync_gemini_directive(root: Path, config: dict):
     dev_w_args = _fmt_worker_args_py(d_agent, d_model, dev.get("effort"))
     step2_lines = [
         "### BƯỚC 2: PARALLEL FAN-OUT & AUTO-SCALE WORKTREE SLOTS (TÁI SỬ DỤNG KHI RẢNH — TỰ ĐỘNG ĐẺ THÊM KHI BẬN)",
-        f'- 🔴 **QUY TẮC ELASTIC WORKTREE SLOTS (`$(orca-team worktree-arg <role>)` — TÁI SỬ DỤNG KHI RẢNH, TỰ ĐỘNG ĐẺ THÊM SLOT MỚI KHI BẬN):** Mọi lệnh `worker-start` **BẮT BUỘC** dùng `$(orca-team worktree-arg <role>)` để cấp phát Worktree Slot thông minh trên toàn cục cho các vai trò ({", ".join(active_wt_names)}): (1) Khi worktree slot hiện có đang **rảnh (`done` / `settled` / `released`)**, lệnh tự động trả về `--worktree path:<abs_path>` để Orca **tái sử dụng và gom nhóm Terminal Tab mới ngay bên trong worktree đó** (tránh đẻ rác worktree); (2) Khi worktree slot hiện có đang **bận (`working` / `live` ở bất kỳ Leader/Run nào hoặc vừa được cấp phát trong cùng đợt Fan-out)**, lệnh tự động nhảy sang slot kế tiếp (`<role>-worker-2`, `<role>-worker-3`...) — tái sử dụng nếu đã có trên đĩa và đang rảnh, hoặc tự động tạo mới (`--worktree new-child --name <role>-worker-<N>`) để các agent chạy song song 100% mà không bao giờ giẫm chân lên nhánh/file hay xung đột `git index.lock`!',
+        f'- 🔴 **QUY TẮC ELASTIC WORKTREE SLOTS & QUYỀN SỞ HỮU THEO RUN (`$(orca-team worktree-arg <role> --task <TASK_ID>)`):** Mọi lệnh `worker-start` **BẮT BUỘC** dùng `$(orca-team worktree-arg <role> --task <TASK_ID>)` để cấp phát Worktree Slot thông minh cho các vai trò ({", ".join(active_wt_names)}): (1) **Khóa Chéo Giữa Các Leader (`WORKING` & `RETAINED`):** Khi một slot đang làm việc (`working`) HOẶC đã xong nhưng vẫn đang được giữ (`retained` — chưa merge vào `main` ở Bước 4) bởi `Run A`, slot đó bị **KHÓA đối với mọi Leader khác (`Run B`)**, buộc `Run B` tự động nhảy sang `<role>-worker-2`, `<role>-worker-3`... để không bao giờ ghi đè lên nhánh chưa merge của `Run A`; (2) **Tái Sử Dụng Nội Bộ Cùng Run (Same-Run Affinity):** Trong cùng một `Run A`, khi giao task fix lỗi / re-test vòng 2, truyền `--task <TASK_ID>` giúp `Run A` tự động tái sử dụng lại chính slot của mình (giữ nguyên các commit vòng 1); (3) **Nhả Slot & Tự Làm Sạch Khi Sang Run Mới (`RELEASED`):** Sau khi hoàn tất Bước 4 (`orca-team merge-upstream --to-main` + `orca-team release-workers`), slot chuyển sang `RELEASED` để các Leader sau tái sử dụng và tự động đồng bộ sạch về `main`!',
+        '- 🔴 **PHÂN ĐỢT THEO SÓNG (WAVE ORDERING — CẤM CHẠY QA/SEC/BENCH KHI DEV CHƯA XONG 100%) & CÔ LẬP MERGE THEO RUN (`orca-team merge-upstream`):**\n'
+        '  1. **Wave 1 (Khảo sát & Lập trình):** Khởi chạy `critic-worker`, `re-worker`, `dev-worker*`, `ui-worker*`. **CẤM TUYỆT ĐỐI** gọi `worker-start` cho `qa-worker`, `sec-worker`, `bench-worker`, `devops-worker` cùng lúc với `dev-worker*` hoặc khi bất kỳ `dev-worker*`/`ui-worker*` nào trong cùng Run vẫn đang làm việc (`working`)!\n'
+        '  2. **Wave 2 (Triển khai & Kiểm thử Nghiệm thu):** Chỉ sau khi **100% `dev-worker*` / `ui-worker*` thuộc cùng Run của Leader này đã báo `worker-done` (`succeeded`)**, Leader mới khởi chạy `devops-worker`, `sec-worker`, `qa-worker`, `bench-worker`. Bên trong mỗi worker này, lệnh `orca-team merge-upstream --role <role> --task-id <task_id> --dispatch-id <dispatch_id>` tự động kiểm tra mọi nhánh Dev trong cùng Run đã hoàn tất 100% và **chỉ merge duy nhất các nhánh thuộc Run của Leader đó** (tuyệt đối không merge nhầm nhánh của Leader khác đang chạy song song!).',
         '- ⚠️ **CHỜ TẤT CẢ LỆNH `worker-start` TRẢ VỀ `dispatchId` TRƯỚC KHI SANG BƯỚC 3 (CHỐNG RACE CONDITION):** Mỗi lệnh `orca orchestration worker-start` mất khoảng 15–40 giây để khởi tạo worktree & PTY (có thể chuyển sang background `task-XX`). Leader **BẮT BUỘC** chờ toàn bộ các lệnh `worker-start` của đợt Fan-out hoàn tất và trả về `dispatchId` rồi mới gọi `orca orchestration check --wait` ở Bước 3:',
         "  ```bash",
         "  # Dev Worker (gọi cho từng DEV_TASK_ID độc lập — tự động dùng dev-worker khi rảnh và tự đẻ dev-worker-2, dev-worker-3... khi chạy song song):",
-        f"  orca orchestration worker-start --task <DEV_TASK_1_ID> $(orca-team worktree-arg dev) {dev_w_args} --json",
+        f"  orca orchestration worker-start --task <DEV_TASK_1_ID> $(orca-team worktree-arg dev --task <DEV_TASK_1_ID>) {dev_w_args} --json",
         f"  # (Khi có DEV_TASK_2_ID song song, gọi tiếp lệnh dưới — sẽ tự động nhận dev-worker-2):",
-        f"  # orca orchestration worker-start --task <DEV_TASK_2_ID> $(orca-team worktree-arg dev) {dev_w_args} --json",
+        f"  # orca orchestration worker-start --task <DEV_TASK_2_ID> $(orca-team worktree-arg dev --task <DEV_TASK_2_ID>) {dev_w_args} --json",
     ]
     if devops_enabled:
         do_w_args = _fmt_worker_args_py(devops.get("agent") or "antigravity", devops.get("model"), devops.get("effort"))
-        step2_lines.append("  # DevOps Worker (khi có Task DevOps - Docker/K8s/DB/Infra):")
-        step2_lines.append(f"  orca orchestration worker-start --task <DEVOPS_TASK_ID> $(orca-team worktree-arg devops) {do_w_args} --json")
+        step2_lines.append("  # DevOps Worker (Wave 2 — chỉ gọi sau khi 100% Dev/UI trong cùng Run đã succeeded):")
+        step2_lines.append(f"  orca orchestration worker-start --task <DEVOPS_TASK_ID> $(orca-team worktree-arg devops --task <DEVOPS_TASK_ID>) {do_w_args} --json")
     if critic_enabled:
         cr_w_args = _fmt_worker_args_py(critic_spec.get("agent") or "antigravity", critic_spec.get("model"), critic_spec.get("effort"))
         step2_lines.append("  # Research & Critic Worker (khi cần khảo sát sâu, phản biện kế hoạch Leader & thống nhất root-cause):")
-        step2_lines.append(f"  orca orchestration worker-start --task <CRITIC_TASK_ID> $(orca-team worktree-arg critic) {cr_w_args} --json")
+        step2_lines.append(f"  orca orchestration worker-start --task <CRITIC_TASK_ID> $(orca-team worktree-arg critic --task <CRITIC_TASK_ID>) {cr_w_args} --json")
     sec_w_args = _fmt_worker_args_py(s_agent, s_model, sec.get("effort"))
-    step2_lines.append("  # Security Worker (khi có Task Security Audit):")
-    step2_lines.append(f"  orca orchestration worker-start --task <SEC_TASK_ID> $(orca-team worktree-arg sec) {sec_w_args} --json")
+    step2_lines.append("  # Security Worker (Wave 2 — chỉ gọi sau khi 100% Dev/UI trong cùng Run đã succeeded):")
+    step2_lines.append(f"  orca orchestration worker-start --task <SEC_TASK_ID> $(orca-team worktree-arg sec --task <SEC_TASK_ID>) {sec_w_args} --json")
     qa_w_args = _fmt_worker_args_py(q_agent, q_model, qa.get("effort"))
-    step2_lines.append("  # QA Worker (Test nghiệm thu):")
-    step2_lines.append(f"  orca orchestration worker-start --task <QA_TASK_ID> $(orca-team worktree-arg qa) {qa_w_args} --json")
+    step2_lines.append("  # QA Worker (Wave 2 — chỉ gọi sau khi 100% Dev/UI/DevOps trong cùng Run đã succeeded):")
+    step2_lines.append(f"  orca orchestration worker-start --task <QA_TASK_ID> $(orca-team worktree-arg qa --task <QA_TASK_ID>) {qa_w_args} --json")
     if bench_enabled:
         b_w_args = _fmt_worker_args_py(bench.get("agent") or "antigravity", bench.get("model"), bench.get("effort"))
-        step2_lines.append("  # Benchmark Worker (khi có Task Benchmark / Stress Test / Tối ưu hiệu năng):")
-        step2_lines.append(f"  orca orchestration worker-start --task <BENCH_TASK_ID> $(orca-team worktree-arg bench) {b_w_args} --json")
+        step2_lines.append("  # Benchmark Worker (Wave 2 — chỉ gọi sau khi 100% Dev/UI/DevOps trong cùng Run đã succeeded):")
+        step2_lines.append(f"  orca orchestration worker-start --task <BENCH_TASK_ID> $(orca-team worktree-arg bench --task <BENCH_TASK_ID>) {b_w_args} --json")
     if re_enabled:
         r_w_args = _fmt_worker_args_py(re_spec.get("agent") or "antigravity", re_spec.get("model"), re_spec.get("effort"))
         step2_lines.append("  # Reverse Engineering Worker (khi có Task Dịch ngược Binary/Package/ASAR/Protocol với REA):")
-        step2_lines.append(f"  orca orchestration worker-start --task <RE_TASK_ID> $(orca-team worktree-arg re) {r_w_args} --json")
+        step2_lines.append(f"  orca orchestration worker-start --task <RE_TASK_ID> $(orca-team worktree-arg re --task <RE_TASK_ID>) {r_w_args} --json")
     if ui_enabled:
         u_w_args = _fmt_worker_args_py(ui.get("agent") or "antigravity", ui.get("model"), ui.get("effort"))
         step2_lines.append("  # UI Worker (khi có Task Frontend/UI):")
-        step2_lines.append(f"  orca orchestration worker-start --task <UI_TASK_ID> $(orca-team worktree-arg ui) {u_w_args} --json")
+        step2_lines.append(f"  orca orchestration worker-start --task <UI_TASK_ID> $(orca-team worktree-arg ui --task <UI_TASK_ID>) {u_w_args} --json")
     step2_lines += [
         "  ```",
         "  *(On-demand Git: Review PR dùng `orca-review-pr <PR_NUM>` | Sửa Issue dùng `orca-hotfix <ISSUE_ID>`)*\n\n",
@@ -2282,7 +3239,7 @@ def sync_gemini_directive(root: Path, config: dict):
     zt4_ro_roles = "/".join([r for r, en in [("Critic", critic_enabled), ("QA", True), ("Bench", bench_enabled), ("RE", re_enabled)] if en])
     self_heal_fixers = "/".join([w for w, en in [("`dev-worker*`", True), ("`devops-worker`", devops_enabled)] if en])
     self_heal_verifiers = "/".join([w for w, en in [("`qa-worker`", True), ("`sec-worker`", True), ("`bench-worker`", bench_enabled)] if en])
-    dev_branches_desc = "tất cả các nhánh Dev (`dev-worker*`)"
+    dev_branches_desc = "tất cả các nhánh Dev thuộc cùng Run (`orca-team merge-upstream`)"
 
     step3_full = (
         '### BƯỚC 3: REACTIVE WAIT, CƠ CHẾ PHẢN BIỆN ĐỒNG THUẬN (ANTI-AUTOCRACY) & KIỂM CHỨNG ZERO-TRUST\n'
@@ -2305,7 +3262,7 @@ def sync_gemini_directive(root: Path, config: dict):
         )
         + '  - **Nhận `question` (từ `ask`):** Coordinator phản hồi qua `orca orchestration reply --id <MSG_ID> --body "[Quyết định của Chief Architect]" --json`.\n'
         f'  - **Nhận `handoff` (từ {handoff_roles}):** Coordinator kiểm duyệt bằng chứng ({handoff_ev}) rồi quyết định bàn giao cho role kế tiếp.\n'
-        f'  - **Nhận `escalation` (từ {esc_roles}):** Coordinator phân xử dựa trên bằng chứng{" (gặp trigger Anti-Autocracy ➔ qua `critic-worker` trước)" if critic_enabled else ""} và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` với `$(orca-team worktree-arg <role>)`, rồi điều phối {reverify_w} kiểm toán lại.\n'
+        f'  - **Nhận `escalation` (từ {esc_roles}):** Coordinator phân xử dựa trên bằng chứng{" (gặp trigger Anti-Autocracy ➔ qua `critic-worker` trước)" if critic_enabled else ""} và điều phối bản vá: nếu worker cần sửa **đang chạy (`live`)** thì gửi `orca orchestration send --to dispatch:<LIVE_DISPATCH_ID> --type dispatch --subject "Coordinator Directive" --body "..." --json`; nếu worker **đã kết thúc (`settled` / đã `worker_done`)** thì tạo Task fix mới (`task-create`) + `worker-start` với `$(orca-team worktree-arg <role> --task <TASK_ID>)`, rồi điều phối {reverify_w} kiểm toán lại.\n'
         '- **Nghiệm thu Zero-Trust:** Đọc trực tiếp nội dung báo cáo trong trường `messages` trả về từ `orca orchestration check --wait --json` kết hợp đối chiếu độc lập bằng `git log -n 1 --stat <ten-worktree>` (chỉ gọi `orca orchestration worker-read --dispatch <DISPATCH_ID> --json` khi worker bị treo/timeout không gửi tin nhắn; **CẤM** gọi `orca orchestration inbox --json` vì lệnh này tải lại toàn bộ lịch sử tin nhắn cũ gây phình context). '
         '**BÁC BỎ NGAY** nếu vi phạm 1 trong 4 điều:\n'
         '  1. **Báo sạch giả (Fake Clean):** Báo `succeeded` nhưng thiếu `EXIT_CODE=0`, thiếu `git commit` (Commit Hash), '
@@ -2326,8 +3283,8 @@ def sync_gemini_directive(root: Path, config: dict):
         f'{", `RE_VERDICT: BLOCKED_BY_UNKNOWN`" if re_enabled else ""}'
         f'{", hoặc pod `CrashLoopBackOff`/`ErrImagePull`" if devops_enabled else ""}.\n'
         f'  4. **Vượt rào (Boundary Crossing):** {zt4_ro_roles} tự sửa code app, Dev xóa/skip test cũ{", DevOps sửa business logic" if devops_enabled else ""}, hoặc Worker tự ý đổi kiến trúc không qua Coordinator.\n'
-        f'- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao {self_heal_fixers} sửa qua `$(orca-team worktree-arg <role>)` và bắt buộc chạy lại {self_heal_verifiers} xác nhận đến khi PASS 100%.\n'
-        '- ⚠️ **GIỮ TERMINAL WORKER SỐNG Ở BƯỚC 3 BẰNG `worker-retain` (KHÔNG GỌI `worker-release` Ở BƯỚC 3):** Khi một worker đã hoàn tất (`worker_done`), gọi `orca orchestration worker-retain --dispatch <DISPATCH_ID> --json` để thỏa mãn Completion Accounting của Orca đồng thời giữ nguyên terminal worker trên Orca Sidebar (hiển thị **chấm xanh `🟢`**, **icon Agent `✓`** và **chuông thông báo `🔔`** cho tới Bước 4)!\n\n'
+        f'- **Tự chữa lỗi:** Nếu bị bác bỏ hoặc fail, **cấm tự sửa ở root!** Tạo Task fix mới kèm log lỗi/bottleneck, giao {self_heal_fixers} sửa qua `$(orca-team worktree-arg <role> --task <TASK_ID>)` và bắt buộc chạy lại {self_heal_verifiers} xác nhận đến khi PASS 100%.\n'
+        '- ⚠️ **GIỮ TERMINAL WORKER SỐNG Ở BƯỚC 3 BẰNG `worker-retain` (KHÔNG GỌI `worker-release` Ở BƯỚC 3):** Khi một worker đã hoàn tất (`worker_done`), gọi `orca orchestration worker-retain --dispatch <DISPATCH_ID> --json` để thỏa mãn Completion Accounting của Orca đồng thời giữ nguyên quyền sở hữu slot của Run (chặn Leader khác ghi đè trước khi merge vào `main`) và giữ nguyên terminal worker trên Orca Sidebar (hiển thị **chấm xanh `🟢`**, **icon Agent `✓`** và **chuông thông báo `🔔`** cho tới Bước 4)!\n\n'
     )
     content = re.sub(
         r"### BƯỚC 3:[^\n]*\n[\s\S]*?(?=### BƯỚC 4:)",
@@ -2385,7 +3342,7 @@ def sync_gemini_directive(root: Path, config: dict):
         '     orca orchestration gate-resolve --id <GATE_ID> --resolution "yes"\n'
         '     orca orchestration task-update --id <FINAL_TASK_ID> --status completed\n'
         '     ```\n'
-        f'  2. Thực hiện `git merge` đầy đủ tất cả các nhánh worker có thay đổi ({merge_branches_hint}) vào nhánh chính, sau đó chạy `orca-team release-workers --run "$RUN_ID"` (hoặc `orca orchestration worker-release --dispatch <DISPATCH_ID> --json`) để giải phóng toàn bộ retention qua các đợt (waves){goal_final_hint}\n'
+        f'  2. Đồng bộ an toàn **CHỈ các nhánh worker thuộc Run hiện tại (`$RUN_ID`)** ({merge_branches_hint}) vào nhánh chính bằng `orca-team merge-upstream --to-main --run "$RUN_ID"` (tuyệt đối không merge nhầm nhánh từ Run của Leader khác!), sau đó chạy `orca-team release-workers --run "$RUN_ID"` (hoặc `orca orchestration worker-release --dispatch <DISPATCH_ID> --json`) để giải phóng toàn bộ retention qua các đợt (waves){goal_final_hint}\n'
     )
     content = re.sub(
         r"### BƯỚC 4:[^\n]*\n[\s\S]*$",
@@ -6679,6 +7636,7 @@ KNOWN_SUBCOMMANDS = {
     "spec", "role-spec", "prompt",
     "worktree-arg", "wt-arg", "slot-arg",
     "release-workers", "cleanup-tabs", "gc-workers",
+    "merge-upstream", "merge-run", "run-branches",
     "-h", "--help", "help",
 }
 
@@ -6745,6 +7703,11 @@ def main():
         if cmd0 in ("release-workers", "cleanup-tabs", "gc-workers"):
             root = explicit_root if explicit_root is not None else find_project_root()
             cmd_release_workers(root, args[1:])
+            return
+        if cmd0 in ("merge-upstream", "merge-run", "run-branches"):
+            caller_dir = explicit_root if explicit_root is not None else Path.cwd().resolve()
+            sub_args = (["--list-only"] + args[1:]) if cmd0 == "run-branches" else args[1:]
+            cmd_merge_upstream(sub_args, caller_dir=caller_dir)
             return
         if cmd0 in ("models", "list-models", "discover-models"):
             cmd_models(args[1:])

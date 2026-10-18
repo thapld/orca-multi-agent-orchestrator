@@ -471,9 +471,9 @@ def _strip_single_quotes_and_quoted_heredocs(cmd: str) -> str:
 
 
 def _is_safe_orca_spec_inner(inner: str) -> bool:
-    """Verify the interior of $(orca-team spec|worktree-arg ...) has no unescaped backticks, nested $(), or command chaining."""
+    """Verify the interior of $(orca-team spec|worktree-arg|merge-upstream ...) has no unescaped backticks, nested $(), or command chaining."""
     if not re.match(
-        r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|worktree-arg|wt-arg|slot-arg)\b",
+        r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|worktree-arg|wt-arg|slot-arg|merge-upstream|merge-run|run-branches|release-workers)\b",
         inner,
     ):
         return False
@@ -1985,17 +1985,98 @@ def _split_top_level_shell_segments(s: str) -> list[str]:
     return segs
 
 
+_ROLE_TOKEN_MAP = {
+    "dev": "dev",
+    "developer": "dev",
+    "fullstack": "dev",
+    "backend": "dev",
+    "devops": "devops",
+    "devopsspecialist": "devops",
+    "sre": "devops",
+    "infra": "devops",
+    "sec": "sec",
+    "security": "sec",
+    "appsec": "sec",
+    "secops": "sec",
+    "qa": "qa",
+    "tester": "qa",
+    "test": "qa",
+    "bench": "bench",
+    "benchspecialist": "bench",
+    "benchmark": "bench",
+    "perf": "bench",
+    "ui": "ui",
+    "uispecialist": "ui",
+    "frontend": "ui",
+    "ux": "ui",
+    "re": "re",
+    "respecialist": "re",
+    "reverse": "re",
+    "critic": "critic",
+    "criticspecialist": "critic",
+    "architect": "critic",
+    "doc": "doc",
+    "docs": "doc",
+    "fix": "fix",
+    "hotfix": "fix",
+    "issue": "fix",
+    "pr": "pr",
+}
+
+
+def _normalize_role_token(raw_role: str) -> str:
+    s = (raw_role or "").strip().strip("\"'").lower()
+    if not s:
+        return ""
+    s = re.sub(r"-worker(?:-\d+)?$", "", s)
+    return _ROLE_TOKEN_MAP.get(s, s)
+
+
+def _extract_role_from_worktree_arg_subcmd(arg_tail: str) -> str:
+    tokens = re.findall(r"(?:\"[^\"]*\"|'[^']*'|[^\s\"']+)", arg_tail or "")
+    idx = 0
+    while idx < len(tokens):
+        tok = tokens[idx].strip("\"'")
+        if tok in ("--path", "-C", "--check-slot", "--run", "--run-id", "--task", "--task-id", "-t"):
+            idx += 2
+            continue
+        if tok.startswith("-"):
+            idx += 1
+            continue
+        return _normalize_role_token(tok)
+    return ""
+
+
+def _is_wildcard_dev_branch_merge_risk(cmd: str) -> bool:
+    """
+    Block legacy wildcard `for _br in $(git for-each-ref ... 'refs/heads/dev-worker*')` loops
+    coupled with `git merge` so concurrent Leaders/Workers never merge branches from other Runs.
+    """
+    if "for-each-ref" not in cmd or "merge" not in cmd:
+        return False
+    sanitized = _strip_quoted_heredocs(_strip_non_exec_prose_flags(cmd))
+    if "for-each-ref" not in sanitized or "merge" not in sanitized:
+        return False
+    return bool(
+        re.search(r"\bgit\s+for-each-ref\b[^\n]*refs/heads/(?:dev|ui|devops|fix)-worker\*", sanitized)
+        and re.search(r"\bgit\s+merge\b", sanitized)
+    )
+
+
 def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict) -> str:
     """
-    When a Leader runs `orca orchestration worker-start` without `$(orca-team worktree-arg <role>)`:
-    - Immediately block deprecated `$(git worktree list | sed ...)` one-liners (which bypass elastic scaling
-      and caused multi-leader collisions on `dev-worker` / `dev-worker-2`).
-    - Inspect each top-level `worker-start` command segment independently.
-    - Block duplicate hardcoded slots in the same compound command.
-    - Block `--worktree new-child --name <slot>` if `<slot>` already exists on disk.
-    - If a hardcoded target worker slot is BUSY (`working`/`live` or reserved), block and instruct
-      the Leader to use `$(orca-team worktree-arg <role>)` so it auto-scales to `<role>-worker-2`.
-    - Only after all segments pass validation, reserve idle slots and clean lingering `done` tabs.
+    When a Leader runs `orca orchestration worker-start`:
+    1. Enforce Wave-Order Gate:
+       - Block simultaneous Wave 1 (`dev`/`ui`/`fix`) + Wave 2 (`devops`/`sec`/`qa`/`bench`) in the same command.
+       - Block simultaneous `devops` + `qa`/`bench` in the same command.
+       - When starting `devops`/`sec`/`qa`/`bench` with `--task <TASK_ID>` (or `--run <RUN_ID>`), verify via
+         `orca-team merge-upstream --check-only` that no upstream worker in the same Run is still working,
+         unstarted (`ready`), or failed.
+    2. Enforce Run-Scoped Elastic Worktree Guard:
+       - Immediately block deprecated `$(git worktree list | sed ...)` one-liners.
+       - Block duplicate hardcoded slots in the same compound command.
+       - Block `--worktree new-child --name <slot>` if `<slot>` already exists on disk.
+       - Block if a hardcoded target worker slot is BUSY (`working`/`live`, reserved, or `RETAINED` by another Run).
     """
     if "worker-start" not in cmd:
         return ""
@@ -2006,7 +2087,15 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
     orca_team_bin, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
     segments = _split_top_level_shell_segments(sanitized)
 
-    candidates: list[tuple[str, bool]] = []
+    var_task_map: dict[str, str] = {}
+    for m_var in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)=['\"]?(task_[A-Za-z0-9_-]{6,64})['\"]?", sanitized):
+        var_task_map[m_var.group(1)] = m_var.group(2)
+
+    m_global_run = re.search(r"\b(run_[A-Za-z0-9_-]{6,64})\b", sanitized)
+    global_run_id = m_global_run.group(1) if m_global_run else ""
+
+    candidates: list[tuple[str, bool, str, str]] = []
+    started_roles_in_cmd: list[tuple[str, str, str]] = []
     seen_slots_in_cmd: set[str] = set()
 
     for seg in segments:
@@ -2016,8 +2105,26 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
         ):
             continue
 
-        # 1. If this segment uses `orca-team worktree-arg`, it is safe and dynamically scaled
-        if re.search(r"\borca-team\b[^\n;|&]*\b(?:worktree-arg|wt-arg|slot-arg)\b", seg):
+        # Extract --task <TASK_ID> and --run <RUN_ID> if present in segment
+        seg_task_id = ""
+        m_task = re.search(r"--task(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|([^\s;|&\"']+))", seg)
+        if m_task:
+            raw_tid = (m_task.group(1) or m_task.group(2) or m_task.group(3) or "").strip()
+            if raw_tid.startswith("$"):
+                v_name = raw_tid.lstrip("$").strip("{}")
+                raw_tid = var_task_map.get(v_name, "")
+            if re.match(r"^task_[A-Za-z0-9_-]{6,64}$", raw_tid):
+                seg_task_id = raw_tid
+
+        m_seg_run = re.search(r"\b(run_[A-Za-z0-9_-]{6,64})\b", seg)
+        seg_run_id = m_seg_run.group(1) if m_seg_run else global_run_id
+
+        # 1. If this segment uses `orca-team worktree-arg`, record its role for Wave-Order checking, then skip slot collision check
+        m_wt_sub = re.search(r"\borca-team\b[^\n;|&]*\b(?:worktree-arg|wt-arg|slot-arg)\b([^\n;|&)]*)", seg)
+        if m_wt_sub:
+            sub_role = _extract_role_from_worktree_arg_subcmd(m_wt_sub.group(1))
+            if sub_role:
+                started_roles_in_cmd.append((sub_role, seg_task_id, seg_run_id))
             continue
 
         # 2. Block deprecated `$(git worktree list | sed ...)` pattern immediately
@@ -2030,11 +2137,17 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
             legacy_slot = m_legacy.group(1).lower() if m_legacy else "dev-worker"
             role_prefix = _role_prefix_from_slot(legacy_slot)
             next_slot = f"{role_prefix}-worker-2" if "-worker" in legacy_slot else f"{legacy_slot}-2"
-            next_args = f"$(orca-team worktree-arg {role_prefix})"
+            task_flag_hint = f" --task {seg_task_id}" if seg_task_id else " --task <TASK_ID>"
+            next_args = f"$(orca-team worktree-arg {role_prefix}{task_flag_hint})"
             if orca_team_bin:
                 try:
+                    cmd_peek = [sys.executable, orca_team_bin, "--path", cwd, "worktree-arg", role_prefix, "--no-reserve", "--json"]
+                    if seg_task_id:
+                        cmd_peek.extend(["--task", seg_task_id])
+                    if seg_run_id:
+                        cmd_peek.extend(["--run", seg_run_id])
                     proc = subprocess.run(
-                        [sys.executable, orca_team_bin, "--path", cwd, "worktree-arg", role_prefix, "--no-reserve", "--json"],
+                        cmd_peek,
                         capture_output=True,
                         text=True,
                         timeout=2.5,
@@ -2048,8 +2161,8 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
                     pass
             return (
                 f"[ORCA ELASTIC WORKTREE GUARD] Cú pháp cũ '$(git worktree list | sed ...)' cho '{legacy_slot}' đã bị CẤM "
-                f"vì không kiểm tra được worktree đang bận giữa nhiều Leader (gây ghi đè worktree)! "
-                f"Cách sửa bắt buộc: Thay toàn bộ cụm '$(git worktree list ...)' bằng $({f'orca-team worktree-arg {role_prefix}'}) "
+                f"vì không kiểm tra được worktree đang bận hoặc đang giữ bởi Run khác (gây ghi đè worktree)! "
+                f"Cách sửa bắt buộc: Thay toàn bộ cụm '$(git worktree list ...)' bằng $(orca-team worktree-arg {role_prefix}{task_flag_hint}) "
                 f"(slot rảnh hiện tại: '{next_slot}' -> {next_args})."
             )
 
@@ -2091,23 +2204,109 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
         if not seg_slot:
             continue
 
+        seg_role_prefix = _role_prefix_from_slot(seg_slot)
+        started_roles_in_cmd.append((seg_role_prefix, seg_task_id, seg_run_id))
+
         if seg_slot in seen_slots_in_cmd:
-            role_prefix = _role_prefix_from_slot(seg_slot)
             return (
                 f"[ORCA ELASTIC WORKTREE GUARD] Phát hiện 2 lệnh worker-start trong cùng một cụm lệnh cùng trỏ vào worktree '{seg_slot}'! "
                 f"CẤM chạy 2 worker song song trên cùng 1 worktree. "
-                f"Cách sửa: Dùng $(orca-team worktree-arg {role_prefix}) cho mỗi lệnh worker-start để tự động tách sang '{role_prefix}-worker-2'."
+                f"Cách sửa: Dùng $(orca-team worktree-arg {seg_role_prefix} --task <TASK_ID>) cho mỗi lệnh worker-start để tự động tách sang '{seg_role_prefix}-worker-2'."
             )
         seen_slots_in_cmd.add(seg_slot)
-        candidates.append((seg_slot, is_new_child))
+        candidates.append((seg_slot, is_new_child, seg_task_id, seg_run_id))
+
+    # Wave-Order Check 1: Prevent starting Wave 1 (dev/ui/fix) and Wave 2 (devops/sec/qa/bench) simultaneously in one command
+    if len(started_roles_in_cmd) > 1:
+        w1_roles = sorted({r for r, _, _ in started_roles_in_cmd if r in ("dev", "ui", "fix")})
+        w2_roles = sorted({r for r, _, _ in started_roles_in_cmd if r in ("devops", "sec", "qa", "bench")})
+        if w1_roles and w2_roles:
+            return (
+                f"[ORCA WAVE-ORDER GUARD] Phát hiện lệnh khởi chạy đồng thời Worker viết code ({', '.join(w1_roles)}) "
+                f"và Worker kiểm thử/triển khai ({', '.join(w2_roles)}) trong cùng một đợt! "
+                f"CẤM chạy song song Wave 1 và Wave 2 vì khi {w1_roles[0]}-worker chưa làm xong, {w2_roles[0]}-worker sẽ merge thiếu code! "
+                f"Cách sửa: Chỉ khởi chạy các Worker Wave 1 ({', '.join(w1_roles)}) trước, chờ 'orca orchestration check --wait' báo hoàn tất, "
+                f"sau đó mới khởi chạy Wave 2 ({', '.join(w2_roles)})."
+            )
+        if "devops" in w2_roles and ("qa" in w2_roles or "bench" in w2_roles):
+            verifiers = [r for r in w2_roles if r in ("qa", "bench")]
+            return (
+                f"[ORCA WAVE-ORDER GUARD] Phát hiện lệnh khởi chạy đồng thời 'devops' và '{'/'.join(verifiers)}' trong cùng một đợt! "
+                f"Khi Run có devops-worker, bạn phải chờ devops-worker dựng xong hạ tầng/container và commit xong rồi mới khởi chạy {'/'.join(verifiers)}-worker."
+            )
+
+    # Wave-Order Check 2: Verify in orchestration.db that no upstream worker in the same Run is still working/unstarted/failed
+    if orca_team_bin:
+        for seg_role, seg_tid, seg_rid in started_roles_in_cmd:
+            if seg_role not in ("devops", "sec", "qa", "bench"):
+                continue
+            if not seg_tid and not seg_rid:
+                continue
+            try:
+                cmd_wave = [
+                    sys.executable,
+                    orca_team_bin,
+                    "--path",
+                    cwd,
+                    "merge-upstream",
+                    "--check-only",
+                    "--role",
+                    seg_role,
+                    "--json",
+                ]
+                if seg_tid:
+                    cmd_wave.extend(["--task", seg_tid])
+                if seg_rid:
+                    cmd_wave.extend(["--run", seg_rid])
+                proc_w = subprocess.run(
+                    cmd_wave,
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                )
+                if proc_w.returncode == 0 and proc_w.stdout.strip():
+                    w_info = json.loads(proc_w.stdout)
+                    if isinstance(w_info, dict) and w_info.get("runId") and w_info.get("readyToMerge") is False:
+                        r_id_str = w_info.get("runId")
+                        act_list = w_info.get("blockingActiveUpstream") or w_info.get("activeUpstreamWorkers") or []
+                        unst_list = w_info.get("blockingUnstartedUpstream") or w_info.get("unstartedUpstreamTasks") or []
+                        fail_list = w_info.get("blockingFailedUpstream") or w_info.get("failedUpstreamDispatches") or []
+                        reasons: list[str] = []
+                        if act_list:
+                            act_desc = ", ".join(
+                                f"{a.get('slot') or a.get('role') or a.get('rolePrefix')} ({a.get('taskId')}: {a.get('state')})"
+                                for a in act_list
+                            )
+                            reasons.append(f"Worker phía trước đang chạy dở: [{act_desc}]")
+                        if unst_list:
+                            unst_desc = ", ".join(
+                                f"{u.get('role') or u.get('rolePrefix')}-worker ({u.get('taskId')}: chưa worker-start)"
+                                for u in unst_list
+                            )
+                            reasons.append(f"Task phía trước đã tạo nhưng chưa khởi chạy: [{unst_desc}]")
+                        if fail_list:
+                            fail_desc = ", ".join(
+                                f"{f.get('slot') or f.get('role') or f.get('rolePrefix')} ({f.get('taskId')}: {f.get('state') or f.get('status')})"
+                                for f in fail_list
+                            )
+                            reasons.append(f"Worker phía trước bị lỗi chưa xử lý: [{fail_desc}]")
+                        reason_joined = "; ".join(reasons) or "upstream chưa hoàn tất"
+                        return (
+                            f"[ORCA WAVE-ORDER GUARD] CẤM khởi chạy '{seg_role}-worker' trong Run '{r_id_str}' khi các Worker viết code/hạ tầng phía trước chưa hoàn tất! "
+                            f"Chi tiết: {reason_joined}. "
+                            f"Nếu khởi chạy '{seg_role}-worker' lúc này, lệnh merge-upstream sẽ bị thiếu code hoặc bị chặn. "
+                            f"Cách sửa: Chờ các Worker phía trước hoàn tất bằng 'orca orchestration check --wait' (hoặc khởi chạy/xử lý xong task phía trước) rồi mới gọi worker-start cho '{seg_role}-worker'."
+                        )
+            except Exception:
+                pass
 
     if not candidates or not orca_team_bin:
         return ""
 
-    need_two_phase = len(candidates) > 1 or any(is_nc for _, is_nc in candidates)
+    need_two_phase = len(candidates) > 1 or any(is_nc for _, is_nc, _, _ in candidates)
 
     # Phase 1: Validate all candidate slots (with --no-reserve if compound or new-child to prevent reservation poisoning)
-    for slot_name, is_new_child in candidates:
+    for slot_name, is_new_child, seg_tid, seg_rid in candidates:
         try:
             cmd_check = [
                 sys.executable,
@@ -2119,6 +2318,10 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
                 "--check-slot",
                 slot_name,
             ]
+            if seg_tid:
+                cmd_check.extend(["--task", seg_tid])
+            if seg_rid:
+                cmd_check.extend(["--run", seg_rid])
             if need_two_phase:
                 cmd_check.append("--no-reserve")
             cmd_check.append("--json")
@@ -2133,12 +2336,22 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
                 if isinstance(info, dict):
                     role_prefix = _role_prefix_from_slot(slot_name)
                     next_slot = info.get("slot") or f"{role_prefix}-worker-2"
-                    next_args = info.get("argString") or f"$(orca-team worktree-arg {role_prefix})"
+                    task_flag_hint = f" --task {seg_tid}" if seg_tid else " --task <TASK_ID>"
+                    next_args = info.get("argString") or f"$(orca-team worktree-arg {role_prefix}{task_flag_hint})"
+                    locked_by = str(info.get("lockedByRun") or "").strip()
                     if info.get("slotBusy"):
+                        if locked_by:
+                            return (
+                                f"[ORCA ELASTIC WORKTREE GUARD] Worktree '{slot_name}' đang được GIỮ (RETAINED - chưa merge vào main) "
+                                f"bởi Run '{locked_by}' của một Leader khác! "
+                                f"CẤM ghi đè worktree của Run chưa hoàn tất Bước 4 (sẽ làm mất nhánh chưa merge của Run '{locked_by}'). "
+                                f"Cách sửa: Thay tham số '--worktree ...' bằng $(orca-team worktree-arg {role_prefix}{task_flag_hint}) "
+                                f"(hoặc dùng: {next_args}) để tự động điều phối sang '{next_slot}'."
+                            )
                         return (
                             f"[ORCA ELASTIC WORKTREE GUARD] Worktree '{slot_name}' đang BẬN chạy một tác vụ khác! "
                             f"CẤM truyền cứng '--worktree' khi gọi worker-start vì sẽ khiến 2 agent ghi đè worktree của nhau. "
-                            f"Cách sửa: Thay tham số '--worktree ...' bằng $({f'orca-team worktree-arg {role_prefix}'}) "
+                            f"Cách sửa: Thay tham số '--worktree ...' bằng $(orca-team worktree-arg {role_prefix}{task_flag_hint}) "
                             f"(hoặc dùng: {next_args}) để tự động điều phối sang '{next_slot}'."
                         )
                     if is_new_child and info.get("exists"):
@@ -2146,27 +2359,32 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
                         return (
                             f"[ORCA ELASTIC WORKTREE GUARD] Worktree '{slot_name}' đã tồn tại sẵn tại '{existing_p}'! "
                             f"CẤM dùng '--worktree new-child --name {slot_name}' trên worktree đã tồn tại (sẽ gây lỗi trùng git branch). "
-                            f"Cách sửa: Thay bằng $({f'orca-team worktree-arg {role_prefix}'}) (hoặc dùng: --worktree path:{existing_p})."
+                            f"Cách sửa: Thay bằng $(orca-team worktree-arg {role_prefix}{task_flag_hint}) (hoặc dùng: --worktree path:{existing_p})."
                         )
         except Exception:
             pass
 
     # Phase 2: Only needed when need_two_phase is True -> reserve each slot and clean any lingering `done` tabs
     if need_two_phase:
-        for slot_name, _ in candidates:
+        for slot_name, _, seg_tid, seg_rid in candidates:
             try:
+                cmd_res = [
+                    sys.executable,
+                    orca_team_bin,
+                    "--path",
+                    cwd,
+                    "worktree-arg",
+                    slot_name,
+                    "--check-slot",
+                    slot_name,
+                ]
+                if seg_tid:
+                    cmd_res.extend(["--task", seg_tid])
+                if seg_rid:
+                    cmd_res.extend(["--run", seg_rid])
+                cmd_res.append("--json")
                 subprocess.run(
-                    [
-                        sys.executable,
-                        orca_team_bin,
-                        "--path",
-                        cwd,
-                        "worktree-arg",
-                        slot_name,
-                        "--check-slot",
-                        slot_name,
-                        "--json",
-                    ],
+                    cmd_res,
                     capture_output=True,
                     text=True,
                     timeout=3.0,
@@ -2323,7 +2541,19 @@ def main() -> None:
             sys.stdout.flush()
             return
 
-        # Guard 4: Elastic Worktree Collision Guard & Pre-Dispatch Tab Cleanup on hardcoded `worker-start`
+        # Guard 4: Wildcard `git for-each-ref ... refs/heads/dev-worker*` merge loop (cross-Run contamination risk)
+        if _is_wildcard_dev_branch_merge_risk(cmd[:200000]):
+            reason = (
+                "[ORCA RUN-SCOPED MERGE GUARD] CẤM dùng vòng lặp wildcard 'git for-each-ref ... refs/heads/dev-worker*' để merge nhánh! "
+                "Khi nhiều Leader cùng chạy trên một repo, vòng lặp wildcard sẽ merge nhầm cả nhánh đang làm dở của Leader khác. "
+                "Cách sửa: Thay bằng 'orca-team merge-upstream --role <role> --task-id <TASK_ID>' (cho Worker) "
+                "hoặc 'orca-team merge-upstream --to-main --run \"$RUN_ID\"' (cho Leader ở Bước 4)."
+            )
+            sys.stdout.write(_deny_json(reason))
+            sys.stdout.flush()
+            return
+
+        # Guard 5: Wave-Order Gate & Run-Scoped Elastic Worktree Guard on `worker-start`
         collision_reason = _check_hardcoded_worker_start_collision(cmd[:200000], payload, args)
         if collision_reason:
             sys.stdout.write(_deny_json(collision_reason))
