@@ -4298,6 +4298,21 @@ def sync_gemini_directive(root: Path, config: dict):
     gemini_file.write_text(content, encoding="utf-8")
     _sync_discovery_links(root, config, create_missing=upgraded_from_template)
     _ensure_orca_dir_git_excluded(root)
+    try:
+        import subprocess
+        wt_res = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        if wt_res.returncode == 0 and wt_res.stdout:
+            root_real = os.path.realpath(str(root))
+            for ln in wt_res.stdout.splitlines():
+                if ln.startswith("worktree "):
+                    cwt = ln[9:].strip()
+                    if cwt and os.path.realpath(cwt) != root_real and os.path.isdir(cwt):
+                        _strip_leader_directives_in_child_worktree(Path(cwt), root)
+    except Exception:
+        pass
 
 
 def _build_discovery_env():
