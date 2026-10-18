@@ -287,7 +287,7 @@ _SAFE_TEXT_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _PROSE_FLAG_PREFIX_RE = re.compile(
-    r"(?:--(?:spec|body|question|objective|task-title|display-name|comment|resolution|result|subject|message|notes|title|prompt|summary|description|reason)|-[a-zA-Z]*m)(?:\s+|=)"
+    r"(?:--(?:spec|body|content|question|objective|task-title|display-name|comment|resolution|result|subject|message|notes|title|prompt|summary|description|reason)|-[a-zA-Z]*m)(?:\s+|=)"
 )
 _WHILE_TRUE_RE = re.compile(r"\bwhile\s*(?:\(\s*)?(?:True|1)(?:\s*\))?\s*:")
 
@@ -471,9 +471,9 @@ def _strip_single_quotes_and_quoted_heredocs(cmd: str) -> str:
 
 
 def _is_safe_orca_spec_inner(inner: str) -> bool:
-    """Verify the interior of $(orca-team spec|worktree-arg|merge-upstream ...) has no unescaped backticks, nested $(), or command chaining."""
+    """Verify the interior of $(orca-team spec|worktree-arg|merge-upstream|plan|kb ...) has no unescaped backticks, nested $(), or command chaining."""
     if not re.match(
-        r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|worktree-arg|wt-arg|slot-arg|merge-upstream|merge-run|run-branches|release-workers)\b",
+        r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|worktree-arg|wt-arg|slot-arg|merge-upstream|merge-run|run-branches|release-workers|plan|pin-plan|master-plan|kb|knowledge|system-engineer)\b",
         inner,
     ):
         return False
@@ -710,15 +710,15 @@ def _strip_non_piped_cat_tee_heredocs(cmd: str) -> str:
 
 
 def _strip_non_exec_prose_flags(cmd: str) -> str:
-    """Strip non-executable prose flag values (--spec, --body, --question, -m, etc.),
-    direct `orca-team spec <role> '...'` task literals, top-level shell comments, and non-piped cat/tee quoted heredocs."""
+    """Strip non-executable prose flag values (--spec, --body, --content, --question, -m, etc.),
+    direct `orca-team spec|plan ...` task literals, top-level shell comments, and non-piped cat/tee quoted heredocs."""
     cleaned = _strip_non_piped_cat_tee_heredocs(cmd)
     out: list[str] = []
     i = 0
     n = len(cleaned)
     orca_spec_direct_re = re.compile(
-        r"(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt)"
-        r"(?:\s+(?:--(?:goal|no-goal)|(?:--role|-r)(?:\s+\S+|=\S+)|--|[a-zA-Z0-9_-]+))*(?:\s+(?:--task|-t))?\s+"
+        r"(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|plan|pin-plan|master-plan)"
+        r"(?:\s+(?:--(?:goal|no-goal|json)|(?:--role|-r|--run|--run-id|--title|-t)(?:\s+\S+|=\S+)|--|[a-zA-Z0-9_-]+))*(?:\s+(?:--task|-t|--content|-c|--body))?\s+"
     )
     while i < n:
         ch = cleaned[i]

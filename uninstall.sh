@@ -81,6 +81,13 @@ for rc_name in (".zshrc", ".bashrc"):
             pass
 PY
 
+# Gỡ bỏ symlink/thư mục ~/.orca/knowledge/system-engineer
+KB_TARGET="${HOME}/.orca/knowledge/system-engineer"
+if [[ -L "$KB_TARGET" || -d "$KB_TARGET" ]]; then
+  rm -rf "$KB_TARGET" 2>/dev/null || true
+  echo "  🗑️  Đã xóa: $KB_TARGET"
+fi
+
 echo ""
 if [[ $removed_count -gt 0 ]]; then
   echo "🎉 Đã gỡ bỏ thành công $removed_count công cụ CLI khỏi hệ thống."
