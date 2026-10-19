@@ -2459,6 +2459,256 @@ def _trigger_post_worker_release_sweep(cmd: str, payload: dict, args: dict) -> N
         pass
 
 
+def _ensure_child_worktree_hygiene(payload: dict, args: dict) -> None:
+    """
+    Ultra-fast (<1ms pure Python) child worktree hygiene check before any Worker command runs:
+    If `cwd` is a Git child worktree (`.git` is a file pointing to `<main_root>/.git/worktrees/<slot>`):
+    1. Strip `.agents/GEMINI.md` so Leader orchestration directives never leak into Worker context or dirty `git status`.
+    2. Ensure `<cwd>/.orca/runs -> <main_root>/.orca/runs` symlink exists (inside real `<cwd>/.orca/` dir) so Pinned Master Plan is always readable.
+    3. Ensure `<cwd>/node_modules -> <main_root>/node_modules` symlink exists when `<cwd>/package.json` and `<main_root>/node_modules` exist.
+    """
+    try:
+        raw_cwd = str(args.get("Cwd") or args.get("cwd") or payload.get("cwd") or os.getcwd()).strip()
+        if not raw_cwd:
+            return
+        cwd_path = os.path.realpath(raw_cwd)
+        git_dot = os.path.join(cwd_path, ".git")
+        if not os.path.isfile(git_dot):
+            return
+        with open(git_dot, "r", encoding="utf-8", errors="ignore") as gf:
+            first_line = gf.readline().strip()
+        if "/.git/worktrees/" not in first_line:
+            return
+        gitdir_val = first_line.split(":", 1)[1].strip() if ":" in first_line else first_line
+        if not os.path.isabs(gitdir_val):
+            gitdir_val = os.path.normpath(os.path.join(cwd_path, gitdir_val))
+        main_root = gitdir_val.split("/.git/worktrees/", 1)[0]
+        if not main_root or not os.path.isdir(main_root) or os.path.realpath(main_root) == cwd_path:
+            return
+
+        # 1. Strip .agents/GEMINI.md in child worktree
+        agents_gemini = os.path.join(cwd_path, ".agents", "GEMINI.md")
+        if os.path.lexists(agents_gemini):
+            try:
+                os.unlink(agents_gemini)
+            except OSError:
+                pass
+            agents_dir = os.path.join(cwd_path, ".agents")
+            try:
+                if os.path.isdir(agents_dir) and not os.listdir(agents_dir):
+                    os.rmdir(agents_dir)
+            except OSError:
+                pass
+
+        # 2. Ensure <cwd>/.orca/runs -> <main_root>/.orca/runs
+        main_runs = os.path.join(main_root, ".orca", "runs")
+        if os.path.isdir(main_runs):
+            wt_orca = os.path.join(cwd_path, ".orca")
+            if os.path.islink(wt_orca):
+                try:
+                    os.unlink(wt_orca)
+                except OSError:
+                    pass
+            os.makedirs(wt_orca, exist_ok=True)
+            wt_runs = os.path.join(wt_orca, "runs")
+            if not os.path.lexists(wt_runs):
+                try:
+                    os.symlink(main_runs, wt_runs)
+                except OSError:
+                    pass
+
+        # 3. Ensure <cwd>/node_modules -> <main_root>/node_modules
+        main_nm = os.path.join(main_root, "node_modules")
+        wt_pkg = os.path.join(cwd_path, "package.json")
+        wt_nm = os.path.join(cwd_path, "node_modules")
+        if os.path.isfile(wt_pkg) and os.path.isdir(main_nm) and not os.path.lexists(wt_nm):
+            try:
+                os.symlink(main_nm, wt_nm)
+            except OSError:
+                pass
+
+        # 4. Ensure <main_root>/.git/info/exclude contains `.orca`, `.orca/`, `node_modules`, `node_modules/`
+        # (because a gitignore rule with a trailing slash `node_modules/` does NOT match a symlink `node_modules`)
+        excl_file = os.path.join(main_root, ".git", "info", "exclude")
+        if os.path.isdir(os.path.dirname(excl_file)):
+            try:
+                existing_excl = ""
+                if os.path.isfile(excl_file):
+                    with open(excl_file, "r", encoding="utf-8", errors="ignore") as ef:
+                        existing_excl = ef.read()
+                excl_lines = {ln.strip() for ln in existing_excl.splitlines()}
+                needed = [e for e in (".orca", ".orca/", "node_modules", "node_modules/") if e not in excl_lines]
+                if needed:
+                    with open(excl_file, "a", encoding="utf-8") as ef:
+                        if existing_excl and not existing_excl.endswith("\n"):
+                            ef.write("\n")
+                        for item in needed:
+                            ef.write(f"{item}\n")
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def _has_unescaped_backtick_in_double_quoted_prose_flag(cmd: str) -> str:
+    """
+    Detect unescaped backticks (`...`) inside double-quoted values of prose flags
+    (--body, --subject, --question, --summary, --content, --title) on `orca orchestration` or `orca-team plan`.
+    In zsh/bash, unescaped backticks inside "..." are executed as command substitution before the CLI runs.
+    """
+    if "`" not in cmd:
+        return ""
+    if not re.search(r"\borca(?:-team)?\b", cmd):
+        return ""
+    flag_re = re.compile(r"--(body|subject|question|summary|content|title)(?:\s+|=)\"")
+    n = len(cmd)
+    i = 0
+    in_single = False
+    in_double = False
+    while i < n:
+        ch = cmd[i]
+        if in_single:
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+        # Outside quotes
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "'":
+            in_single = True
+            i += 1
+            continue
+        if ch == "-":
+            m = flag_re.match(cmd, i)
+            if m:
+                flag_name = f"--{m.group(1)}"
+                j = m.end()  # right after the opening `"`
+                while j < n:
+                    c2 = cmd[j]
+                    if c2 == "\\":
+                        j += 2
+                        continue
+                    if c2 == '"':
+                        break
+                    if c2 == "`":
+                        return flag_name
+                    j += 1
+                i = j + 1
+                continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            continue
+        i += 1
+    return ""
+
+
+def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict, args: dict) -> str:
+    """
+    Prevent recurring real-world Orca CLI errors:
+    1. Unescaped backticks in double-quoted `--body "..."` / `--subject "..."` / `--question "..."`.
+    2. Invalid `orca orchestration task-update` flags (`--spec` or `--status canceled`/`cancelled`).
+    3. Chaining `orca orchestration check --wait` with `worker-start`, `worker-retain`, or `task-create`.
+    4. Duplicate concurrent `orca orchestration check --wait` (`waiter_exists`) in the same workspace.
+    """
+    bad_bt_flag = _has_unescaped_backtick_in_double_quoted_prose_flag(cmd)
+    if bad_bt_flag:
+        return (
+            f"[ORCA SHELL QUOTING GUARD] Phát hiện dấu backtick (`...`) chưa escape bên trong chuỗi ngoặc kép (\"...\") của cờ '{bad_bt_flag}'! "
+            f"Trong zsh/bash, dấu `...` nằm trong ngoặc kép sẽ bị shell thực thi ngầm như lệnh hệ thống trước khi chạy orca "
+            f"(gây lỗi 'permission denied' / 'command not found' và làm mất chữ trong nội dung tin nhắn). "
+            f"Cách sửa: Bọc giá trị của '{bad_bt_flag}' bằng dấu ngoặc đơn ('...'), hoặc bỏ dấu backtick, hoặc escape thành \\`."
+        )
+
+    if "task-update" in sanitized_orch and re.search(r"\borca\s+orchestration\s+task-update\b", sanitized_orch):
+        no_heredoc = _strip_quoted_heredocs(cmd)
+        for seg_raw in _split_top_level_shell_segments(no_heredoc):
+            if not re.search(r"\borca\s+orchestration\s+task-update\b", seg_raw):
+                continue
+            if re.search(r"\s--spec(?:\s+|=|$)", seg_raw):
+                return (
+                    "[ORCA CLI SYNTAX GUARD] Lệnh 'orca orchestration task-update' KHÔNG hỗ trợ cờ '--spec'! "
+                    "Các cờ hợp lệ của task-update: '--task <id> [--status <todo|ready|assigned|in_progress|blocked|review|done|failed>] "
+                    "[--title <title>] [--role <role>] [--priority <n>]'. "
+                    "Nếu cần cập nhật kế hoạch chi tiết, hãy dùng 'orca-team plan pin --run <RUN_ID> --content \"...\"' hoặc gửi tin nhắn qua 'orca orchestration send'."
+                )
+            if re.search(r"--status(?:\s+|=)['\"]?(?:canceled|cancelled)\b", seg_raw, re.IGNORECASE):
+                return (
+                    "[ORCA CLI SYNTAX GUARD] Giá trị '--status canceled/cancelled' KHÔNG hợp lệ trong 'orca orchestration task-update'! "
+                    "Các trạng thái hợp lệ: todo, ready, assigned, in_progress, blocked, review, done, failed "
+                    "(nếu muốn đóng/bỏ qua task, hãy dùng '--status done' hoặc '--status failed')."
+                )
+
+    has_check_wait = bool(
+        re.search(r"\borca\s+orchestration\s+check\b[^\n;|&]*\s--wait\b", sanitized_orch)
+    )
+    if has_check_wait:
+        if re.search(r"\borca\s+orchestration\s+(?:worker-start|worker-retain|task-create)\b", sanitized_orch):
+            return (
+                "[ORCA CHECK-WAIT GUARD] CẤM nối chuỗi '&& orca orchestration check --wait' chung trong cùng 1 lệnh với "
+                "'worker-start', 'worker-retain', hoặc 'task-create'! "
+                "Lệnh 'check --wait' là lệnh chặn chờ sự kiện (blocking wait up to 15m); nối chung sẽ khiến tool call bị treo hoặc tạo trùng waiter. "
+                "Cách sửa: Tách riêng phần 'worker-start' / 'worker-retain' / 'task-create' chạy trước, sau đó gọi 'orca orchestration check --wait ...' ở một lệnh riêng biệt."
+            )
+        if not os.environ.get("ORCA_GUARD_SKIP_WAITER_CHECK"):
+            try:
+                _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
+                real_cwd = os.path.realpath(cwd) if cwd else ""
+                proc_ps = subprocess.run(
+                    ["ps", "-eo", "pid=,args="],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                )
+                my_pid = os.getpid()
+                my_ppid = os.getppid()
+                for line in (proc_ps.stdout or "").splitlines():
+                    parts = line.strip().split(None, 1)
+                    if len(parts) < 2 or not parts[0].isdigit():
+                        continue
+                    p_id = int(parts[0])
+                    if p_id in (my_pid, my_ppid):
+                        continue
+                    p_args = parts[1]
+                    if (
+                        "orca orchestration check" in p_args
+                        and "--wait" in p_args
+                        and not any(sh_tok in p_args for sh_tok in ("zsh -c", "bash -c", "sh -c", "orca-command-guard"))
+                    ):
+                        # Check if the existing waiter belongs to the same cwd
+                        proc_lsof = subprocess.run(
+                            ["lsof", "-a", "-p", str(p_id), "-d", "cwd", "-Fn"],
+                            capture_output=True,
+                            text=True,
+                            timeout=1.0,
+                        )
+                        waiter_cwd = ""
+                        for l_line in (proc_lsof.stdout or "").splitlines():
+                            if l_line.startswith("n"):
+                                waiter_cwd = os.path.realpath(l_line[1:].strip())
+                                break
+                        if waiter_cwd and real_cwd and waiter_cwd == real_cwd:
+                            return (
+                                f"[ORCA WAITER-EXISTS GUARD] Đã có 1 tiến trình 'orca orchestration check --wait' đang chạy ngầm cho workspace này (PID {p_id})! "
+                                f"CẤM gọi thêm 'orca orchestration check --wait' song song (sẽ bị lỗi 'waiter_exists: A blocking check is already active'). "
+                                f"Cách sửa: Không gọi thêm lệnh check --wait nữa; hãy kết thúc lượt (stop calling tools) để hệ thống tự động đánh thức bạn khi tiến trình check --wait hiện tại nhận được sự kiện!"
+                            )
+            except Exception:
+                pass
+
+    return ""
+
+
 def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "--stream":
         _run_stream_filter()
@@ -2507,6 +2757,7 @@ def main() -> None:
         args = tc.get("args") or payload.get("tool_input") or {}
         cmd = str(args.get("CommandLine") or args.get("command") or "")
 
+        _ensure_child_worktree_hygiene(payload, args)
         _ensure_watcher_for_payload(payload, event, cmd)
 
         if event != "PreToolUse" or not cmd:
@@ -2579,6 +2830,13 @@ def main() -> None:
                 "Cách sửa: Bỏ cờ '--json' ở cuối lệnh 'orca orchestration task-create' (lệnh vẫn in ra 'Created task_xxxxxxxxxxxx' chỉ tốn 4 tokens)."
             )
             sys.stdout.write(_deny_json(reason))
+            sys.stdout.flush()
+            return
+
+        # Guard 5b: Orca CLI Protocol & Shell Quoting Guards (backticks in --body "...", task-update --spec/--status canceled, && check --wait, waiter_exists)
+        proto_reason = _check_orca_cli_protocol_guards(cmd[:200000], sanitized_orch, payload, args)
+        if proto_reason:
+            sys.stdout.write(_deny_json(proto_reason))
             sys.stdout.flush()
             return
 

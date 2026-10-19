@@ -34,6 +34,7 @@ import shutil
 import select
 import tty
 import termios
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -136,7 +137,7 @@ ROLE_SPEC_TEMPLATES = {
         "Chuẩn: Hoàn thiện 100% mọi hạng mục [P1..Pn] trong Nhiệm vụ & Pinned Master Plan (`qa-worker` sẽ đối chiếu `git diff` 1-1 với Plan ở Wave 2, thiếu mục nào sẽ bắn `QA_REJECT`/`INCOMPLETE_PLAN`), Clean Architecture, type-safe, xử lý edge cases (null, timeout, concurrency), không TODO/stub/mock giả/hardcode secret. "
         "CẤM VƯỢT RÀO: Chỉ sửa code app & unit test (__tests__/*, *.test.*, *.spec.*) thuộc phạm vi file được giao (cấm đụng module của slot khác); tự định vị package trong monorepo không cần ask; CẤM sửa K8s/Docker của DevOps; CẤM xóa/skip (@Ignore, .skip) test cũ. "
         "GIAO TIẾP & P2P (giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble; CẤM truyền --run vào check): "
-        "(1) Chạy `git merge --no-edit main`, `orca-team plan show` và `orca orchestration check [--ack <DELIVERY_ID>] --terminal <worker_handle> --json` (từ lần check thứ 2 bắt buộc kèm `--ack <DELIVERY_ID>` của lần trước); nếu vướng kiến trúc liên role thì hỏi qua `orca orchestration ask --from <worker_handle> --question '...' --json`, "
+        "(1) Chạy `orca-team merge-upstream --role dev --task-id <task_id> --dispatch-id <dispatch_id>` (tự động đồng bộ nhánh gốc main/develop + hiển thị Pinned Plan/Peer Directory) và `orca orchestration check [--ack <DELIVERY_ID>] --terminal <worker_handle> --json` (từ lần check thứ 2 bắt buộc kèm `--ack <DELIVERY_ID>` của lần trước); nếu vướng kiến trúc liên role thì hỏi qua `orca orchestration ask --from <worker_handle> --question '...' --json`, "
         "(2) Build & Unit Test EXIT_CODE=0 (Jest kèm `--forceExit`; khi chạy background `task-XX` CẤM poll `manage_task` liên tục) và `git commit` sạch vào nhánh `{slot_branch}`, "
         "(3) Nếu chạy P2P song song với QA/Sec, gửi `--to '@all'` (hoặc `--to dispatch:<PEER_ID>`) kèm `--type handoff --subject 'DEV_READY v<n>'` để QA/Sec merge & test ngay (sửa tối đa 3 vòng); "
         "khi hoàn tất ca, gộp gửi handoff và `--type worker_done` trong CÙNG 1 LỆNH (`&&`, KHÔNG dùng `--to '@all'` ở lệnh cuối): "
@@ -186,8 +187,8 @@ ROLE_SPEC_TEMPLATES = {
         "Chuẩn: Thay mặt Leader kiểm đếm 100% tiến độ Plan ([P1..Pn]), phủ kín Happy Path, Edge Cases (null, rỗng, số âm, payload lớn, race condition, lỗi mạng/DB) & Acceptance Criteria. "
         "CẤM VƯỢT RÀO: Chỉ viết/chạy test & kiểm toán Plan; CẤM sửa business logic của Dev; CẤM xóa/nới lỏng assert (lờ đi status=FAILED/health=ERROR/SSL); CẤM dùng `--since` ngắn cắt log lỗi hoặc bỏ sót pod DB/Broker! "
         "GIAO TIẾP, P2P & BÁO CÁO (giữ nguyên --from/--task-id/--dispatch-id/--terminal từ Preamble; CẤM truyền --run vào check): "
-        "(1) Chạy `orca orchestration check [--ack <DELIVERY_ID>] --terminal <worker_handle> --json` (từ lần 2 bắt buộc kèm `--ack <DELIVERY_ID>`) và `orca-team merge-upstream --role qa --task-id <task_id> --dispatch-id <dispatch_id>` để merge nhánh thuộc Run hiện tại + đọc Pinned Plan [P1..Pn] & Peer Directory (CẤM tự gõ vòng lặp merge `dev-worker*`), "
-        "(2) KIỂM ĐẾM 100% PLAN & TEST: Chạy `git diff main...HEAD` đối chiếu 1-1 từng mục [P1..Pn] trong Plan với code (bắt mọi mục thiếu/TODO/stub/mock giả), chạy test thật (Jest kèm `--forceExit`; không poll `manage_task` liên tục) VÀ quét TOÀN BỘ Runtime Logs (`kubectl/docker logs` từ lúc start trên MỌI container App + DB + Broker), "
+        "(1) Chạy `orca orchestration check [--ack <DELIVERY_ID>] --terminal <worker_handle> --json` (từ lần 2 bắt buộc kèm `--ack <DELIVERY_ID>`) và `orca-team merge-upstream --role qa --task-id <task_id> --dispatch-id <dispatch_id>` để tự động chờ + merge các nhánh thuộc Run hiện tại + đọc Pinned Plan [P1..Pn] & Peer Directory (CẤM tự gõ vòng lặp merge `dev-worker*`), "
+        "(2) KIỂM ĐẾM 100% PLAN & TEST: Chạy `git diff <base_branch>...HEAD` (theo nhánh gốc in ra từ `merge-upstream`) đối chiếu 1-1 từng mục [P1..Pn] trong Plan với code (bắt mọi mục thiếu/TODO/stub/mock giả), chạy test thật (Jest kèm `--forceExit`; không poll `manage_task` liên tục) VÀ quét TOÀN BỘ Runtime Logs (`kubectl/docker logs` từ lúc start trên MỌI container App + DB + Broker), "
         "(3) Nếu thiếu BẤT KỲ mục nào trong Plan (`INCOMPLETE_PLAN`) hoặc test/log có lỗi ERROR/Exception/FATAL/SQL/SSL ➔ "
         "(a) Nếu `dev-worker` đang `LIVE` (P2P), gửi `--to dispatch:<DEV_DISPATCH_ID>` (hoặc `--to '@all'`) kèm `--type handoff --subject 'QA_REJECT vòng <n>/3'` (P2P bắt buộc `--type handoff`, CẤM `--type escalation` với `--to`) để Dev sửa ngay (tối đa 3 vòng); "
         "(b) Nếu `dev-worker` đã `SETTLED` hoặc quá 3 vòng lỗi, trình Coordinator: "
@@ -221,7 +222,7 @@ ROLE_SPEC_TEMPLATES = {
     "uiSpecialist": (
         "[ROLE: PRINCIPAL UI/UX] Nhiệm vụ: {task}. "
         "Chuẩn: Hoàn thiện 100% hạng mục UI/UX [P1..Pn] được giao (`qa-worker` sẽ đối chiếu `git diff` 1-1 với Plan ở Wave 2), CSS/DOM chuẩn, Responsive, a11y, Loading/Empty/Error states. "
-        "CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend/DB schema. GIAO TIẾP (CẤM truyền --run vào check): Chạy `git merge --no-edit main`, `orca-team plan show`, Build/typecheck EXIT_CODE=0, không lỗi Console, `git commit` vào `{slot_branch}` và gộp trong 1 lệnh (`&&`): "
+        "CẤM VƯỢT RÀO: Chỉ sửa UI/Frontend; CẤM sửa backend/DB schema. GIAO TIẾP (CẤM truyền --run vào check): Chạy `orca-team merge-upstream --role ui --task-id <task_id> --dispatch-id <dispatch_id>`, Build/typecheck EXIT_CODE=0, không lỗi Console, `git commit` vào `{slot_branch}` và gộp trong 1 lệnh (`&&`): "
         "orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type handoff --subject 'UI Ready: {slot_branch} (<commit_hash>)' --body '<Tóm tắt hạng mục UI [P1..Pn] đã xong, Commit/Routes>' --json && "
         "orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type worker_done --outcome succeeded --subject 'Worker Done: {slot_branch}' --body 'UI Ready: {slot_branch} (<commit_hash>)' --json."
     ),
@@ -942,14 +943,79 @@ def release_settled_worker_terminals(
                 if c_item.get("closed"):
                     closed_terminals.append(c_item)
 
+    candidate_heal_runs = set(owner_runs_of_after)
+    if effective_run_id:
+        candidate_heal_runs.add(effective_run_id)
+    for r_cand in repo_runs:
+        if not run_has_active.get(r_cand):
+            candidate_heal_runs.add(r_cand)
+    healed_tasks = _heal_completed_tasks_after_gate(candidate_heal_runs)
+
     return {
         "mainRoot": main_root_str,
         "runId": effective_run_id or None,
         "targetSlot": target_worktree_name or None,
         "releasedDispatches": released_results,
         "closedTerminals": closed_terminals,
+        "healedTasks": healed_tasks,
         "busySlots": sorted(busy_slots),
     }
+
+
+def _heal_completed_tasks_after_gate(run_ids) -> int:
+    """Tự động cập nhật lại tasks.status = 'completed' cho các Task đã có result succeeded hoặc dispatch succeeded
+    nhưng bị Orca reset về 'ready'/'blocked' sau khi tạo và đóng Decision Gate (gate-resolve)."""
+    import sqlite3
+    db_p = _find_orca_orchestration_db()
+    if not db_p or not run_ids:
+        return 0
+    rids = [str(r).strip() for r in run_ids if str(r).strip()]
+    if not rids:
+        return 0
+    healed = 0
+    try:
+        conn = sqlite3.connect(str(db_p), timeout=2.0)
+        with conn:
+            ph = ",".join("?" for _ in rids)
+            cur = conn.execute(
+                f"""
+                UPDATE tasks
+                SET status = 'completed',
+                    completed_at = COALESCE(completed_at, datetime('now'))
+                WHERE run_id IN ({ph})
+                  AND status IN ('ready', 'blocked')
+                  AND (
+                      (result IS NOT NULL AND (result LIKE '%"outcome":"succeeded"%' OR result LIKE '%"outcome": "succeeded"%'))
+                      OR id IN (
+                          SELECT dc.task_id
+                          FROM dispatch_contexts dc
+                          LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id
+                          WHERE dc.run_id IN ({ph})
+                            AND dc.task_id IS NOT NULL
+                            AND (wd.state IN ('succeeded', 'completed') OR dc.status = 'completed')
+                      )
+                  )
+                  AND id NOT IN (
+                      SELECT task_id FROM decision_gates
+                      WHERE run_id IN ({ph}) AND status = 'pending' AND task_id IS NOT NULL
+                  )
+                  AND id NOT IN (
+                      SELECT dc2.task_id
+                      FROM dispatch_contexts dc2
+                      LEFT JOIN worker_dispatches wd2 ON wd2.dispatch_id = dc2.id
+                      WHERE dc2.run_id IN ({ph})
+                        AND dc2.task_id IS NOT NULL
+                        AND dc2.status IN ('pending', 'dispatched')
+                        AND COALESCE(wd2.state, '') NOT IN ('succeeded', 'completed', 'failed', 'stopped', 'timed_out', 'canceled', 'cancelled')
+                  )
+                """,
+                tuple(rids * 4),
+            )
+            healed = int(cur.rowcount or 0)
+        conn.close()
+    except Exception:
+        pass
+    return healed
 
 
 def _strip_leader_directives_in_child_worktree(child_wt, main_root, dry_run: bool = False) -> list[str]:
@@ -1011,27 +1077,34 @@ def _strip_leader_directives_in_child_worktree(child_wt, main_root, dry_run: boo
     if not dry_run:
         try:
             main_orca = m_res / ".orca"
+            main_runs = main_orca / "runs"
+            main_runs.mkdir(parents=True, exist_ok=True)
             child_orca = c_res / ".orca"
-            if main_orca.is_dir():
-                if child_orca.is_symlink():
-                    child_orca.unlink(missing_ok=True)
-                child_orca.mkdir(parents=True, exist_ok=True)
-                main_runs = main_orca / "runs"
-                main_runs.mkdir(parents=True, exist_ok=True)
-                child_runs = child_orca / "runs"
-                if not child_runs.exists() and not child_runs.is_symlink():
-                    os.symlink(str(main_runs), str(child_runs))
+            if child_orca.is_symlink():
+                child_orca.unlink(missing_ok=True)
+            child_orca.mkdir(parents=True, exist_ok=True)
+            child_runs = child_orca / "runs"
+            if not child_runs.exists() and not child_runs.is_symlink():
+                os.symlink(str(main_runs), str(child_runs))
+        except Exception:
+            pass
+        try:
+            main_nm = m_res / "node_modules"
+            child_nm = c_res / "node_modules"
+            if main_nm.is_dir() and (c_res / "package.json").is_file() and not child_nm.exists() and not child_nm.is_symlink():
+                os.symlink(str(main_nm), str(child_nm))
         except Exception:
             pass
     return removed
 
 
 def _sync_orca_runs_into_child_worktrees(main_root: Path):
-    """Đảm bảo mọi child worktree của dự án đều có symlink .orca (hoặc .orca/runs) trỏ về main_root/.orca
+    """Đảm bảo mọi child worktree của dự án đều có symlink .orca/runs trỏ về main_root/.orca/runs
     để Worker gọi view_file('.orca/runs/<RUN_ID>/master-plan.md') từ bên trong child worktree luôn thành công ngay lập tức."""
     import subprocess
     try:
         m_res = Path(main_root).resolve()
+        (m_res / ".orca" / "runs").mkdir(parents=True, exist_ok=True)
         wt_res = subprocess.run(
             ["git", "-C", str(m_res), "worktree", "list", "--porcelain"],
             capture_output=True, text=True, timeout=3, check=False,
@@ -1622,12 +1695,16 @@ def resolve_elastic_worktree_slot(
     except Exception:
         has_commit = True
 
+    _ensure_orca_dir_git_excluded(main_root)
+    for wt_p in set(existing_wt_paths.values()):
+        if wt_p and Path(wt_p).is_dir():
+            _strip_leader_directives_in_child_worktree(Path(wt_p), main_root)
+
     existing_path = existing_wt_paths.get(chosen_slot)
     # Khi tái sử dụng một worktree đã tồn tại và đang rảnh để chạy task mới:
     # 1) Đóng các tab worker cũ (state=done) trên worktree đó để tránh chồng chất nhiều tab cũ.
-    # 2) Nếu worktree này là một slot đã RELEASED từ Run cũ (không thuộc same_run_owned_slots của Run hiện tại)
-    #    và working tree đang sạch (git status --porcelain rỗng), tự động đồng bộ sạch về nhánh chính (main)
-    #    để không bao giờ bị lẫn commit thử nghiệm từ các Run cũ!
+    # 2) Nếu worktree này là một slot đã RELEASED từ Run cũ (không thuộc same_run_owned_slots của Run hiện tại),
+    #    tự động đồng bộ sạch về nhánh chính (main/develop) để không bao giờ bị lẫn commit thử nghiệm từ các Run cũ!
     if (
         clean_idle_tabs
         and reserve
@@ -1646,23 +1723,27 @@ def resolve_elastic_worktree_slot(
             pass
         if chosen_slot not in same_run_owned_slots:
             try:
-                st_proc = subprocess.run(
-                    ["git", "-C", str(existing_path), "status", "--porcelain"],
-                    capture_output=True, text=True, timeout=3,
+                main_br_proc = subprocess.run(
+                    ["git", "-C", str(main_root), "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=2,
                 )
-                if st_proc.returncode == 0 and not st_proc.stdout.strip():
-                    main_br_proc = subprocess.run(
-                        ["git", "-C", str(main_root), "rev-parse", "--abbrev-ref", "HEAD"],
-                        capture_output=True, text=True, timeout=2,
-                    )
-                    main_br_name = (main_br_proc.stdout or "").strip() or "main"
-                    if main_br_name != "HEAD":
-                        if role_prefix_target in ("qa", "sec", "bench", "critic", "re"):
-                            subprocess.run(
-                                ["git", "-C", str(existing_path), "reset", "--hard", main_br_name],
-                                capture_output=True, text=True, timeout=4,
-                            )
-                        else:
+                main_br_name = (main_br_proc.stdout or "").strip() or "main"
+                if main_br_name != "HEAD":
+                    if role_prefix_target in ("qa", "sec", "bench", "critic", "re"):
+                        subprocess.run(
+                            ["git", "-C", str(existing_path), "reset", "--hard", main_br_name],
+                            capture_output=True, text=True, timeout=4,
+                        )
+                        subprocess.run(
+                            ["git", "-C", str(existing_path), "clean", "-fd", "-e", ".orca", "-e", "node_modules"],
+                            capture_output=True, text=True, timeout=4,
+                        )
+                    else:
+                        st_proc = subprocess.run(
+                            ["git", "-C", str(existing_path), "status", "--porcelain"],
+                            capture_output=True, text=True, timeout=3,
+                        )
+                        if st_proc.returncode == 0 and not st_proc.stdout.strip():
                             # Với dev/ui/devops: nếu HEAD hiện tại đã nằm trong main (đã merge ở Bước 4) thì reset sạch về main,
                             # hoặc fast-forward/merge main để bắt đầu trên nền code mới nhất
                             anc_proc = subprocess.run(
@@ -1681,10 +1762,7 @@ def resolve_elastic_worktree_slot(
                                 )
             except Exception:
                 pass
-
-    for wt_p in set(existing_wt_paths.values()):
-        if wt_p and Path(wt_p).is_dir():
-            _strip_leader_directives_in_child_worktree(Path(wt_p), main_root)
+            _strip_leader_directives_in_child_worktree(Path(existing_path), main_root)
 
     if not has_commit:
         wt_args = ["--worktree", "current"]
@@ -1962,6 +2040,10 @@ def _ensure_orca_dir_git_excluded(main_root: Path):
     import subprocess
 
     root_p = Path(main_root)
+    try:
+        (root_p / ".orca" / "runs").mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     orca_entries = [
         ".agents/",
         "GEMINI.md",
@@ -2010,8 +2092,11 @@ def _ensure_orca_dir_git_excluded(main_root: Path):
                 excl = Path(gc_res.stdout.strip()) / "info" / "exclude"
         if excl.parent.is_dir():
             cur_ex = excl.read_text(encoding="utf-8", errors="ignore") if excl.exists() else ""
-            ex_lines = {ln.strip().rstrip("/") for ln in cur_ex.splitlines() if ln.strip() and not ln.strip().startswith("#")}
+            raw_ex_lines = {ln.strip() for ln in cur_ex.splitlines() if ln.strip() and not ln.strip().startswith("#")}
+            ex_lines = {ln.rstrip("/") for ln in raw_ex_lines}
             missing_ex = [e for e in entries_to_check if e.rstrip("/") not in ex_lines]
+            if (root_p / "package.json").is_file() and "node_modules" not in raw_ex_lines:
+                missing_ex.append("node_modules")
             if missing_ex:
                 with open(excl, "a", encoding="utf-8") as f:
                     if cur_ex and not cur_ex.endswith("\n"):
@@ -2476,6 +2561,11 @@ def resolve_run_upstream_branches(
                 except Exception:
                     pass
 
+                try:
+                    _heal_completed_tasks_after_gate([resolved_run_id])
+                except Exception:
+                    pass
+
                 t_rows = conn.execute(
                     "SELECT id, task_title, spec, status, deps, created_at FROM tasks WHERE run_id = ? ORDER BY created_at ASC",
                     (resolved_run_id,),
@@ -2542,59 +2632,22 @@ def resolve_run_upstream_branches(
                 try:
                     m_rows = conn.execute(
                         """
-                        SELECT from_handle, type, subject, body, payload, created_at
+                        SELECT from_handle, to_handle, type, subject, body, payload, created_at
                         FROM messages
                         WHERE run_id = ? AND type IN ('handoff', 'escalation')
                         ORDER BY created_at ASC, rowid ASC
                         """,
                         (resolved_run_id,),
                     ).fetchall()
-                    disp_role_map = {
-                        str(d.get("dispatchId") or ""): str(d.get("rolePrefix") or "dev")
-                        for d in dispatches_in_run
-                        if d.get("dispatchId")
-                    }
-                    handle_to_disp: dict[str, str] = {}
-                    for d in dispatches_in_run:
-                        did_v = str(d.get("dispatchId") or "").strip()
-                        th_v = str(d.get("terminalHandle") or "").strip()
-                        if did_v and th_v:
-                            norm_th = th_v[len("terminal:"):] if th_v.startswith("terminal:") else th_v
-                            handle_to_disp[th_v] = did_v
-                            handle_to_disp[norm_th] = did_v
-                            handle_to_disp[f"terminal:{norm_th}"] = did_v
-                    latest_reject_ts = 0.0
-                    latest_ready_ts_by_disp: dict[str, float] = {}
-                    for mr in m_rows:
-                        fd_id, _ = _extract_msg_dispatch_and_task(mr, handle_to_disp=handle_to_disp)
-                        m_type = str(mr["type"] or "").strip().lower()
-                        m_subj = str(mr["subject"] or "")
-                        m_body = str(mr["body"] or "")
-                        m_ts = _to_epoch_secs(mr["created_at"])
-                        msg_cls = _classify_p2p_message(m_type, m_subj, m_body)
-                        if msg_cls == "reject":
-                            if m_ts > latest_reject_ts:
-                                latest_reject_ts = m_ts
-                        elif msg_cls == "ready" and fd_id:
-                            if m_ts >= latest_ready_ts_by_disp.get(fd_id, 0.0):
-                                latest_ready_ts_by_disp[fd_id] = m_ts
-                    max_ready_ts_by_grp: dict[str, float] = {}
-                    for fd_id, r_ts in latest_ready_ts_by_disp.items():
-                        r_pref = disp_role_map.get(fd_id, "dev")
-                        r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
-                        if r_ts > max_ready_ts_by_grp.get(r_grp, 0.0):
-                            max_ready_ts_by_grp[r_grp] = r_ts
-                    for fd_id, r_ts in latest_ready_ts_by_disp.items():
-                        r_pref = disp_role_map.get(fd_id, "dev")
-                        r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
-                        if r_ts > 0 and max_ready_ts_by_grp.get(r_grp, 0.0) > latest_reject_ts:
-                            p2p_handoff_dispatch_ids.add(fd_id)
-                            p2p_ready_handoff_ts[fd_id] = r_ts
+                    raw_msg_dicts = [dict(mr) for mr in m_rows]
                 except Exception:
-                    pass
+                    raw_msg_dicts = []
             conn.close()
         except Exception:
             used_sqlite = False
+            raw_msg_dicts = []
+    else:
+        raw_msg_dicts = []
 
     if not used_sqlite:
         # Fallback qua Orca CLI nếu không đọc được SQLite
@@ -2699,56 +2752,86 @@ def resolve_run_upstream_branches(
                         pair[0],
                     ),
                 )
-                disp_role_map = {
-                    str(d.get("dispatchId") or ""): str(d.get("rolePrefix") or "dev")
-                    for d in dispatches_in_run
-                    if d.get("dispatchId")
-                }
-                handle_to_disp = {}
-                for d in dispatches_in_run:
-                    did_v = str(d.get("dispatchId") or "").strip()
-                    th_v = str(d.get("terminalHandle") or "").strip()
-                    if did_v and th_v:
-                        norm_th = th_v[len("terminal:"):] if th_v.startswith("terminal:") else th_v
-                        handle_to_disp[th_v] = did_v
-                        handle_to_disp[norm_th] = did_v
-                        handle_to_disp[f"terminal:{norm_th}"] = did_v
-                latest_reject_ts = 0.0
-                latest_ready_ts_by_disp: dict[str, float] = {}
-                for _, mr in m_list_sorted:
-                    if not isinstance(mr, dict):
-                        continue
-                    m_type = str(mr.get("type") or "").strip().lower()
-                    if m_type not in ("handoff", "escalation"):
-                        continue
-                    fd_id, _ = _extract_msg_dispatch_and_task(mr, handle_to_disp=handle_to_disp)
-                    m_subj = str(mr.get("subject") or "")
-                    m_body = str(mr.get("body") or "")
-                    m_ts = _to_epoch_secs(mr.get("createdAt") or mr.get("created_at"))
-                    msg_cls = _classify_p2p_message(m_type, m_subj, m_body)
-                    if msg_cls == "reject":
-                        if m_ts > latest_reject_ts:
-                            latest_reject_ts = m_ts
-                    elif msg_cls == "ready" and fd_id:
-                        if m_ts >= latest_ready_ts_by_disp.get(fd_id, 0.0):
-                            latest_ready_ts_by_disp[fd_id] = m_ts
-                max_ready_ts_by_grp: dict[str, float] = {}
-                for fd_id, r_ts in latest_ready_ts_by_disp.items():
-                    r_pref = disp_role_map.get(fd_id, "dev")
-                    r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
-                    if r_ts > max_ready_ts_by_grp.get(r_grp, 0.0):
-                        max_ready_ts_by_grp[r_grp] = r_ts
-                for fd_id, r_ts in latest_ready_ts_by_disp.items():
-                    r_pref = disp_role_map.get(fd_id, "dev")
-                    r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
-                    if r_ts > 0 and max_ready_ts_by_grp.get(r_grp, 0.0) > latest_reject_ts:
-                        p2p_handoff_dispatch_ids.add(fd_id)
-                        p2p_ready_handoff_ts[fd_id] = r_ts
+                raw_msg_dicts = [mr for _, mr in m_list_sorted if isinstance(mr, dict)]
+
+    if raw_msg_dicts and dispatches_in_run:
+        disp_role_map = {
+            str(d.get("dispatchId") or ""): str(d.get("rolePrefix") or "dev")
+            for d in dispatches_in_run
+            if d.get("dispatchId")
+        }
+        slot_to_disp: dict[str, str] = {}
+        handle_to_disp: dict[str, str] = {}
+        for d in dispatches_in_run:
+            did_v = str(d.get("dispatchId") or "").strip()
+            slot_v = str(d.get("slotName") or d.get("branch") or "").strip()
+            th_v = str(d.get("terminalHandle") or "").strip()
+            if did_v:
+                handle_to_disp[did_v] = did_v
+                handle_to_disp[f"dispatch:{did_v}"] = did_v
+                if slot_v:
+                    slot_to_disp[slot_v] = did_v
+            if did_v and th_v:
+                norm_th = th_v[len("terminal:"):] if th_v.startswith("terminal:") else th_v
+                handle_to_disp[th_v] = did_v
+                handle_to_disp[norm_th] = did_v
+                handle_to_disp[f"terminal:{norm_th}"] = did_v
+
+        latest_global_reject_ts = 0.0
+        latest_slot_reject_ts: dict[str, float] = {}
+        latest_ready_ts_by_disp: dict[str, float] = {}
+
+        for mr in raw_msg_dicts:
+            m_type = str(mr.get("type") or "").strip().lower()
+            if m_type not in ("handoff", "escalation"):
+                continue
+            fd_id, _ = _extract_msg_dispatch_and_task(mr, handle_to_disp=handle_to_disp)
+            m_subj = str(mr.get("subject") or "")
+            m_body = str(mr.get("body") or "")
+            m_ts = _to_epoch_secs(mr.get("createdAt") or mr.get("created_at"))
+            msg_cls = _classify_p2p_message(m_type, m_subj, m_body)
+            if msg_cls == "reject":
+                targeted_dids: set[str] = set()
+                to_val = str(mr.get("to_handle") or mr.get("to") or "").strip()
+                if to_val and to_val in handle_to_disp:
+                    targeted_dids.add(handle_to_disp[to_val])
+                combined_txt = f"{m_subj} {m_body}"
+                for cand_did in disp_role_map:
+                    if cand_did and cand_did != fd_id and cand_did in combined_txt:
+                        targeted_dids.add(cand_did)
+                for cand_slot, cand_did in slot_to_disp.items():
+                    if cand_slot and cand_did != fd_id:
+                        if re.search(rf"\b{re.escape(cand_slot)}(?!-\d)\b", combined_txt):
+                            targeted_dids.add(cand_did)
+                if targeted_dids:
+                    for td in targeted_dids:
+                        if m_ts > latest_slot_reject_ts.get(td, 0.0):
+                            latest_slot_reject_ts[td] = m_ts
+                else:
+                    if m_ts > latest_global_reject_ts:
+                        latest_global_reject_ts = m_ts
+            elif msg_cls == "ready" and fd_id:
+                if m_ts >= latest_ready_ts_by_disp.get(fd_id, 0.0):
+                    latest_ready_ts_by_disp[fd_id] = m_ts
+
+        max_ready_ts_by_grp: dict[str, float] = {}
+        for fd_id, r_ts in latest_ready_ts_by_disp.items():
+            r_pref = disp_role_map.get(fd_id, "dev")
+            r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
+            if r_ts > max_ready_ts_by_grp.get(r_grp, 0.0):
+                max_ready_ts_by_grp[r_grp] = r_ts
+        for fd_id, r_ts in latest_ready_ts_by_disp.items():
+            r_pref = disp_role_map.get(fd_id, "dev")
+            r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
+            slot_rej_ts = latest_slot_reject_ts.get(fd_id, 0.0)
+            if r_ts > 0 and r_ts > slot_rej_ts and max_ready_ts_by_grp.get(r_grp, 0.0) > latest_global_reject_ts:
+                p2p_handoff_dispatch_ids.add(fd_id)
+                p2p_ready_handoff_ts[fd_id] = r_ts
 
     def _is_live_dispatch_p2p_ready(d_item: dict) -> bool:
         """Kiểm tra xem một upstream dispatch đang LIVE có đủ điều kiện P2P-Ready để downstream merge hay không:
-        1. Đã gửi bản tin `--type handoff` (vd: DEV_READY) sau bất kỳ bản tin QA_REJECT/SEC_BLOCK nào trong Run HOẶC caller truyền `--allow-live`/`--p2p`.
-        2. Nhánh git của worker đó đã có ít nhất 1 commit mới hơn `main_branch`, commit HEAD không mới hơn thời điểm gửi DEV_READY (tránh merge WIP commit ở vòng tiếp theo), và worktree sạch.
+        1. Đã gửi bản tin `--type handoff` (vd: DEV_READY / INFRA_READY / CRITIC_VERDICT) sau bất kỳ bản tin QA_REJECT/SEC_BLOCK nào nhắm tới nó HOẶC caller truyền `--allow-live`/`--p2p`.
+        2. Nếu có commit mới (`ahead_cnt > 0`), commit HEAD không mới hơn thời điểm gửi DEV_READY (tránh merge WIP commit ở vòng tiếp theo); nếu chưa gửi P2P handoff mà dùng `--allow-live` thì bắt buộc `ahead_cnt > 0`. Worktree phải sạch.
         """
         did_s = str(d_item.get("dispatchId") or "")
         br_s = str(d_item.get("branch") or "")
@@ -2767,9 +2850,10 @@ def resolve_run_upstream_branches(
                 timeout=3,
             )
             ahead_cnt = int((rev_proc.stdout or "0").strip() or "0") if rev_proc.returncode == 0 else 0
-            if ahead_cnt <= 0:
+            d_item["aheadCount"] = ahead_cnt
+            if ahead_cnt <= 0 and did_s not in p2p_handoff_dispatch_ids:
                 return False
-            if not allow_live and did_s in p2p_ready_handoff_ts and p2p_ready_handoff_ts[did_s] > 0:
+            if ahead_cnt > 0 and not allow_live and did_s in p2p_ready_handoff_ts and p2p_ready_handoff_ts[did_s] > 0:
                 ct_proc = subprocess.run(
                     ["git", "-C", str(main_root), "log", "-1", "--format=%ct", br_s],
                     capture_output=True,
@@ -2813,6 +2897,16 @@ def resolve_run_upstream_branches(
             d["isP2PReady"] = _is_live_dispatch_p2p_ready(d)
         else:
             d["isP2PReady"] = False
+            br_c = str(d.get("branch") or "")
+            if br_c and br_c != main_branch:
+                try:
+                    rv_p = subprocess.run(
+                        ["git", "-C", str(main_root), "rev-list", "--count", f"{main_branch}..{br_c}"],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                    d["aheadCount"] = int((rv_p.stdout or "0").strip() or "0") if rv_p.returncode == 0 else 1
+                except Exception:
+                    d["aheadCount"] = 1
         if slot_k:
             latest_dispatch_by_slot[slot_k] = d
         if tid:
@@ -2848,7 +2942,7 @@ def resolve_run_upstream_branches(
                 })
 
         if r_pref in upstream_prefixes and (d.get("isSucceeded") or d.get("isP2PReady")) and br and br != main_branch:
-            if br not in upstream_branches:
+            if int(d.get("aheadCount", 1)) > 0 and br not in upstream_branches:
                 upstream_branches.append(br)
             upstream_dispatches.append({
                 "dispatchId": did,
@@ -3158,6 +3252,13 @@ def cmd_plan(args: list, caller_dir: Path = None):
         return
 
     # sub == "show"
+    try:
+        _ensure_orca_dir_git_excluded(main_root)
+        _sync_orca_runs_into_child_worktrees(main_root)
+        if info.get("isInWorkerWorktree") and info.get("callerWorktree"):
+            _strip_leader_directives_in_child_worktree(Path(info["callerWorktree"]), main_root)
+    except Exception:
+        pass
     if as_json:
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return
@@ -3236,8 +3337,9 @@ def cmd_kb(args: list, caller_dir: Path = None):
 def cmd_merge_upstream(args: list, caller_dir: Path = None):
     """
     CLI: orca-team merge-upstream [--run <RUN_ID>] [--dispatch <CTX_ID>] [--task <TASK_ID>]
-         [--terminal <TERM_ID>] [--role <ROLE>] [--to-main] [--allow-live|--p2p] [--check-only|--list-only] [--json]
-    Đồng bộ (git merge --no-edit) nhánh main và CHỈ các nhánh upstream thuộc ĐÚNG Run hiện tại
+         [--terminal <TERM_ID>] [--role <ROLE>] [--to-main] [--allow-live|--p2p]
+         [--wait|--no-wait] [--wait-timeout <SECS>] [--check-only|--list-only] [--json]
+    Đồng bộ (git merge --no-edit) nhánh gốc (main/develop) và CHỈ các nhánh upstream thuộc ĐÚNG Run hiện tại
     sau khi đã xác minh 100% upstream worker trong cùng Run đã hoàn tất (succeeded) hoặc đã gửi P2P handoff (DEV_READY).
     """
     target_dir = (caller_dir or Path.cwd()).resolve()
@@ -3251,21 +3353,25 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
     check_only = False
     list_only = False
     as_json = False
+    explicit_wait = False
+    no_wait = False
+    wait_timeout = 1800.0
 
     idx = 0
     while idx < len(args):
         tok = str(args[idx])
         if tok in ("-h", "--help", "help"):
             print(
-                "Sử dụng: orca-team merge-upstream [--role <devops|sec|qa|bench>] [--run <RUN_ID>]\n"
+                "Sử dụng: orca-team merge-upstream [--role <dev|ui|devops|sec|qa|bench>] [--run <RUN_ID>]\n"
                 "         [--task-id <TASK_ID>] [--dispatch-id <DISPATCH_ID>] [--terminal <HANDLE>]\n"
-                "         [--to-main] [--allow-live|--p2p] [--check-only] [--list-only] [--json]"
+                "         [--to-main] [--allow-live|--p2p] [--wait|--no-wait] [--wait-timeout <SECS>]\n"
+                "         [--check-only] [--list-only] [--json]"
             )
             return
         if tok in ("--run", "--run-id") and idx + 1 < len(args):
             run_id = str(args[idx + 1]).strip()
             idx += 2
-        elif tok.startswith("--run="):
+        elif tok.startswith("--run=") or tok.startswith("--run-id="):
             run_id = tok.split("=", 1)[1].strip()
             idx += 1
         elif tok in ("--dispatch", "--dispatch-id") and idx + 1 < len(args):
@@ -3298,6 +3404,26 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
         elif tok in ("--allow-live", "--p2p"):
             allow_live = True
             idx += 1
+        elif tok == "--wait":
+            explicit_wait = True
+            no_wait = False
+            idx += 1
+        elif tok == "--no-wait":
+            no_wait = True
+            explicit_wait = False
+            idx += 1
+        elif tok == "--wait-timeout" and idx + 1 < len(args):
+            try:
+                wait_timeout = max(0.5, float(args[idx + 1]))
+            except Exception:
+                pass
+            idx += 2
+        elif tok.startswith("--wait-timeout="):
+            try:
+                wait_timeout = max(0.5, float(tok.split("=", 1)[1]))
+            except Exception:
+                pass
+            idx += 1
         elif tok == "--check-only":
             check_only = True
             idx += 1
@@ -3320,6 +3446,15 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
         to_main=to_main,
         allow_live=allow_live,
     )
+
+    try:
+        main_root_p = Path(info.get("mainRoot") or target_dir)
+        _ensure_orca_dir_git_excluded(main_root_p)
+        _sync_orca_runs_into_child_worktrees(main_root_p)
+        if info.get("isInWorkerWorktree") and info.get("callerWorktree"):
+            _strip_leader_directives_in_child_worktree(Path(info["callerWorktree"]), main_root_p)
+    except Exception:
+        pass
 
     if list_only:
         if as_json:
@@ -3347,11 +3482,66 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
             sys.exit(1)
         return
 
+    # Chế độ Auto-Wait P2P (--wait) cho Worker downstream (devops/qa/sec/bench) để loại bỏ hoàn toàn vòng lặp busy-wait tốn token
+    should_auto_wait = explicit_wait and (
+        not no_wait
+        and not to_main
+        and bool(info.get("runId"))
+        and len(info.get("blockingFailedUpstream") or []) == 0
+        and bool((info.get("blockingActiveUpstream") or []) or (info.get("blockingUnstartedUpstream") or []))
+    )
+
+    printed_plan_once = False
+    if not info.get("readyToMerge") and should_auto_wait:
+        if not as_json:
+            _print_run_plan_and_peers_summary(info, show_all_tasks=False)
+            printed_plan_once = True
+            active_names = [f"{b.get('slot')} ({b.get('dispatchId')})" for b in (info.get("blockingActiveUpstream") or [])]
+            unstarted_names = [f"{u.get('role')}:{u.get('taskId')}" for u in (info.get("blockingUnstartedUpstream") or [])]
+            waiting_on = ", ".join(active_names + unstarted_names) or "upstream"
+            print(
+                f"\n⏳ [ORCA AUTO-WAIT P2P MERGE] Run {info.get('runId')}: Đang tự động chờ các nhánh upstream hoàn tất hoặc gửi tín hiệu P2P READY ({waiting_on})...\n"
+                f"   💡 Lệnh này sẽ tự động poll SQLite (0 LLM token) và merge ngay khi upstream sẵn sàng. Bạn KHÔNG cần chạy vòng lặp kiểm tra thủ công.",
+                flush=True,
+            )
+        t_wait_start = time.time()
+        last_wait_sig = ""
+        poll_interval = min(2.0, max(0.2, wait_timeout / 4.0))
+        while (time.time() - t_wait_start) < wait_timeout:
+            time.sleep(poll_interval)
+            info = resolve_run_upstream_branches(
+                target_dir,
+                run_id=run_id or str(info.get("runId") or ""),
+                dispatch_id=dispatch_id,
+                task_id=task_id,
+                terminal_handle=terminal_handle,
+                caller_role=role_str,
+                to_main=to_main,
+                allow_live=allow_live,
+            )
+            if info.get("readyToMerge"):
+                elapsed_w = time.time() - t_wait_start
+                if not as_json:
+                    print(f"✅ [ORCA AUTO-WAIT P2P MERGE] Upstream đã sẵn sàng sau {elapsed_w:.1f}s! Bắt đầu đồng bộ nhánh...", flush=True)
+                break
+            if info.get("blockingFailedUpstream"):
+                break
+            cur_sig = ",".join(
+                sorted(
+                    [f"{b.get('slot')}:{b.get('dispatchId')}" for b in (info.get("blockingActiveUpstream") or [])]
+                    + [f"{u.get('role')}:{u.get('taskId')}" for u in (info.get("blockingUnstartedUpstream") or [])]
+                )
+            )
+            if cur_sig != last_wait_sig and not as_json:
+                last_wait_sig = cur_sig
+                print(f"   ⏳ Vẫn đang chờ upstream: {cur_sig}", flush=True)
+
     if not info.get("readyToMerge"):
         if as_json:
             print(json.dumps(info, ensure_ascii=False, indent=2))
         else:
-            _print_run_plan_and_peers_summary(info, show_all_tasks=False)
+            if not printed_plan_once:
+                _print_run_plan_and_peers_summary(info, show_all_tasks=False)
             print(
                 f"\n⛔ [ORCA RUN-SCOPED MERGE GUARD] Chưa thể merge cho Run {info.get('runId') or '(không xác định)'} "
                 f"vì các nhánh upstream phía trước trong cùng Run vẫn đang chạy hoặc chưa gửi P2P handoff:",
@@ -3373,9 +3563,19 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
                     f"   • Worker upstream '{f_item.get('slot')}' ({f_item.get('taskId')}) kết thúc với trạng thái '{f_item.get('state')}'.",
                     file=sys.stderr,
                 )
+            wait_cmd_parts = ["orca-team merge-upstream --wait"]
+            if role_str:
+                wait_cmd_parts.append(f"--role {role_str}")
+            if task_id:
+                wait_cmd_parts.append(f"--task-id {task_id}")
+            if dispatch_id:
+                wait_cmd_parts.append(f"--dispatch-id {dispatch_id}")
+            if run_id and not task_id and not dispatch_id:
+                wait_cmd_parts.append(f"--run {run_id}")
+            wait_cmd_hint = " ".join(wait_cmd_parts)
             print(
-                "⏳ [TRẠNG THÁI CHỜ P2P BÌNH THƯỜNG]: Hãy chờ các worker upstream ở trên gửi tín hiệu P2P handoff (DEV_READY / INFRA_READY) hoặc báo worker-done, "
-                "sau đó chạy lại `orca-team merge-upstream`. Tuyệt đối KHÔNG cần chạy `orca-team --help` hay đọc mã nguồn `orca-team`.",
+                f"⏳ [TRẠNG THÁI CHỜ P2P BÌNH THƯỜNG]: Hãy chạy `{wait_cmd_hint}` để tự động chờ ngầm (0 LLM token) và merge ngay khi upstream gửi tín hiệu P2P READY hoặc báo worker-done! "
+                "Tuyệt đối KHÔNG chạy vòng lặp sleep/poll thủ công và KHÔNG cần chạy `orca-team --help`.",
                 file=sys.stderr,
             )
         sys.exit(1)
@@ -3384,7 +3584,10 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
     merged_branches: list[str] = []
     main_br = info.get("mainBranch") or "main"
 
-    # Bước 1: Nếu đang đứng trong worktree của worker (không phải --to-main), merge nhánh main trước
+    if not to_main and info.get("isInWorkerWorktree"):
+        _strip_leader_directives_in_child_worktree(git_cwd, Path(info["mainRoot"]))
+
+    # Bước 1: Nếu đang đứng trong worktree của worker (không phải --to-main), merge nhánh gốc (main/develop) trước
     if not to_main and info.get("callerBranch") != main_br:
         rc_v = subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", main_br],
@@ -3409,9 +3612,12 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
                 sys.exit(proc_m.returncode or 1)
             merged_branches.append(main_br)
 
-    # Bước 2: Merge CHỈ các nhánh upstream đã succeeded thuộc ĐÚNG Run hiện tại
+    # Bước 2: Lọc bỏ các nhánh đã là ancestor của một nhánh downstream khác trong danh sách (Ancestor Branch Pruning)
+    # Ví dụ: nếu qa-worker hoặc devops-worker đã merge dev-worker + dev-worker-2 và giải quyết xong conflict,
+    # thì dev-worker và dev-worker-2 đã là ancestor của qa-worker -> không merge lặp lại từng nhánh thô gây nổ conflict lần 2!
+    cand_branches: list[str] = []
     for br in info.get("upstreamBranches") or []:
-        if not br or br == info.get("callerBranch"):
+        if not br or br == info.get("callerBranch") or br in cand_branches:
             continue
         rc_v = subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", br],
@@ -3419,7 +3625,37 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         ).returncode
-        if rc_v != 0:
+        if rc_v == 0:
+            cand_branches.append(br)
+
+    ancestor_covered_by: dict[str, str] = {}
+    for br_a in cand_branches:
+        for br_b in cand_branches:
+            if br_a == br_b:
+                continue
+            # Tránh chu trình nếu 2 nhánh trỏ cùng 1 commit SHA (chỉ giữ nhánh đứng sau trong thứ tự downstream)
+            rc_anc = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", br_a, br_b],
+                cwd=str(git_cwd),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            if rc_anc == 0:
+                rc_rev = subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", br_b, br_a],
+                    cwd=str(git_cwd),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ).returncode
+                if rc_rev == 0 and cand_branches.index(br_a) > cand_branches.index(br_b):
+                    continue
+                ancestor_covered_by[br_a] = br_b
+                break
+
+    for br in cand_branches:
+        if br in ancestor_covered_by:
+            if br not in merged_branches:
+                merged_branches.append(br)
             continue
         proc_b = subprocess.run(
             ["git", "merge", "--no-edit", br],
@@ -3441,7 +3677,15 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
     if not to_main and info.get("isInWorkerWorktree"):
         _strip_leader_directives_in_child_worktree(git_cwd, Path(info["mainRoot"]))
 
+    if to_main and info.get("runId"):
+        try:
+            _heal_completed_tasks_after_gate([str(info.get("runId"))])
+        except Exception:
+            pass
+
     info["mergedBranches"] = merged_branches
+    if ancestor_covered_by:
+        info["ancestorCoveredBranches"] = ancestor_covered_by
     if as_json:
         print(json.dumps(info, ensure_ascii=False, indent=2))
     else:
@@ -3451,7 +3695,9 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
             f"✅ [Run {info.get('runId')}] Đã đồng bộ an toàn các nhánh thuộc Run hiện tại vào '{target_lbl}': {br_summary}"
         )
         if not to_main:
-            _print_run_plan_and_peers_summary(info, show_all_tasks=False)
+            print(f"💡 Nhánh gốc của repo là '{main_br}' — dùng `git diff {main_br}...HEAD` khi đối chiếu thay đổi của Run.")
+            if not printed_plan_once:
+                _print_run_plan_and_peers_summary(info, show_all_tasks=False)
 
 
 def cmd_spec(args: list, explicit_root: Path = None):
@@ -6957,10 +7203,12 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                         context_bomb_cmds.append(f"{cmd_label_short} (~{g_tok:,} tok)")
                     if turn_has_orca_check and re.search(r'"replayed"\s*:\s*true', c):
                         replayed_checks += 1
-                    if "exited with code" in c and "exited with code 0" not in c:
-                        tool_errors += 1
-                    elif steps[j].get("status") == "ERROR":
-                        tool_errors += 1
+                    is_benign_merge_guard = "ORCA RUN-SCOPED MERGE GUARD" in c
+                    if not is_benign_merge_guard:
+                        if "exited with code" in c and "exited with code 0" not in c:
+                            tool_errors += 1
+                        elif steps[j].get("status") == "ERROR":
+                            tool_errors += 1
                     if turn_has_git_commit:
                         for m_c in _GIT_COMMIT_HEADER_RE.finditer(c):
                             c_sha, c_subj = m_c.group(1), m_c.group(2).strip()
@@ -8365,9 +8613,15 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         warning_issues.append(
                             f"Worker {wt_name} ({d_id}) chạy {len(bomb_cmds)} lệnh trả về JSON/spec nguyên khối gây phình Context ({', '.join(bomb_cmds[:2])})."
                         )
-                    if max_tool_tok >= 8000:
+                    max_cmd_lbl = str(t_metrics.get("max_tool_cmd") or "large stdout")
+                    is_normal_file_read = (
+                        max_cmd_lbl.startswith(("view_file(", "Read("))
+                        and not any(ext in max_cmd_lbl.lower() for ext in (".log)", "transcript", ".jsonl)"))
+                    )
+                    max_tok_thresh = 15000 if is_normal_file_read else 8000
+                    if max_tool_tok >= max_tok_thresh:
                         warning_issues.append(
-                            f"Worker {wt_name} ({d_id}) có 1 lệnh tool bơm tới ~{max_tool_tok:,} tokens vào Context ({t_metrics.get('max_tool_cmd') or 'large stdout'})."
+                            f"Worker {wt_name} ({d_id}) có 1 lệnh tool bơm tới ~{max_tool_tok:,} tokens vào Context ({max_cmd_lbl})."
                         )
 
                 if t_metrics and w_state not in ("succeeded", "failed", "stopped", "timed_out") and (idle_s or 0) > 180:
