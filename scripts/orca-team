@@ -1051,6 +1051,60 @@ def _heal_completed_tasks_after_gate(run_ids) -> int:
     return healed
 
 
+def _sync_orca_antigravity_account_if_changed() -> str:
+    """
+    Khi người dùng đổi tài khoản Google trên Antigravity (ví dụ do tài khoản cũ hết Quota),
+    kho tài khoản của Orca (`~/Library/Application Support/orca/antigravity-accounts/vault`)
+    vẫn ghim `selectedAccountId` vào tài khoản cũ, khiến `orca orchestration worker-start`
+    báo lỗi `The native Antigravity account changed. Select the account again in Accounts before launching agy.`
+    ở bước `terminal_create`/`worktree_create`.
+    Hàm này kiểm tra qua `RuntimeClient` của Orca và tự động đồng bộ `antigravityAddCurrent` + `antigravitySelect`
+    ngay trước khi tạo Worker (hoặc khi chạy `orca-monitor --fix`).
+    """
+    import subprocess
+    orca_electron = "/Applications/Orca.app/Contents/MacOS/Orca"
+    client_js = "/Applications/Orca.app/Contents/Resources/app.asar/out/cli/runtime/client.js"
+    vault_dir = os.path.expanduser("~/Library/Application Support/orca/antigravity-accounts")
+    if not (os.path.exists(orca_electron) and os.path.exists(client_js) and os.path.isdir(vault_dir)):
+        return ""
+    js_code = """
+const path = require("path");
+const os = require("os");
+const clientMod = require("/Applications/Orca.app/Contents/Resources/app.asar/out/cli/runtime/client.js");
+const RuntimeClient = clientMod.RuntimeClient || clientMod.default || Object.values(clientMod)[0];
+(async () => {
+  const client = new RuntimeClient(path.join(os.homedir(), "Library/Application Support/orca"));
+  const res = await client.call("accounts.antigravityList", { runtime: "host" });
+  const r = (res && res.result) || {};
+  if (r.selectedAccountId && r.currentAccount && r.currentAccount.identityKnown && r.activeAccountId !== r.selectedAccountId) {
+    const addRes = await client.call("accounts.antigravityAddCurrent", { runtime: "host" });
+    const added = (addRes && addRes.result) || {};
+    const newId = added.activeAccountId || (added.accounts && added.accounts[0] && added.accounts[0].id);
+    if (newId) {
+      await client.call("accounts.antigravitySelect", { target: { runtime: "host" }, accountId: newId });
+      console.log("SYNCED:" + (r.currentAccount.email || newId));
+    }
+  }
+})().catch(() => {});
+"""
+    try:
+        env = os.environ.copy()
+        env["ELECTRON_RUN_AS_NODE"] = "1"
+        cp = subprocess.run(
+            [orca_electron, "-e", js_code],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=3.5,
+        )
+        out = (cp.stdout or "").strip()
+        if out.startswith("SYNCED:"):
+            return out.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _strip_leader_directives_in_child_worktree(child_wt, main_root, dry_run: bool = False) -> list[str]:
     """Gỡ bỏ các file chỉ dẫn dành riêng cho Leader (.agents/GEMINI.md, GEMINI.md, AGENTS.md, CLAUDE.md)
     bên trong Child Worktree của Worker để:
@@ -1718,6 +1772,9 @@ def resolve_elastic_worktree_slot(
             except Exception:
                 pass
 
+    if reserve and (not check_exact_slot or not requested_slot_busy):
+        _sync_orca_antigravity_account_if_changed()
+
     has_commit = True
     try:
         hc = subprocess.run(
@@ -2139,10 +2196,12 @@ def cmd_wait_events(args: list, caller_dir: Path | None = None):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT wd.context_id, wd.task_id, wd.status, wd.phase, wd.branch_name, wd.updated_at
-                FROM worker_dispatches wd
-                WHERE wd.run_id = ?
-                ORDER BY wd.created_at ASC
+                SELECT dc.id AS context_id, dc.task_id, dc.status AS dc_status,
+                       wd.state AS wd_state, wd.stage AS wd_stage, wd.updated_at
+                FROM dispatch_contexts dc
+                LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id
+                WHERE dc.run_id = ?
+                ORDER BY dc.created_at ASC
                 """,
                 (target_run_id,),
             )
@@ -2152,24 +2211,52 @@ def cmd_wait_events(args: list, caller_dir: Path | None = None):
             working_c = 0
             settled_list = []
             for r in rows:
-                st = str(r["status"] or "").strip().lower()
-                ph = str(r["phase"] or "").strip().lower()
-                if st == "working" or ph in ("worktree_create", "terminal_create", "booting", "ready", "input_accepted", "working"):
-                    if st not in ("succeeded", "failed", "retained", "released", "cancelled", "canceled", "timed_out"):
-                        working_c += 1
-                        continue
+                dc_st = str(r["dc_status"] or "").strip().lower()
+                wd_st = str(r["wd_state"] or "").strip().lower()
+                wd_sg = str(r["wd_stage"] or "").strip().lower()
+                is_terminal = (
+                    dc_st in ("completed", "failed", "circuit_broken", "canceled", "cancelled", "stopped", "released")
+                    or wd_st in ("succeeded", "completed", "failed", "stopped", "timed_out", "canceled", "cancelled")
+                    or wd_sg in ("settled", "process_stopped")
+                )
+                if not is_terminal and (
+                    dc_st in ("pending", "dispatched", "working")
+                    or wd_st in ("ready", "working", "starting", "booting")
+                    or wd_sg in ("worktree_create", "terminal_create", "booting", "ready", "input_accepted", "working")
+                ):
+                    working_c += 1
+                    continue
                 settled_list.append(
                     {
                         "dispatchId": r["context_id"],
                         "taskId": r["task_id"],
-                        "branch": r["branch_name"],
-                        "status": r["status"],
-                        "phase": r["phase"],
+                        "status": r["wd_state"] or r["dc_status"],
+                        "stage": r["wd_stage"],
                     }
                 )
             return total_c, working_c, settled_list
         except Exception:
             return -1, -1, []
+
+    def _has_unread_actionable_in_db(target_run_id: str) -> bool:
+        """Kiểm tra trong SQLite xem Run có tin nhắn thật (khác heartbeat) nào đang unread (read = 0) hay không."""
+        if not target_run_id or not db_path or not db_path.is_file():
+            return False
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE run_id = ? AND read = 0 AND LOWER(COALESCE(type, '')) != 'heartbeat'
+                """,
+                (target_run_id,),
+            )
+            cnt = int((cur.fetchone() or [0])[0] or 0)
+            conn.close()
+            return cnt > 0
+        except Exception:
+            return False
 
     env = os.environ.copy()
     env["ORCA_INTERNAL_WAIT"] = "1"
@@ -2264,6 +2351,45 @@ def cmd_wait_events(args: list, caller_dir: Path | None = None):
         ]
 
         if actionable_msgs:
+            # Micro-coalescing (1.2s): Khi Worker kết thúc, nó gửi `--type handoff` (DEV_READY/QA_FINAL)
+            # rồi ~0.5s sau gửi tiếp `--type worker_done`. Nếu batch hiện tại có `handoff` nhưng chưa có
+            # `worker_done` từ cùng sender, chờ 1.2s và kiểm tra SQLite `messages` (`read = 0`); nếu đã có
+            # tin nhắn kế tiếp trong hàng đợi thì gộp luôn vào cùng 1 lượt đánh thức Leader (tiết kiệm 250k tokens/lượt)!
+            eff_run_coalesce = run_id or str(res_obj.get("runId") or "").strip()
+            cur_deliv = str(res_obj.get("deliveryId") or "").strip()
+            has_handoff_only = any(str(m.get("type") or "").lower() == "handoff" for m in actionable_msgs) and not any(
+                str(m.get("type") or "").lower() == "worker_done" for m in actionable_msgs
+            )
+            if has_handoff_only and cur_deliv and eff_run_coalesce and not extra_flags:
+                time.sleep(1.2)
+                if _has_unread_actionable_in_db(eff_run_coalesce):
+                    coal_cmd = ["orca", "orchestration", "check", "--ack", cur_deliv]
+                    if run_id and not terminal_handle:
+                        coal_cmd += ["--run", run_id]
+                    if terminal_handle:
+                        coal_cmd += ["--terminal", terminal_handle]
+                    coal_cmd += ["--types", types_val, "--json"]
+                    try:
+                        c_proc = subprocess.run(coal_cmd, cwd=str(work_dir), capture_output=True, text=True, timeout=8.0, env=env)
+                        c_parsed = json.loads((c_proc.stdout or "").strip()) if (c_proc.stdout or "").strip() else None
+                        if isinstance(c_parsed, dict) and c_parsed.get("ok") and isinstance(c_parsed.get("result"), dict):
+                            c_res = c_parsed["result"]
+                            c_msgs = [
+                                m for m in (c_res.get("messages") or [])
+                                if isinstance(m, dict) and str(m.get("type") or "").strip().lower() != "heartbeat"
+                            ]
+                            if c_msgs:
+                                seen_mids = {str(m.get("id") or "") for m in actionable_msgs if m.get("id")}
+                                for cm in c_msgs:
+                                    mid = str(cm.get("id") or "")
+                                    if not mid or mid not in seen_mids:
+                                        actionable_msgs.append(cm)
+                                        if mid:
+                                            seen_mids.add(mid)
+                                if c_res.get("deliveryId"):
+                                    res_obj["deliveryId"] = c_res["deliveryId"]
+                    except Exception:
+                        pass
             res_obj["messages"] = actionable_msgs
             res_obj["count"] = len(actionable_msgs)
             print(json.dumps(parsed, ensure_ascii=False, indent=2))
@@ -2286,33 +2412,34 @@ def cmd_wait_events(args: list, caller_dir: Path | None = None):
         total_d, working_d, settled_summary = _inspect_run_dispatches_in_db(eff_run_id)
         if total_d > 0 and working_d == 0:
             # Tất cả worker trong Run đều đã settled (không còn worker nào đang 'working').
-            # Chạy 1 cú check nhanh không --wait để vét nốt bản tin cuối (nếu vừa gửi sát nút) trước khi trả về.
-            quick_cmd = ["orca", "orchestration", "check"]
-            if pending_ack:
-                quick_cmd += ["--ack", pending_ack]
-            if eff_run_id and not terminal_handle:
-                quick_cmd += ["--run", eff_run_id]
-            if terminal_handle:
-                quick_cmd += ["--terminal", terminal_handle]
-            quick_cmd.append("--json")
-            try:
-                q_proc = subprocess.run(quick_cmd, cwd=str(work_dir), capture_output=True, text=True, timeout=8.0, env=env)
-                q_parsed = json.loads((q_proc.stdout or "").strip()) if (q_proc.stdout or "").strip() else None
-                if isinstance(q_parsed, dict) and q_parsed.get("ok") and isinstance(q_parsed.get("result"), dict):
-                    q_res = q_parsed["result"]
-                    q_msgs = [
-                        m for m in (q_res.get("messages") or [])
-                        if isinstance(m, dict) and str(m.get("type") or "").strip().lower() != "heartbeat"
-                    ]
-                    if q_msgs:
-                        q_res["messages"] = q_msgs
-                        q_res["count"] = len(q_msgs)
-                        if first_acknowledged and not q_res.get("acknowledged"):
-                            q_res["acknowledged"] = first_acknowledged
-                        print(json.dumps(q_parsed, ensure_ascii=False, indent=2))
-                        return
-            except Exception:
-                pass
+            # Chỉ gọi check không --wait nếu thực sự có tin nhắn unread trong SQLite để không vô tình xóa deliveryId của batch trước!
+            if _has_unread_actionable_in_db(eff_run_id):
+                quick_cmd = ["orca", "orchestration", "check"]
+                if pending_ack:
+                    quick_cmd += ["--ack", pending_ack]
+                if eff_run_id and not terminal_handle:
+                    quick_cmd += ["--run", eff_run_id]
+                if terminal_handle:
+                    quick_cmd += ["--terminal", terminal_handle]
+                quick_cmd.append("--json")
+                try:
+                    q_proc = subprocess.run(quick_cmd, cwd=str(work_dir), capture_output=True, text=True, timeout=8.0, env=env)
+                    q_parsed = json.loads((q_proc.stdout or "").strip()) if (q_proc.stdout or "").strip() else None
+                    if isinstance(q_parsed, dict) and q_parsed.get("ok") and isinstance(q_parsed.get("result"), dict):
+                        q_res = q_parsed["result"]
+                        q_msgs = [
+                            m for m in (q_res.get("messages") or [])
+                            if isinstance(m, dict) and str(m.get("type") or "").strip().lower() != "heartbeat"
+                        ]
+                        if q_msgs:
+                            q_res["messages"] = q_msgs
+                            q_res["count"] = len(q_msgs)
+                            if first_acknowledged and not q_res.get("acknowledged"):
+                                q_res["acknowledged"] = first_acknowledged
+                            print(json.dumps(q_parsed, ensure_ascii=False, indent=2))
+                            return
+                except Exception:
+                    pass
             res_obj["allWorkersSettled"] = True
             res_obj["settledDispatches"] = settled_summary[-8:]
             print(json.dumps(parsed, ensure_ascii=False, indent=2))
@@ -9464,7 +9591,7 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                         agy_hooks = json.load(hf)
                 expected_pre = f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PreToolUse python3 '{guard_bin}' --event PreToolUse; else printf '{{\"decision\":\"ask\"}}\\n'; cat >/dev/null 2>&1 || :; fi"
                 expected_post = f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PostToolUse python3 '{guard_bin}' --event PostToolUse; else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi"
-                expected_pre_matcher = "run_command|view_file|read_file|Read|invoke_subagent|send_message"
+                expected_pre_matcher = "run_command|view_file|read_file|Read|invoke_subagent|send_message|manage_task|schedule"
                 curr_pre = ""
                 curr_matcher = ""
                 try:
@@ -9493,11 +9620,16 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                     with open(tmp_hooks_path, "w", encoding="utf-8") as hf:
                         json.dump(agy_hooks, hf, indent=2)
                     os.replace(tmp_hooks_path, agy_hooks_path)
-                    actions_taken.append("Kích hoạt Orca Command & Stdout Flood Guard (16MB Circuit-Breaker + View/Subagent Blocker) trong ~/.gemini/config/hooks.json")
+                    actions_taken.append("Kích hoạt Orca Command & Stdout Flood Guard (16MB Circuit-Breaker + View/Subagent/Poll Blocker) trong ~/.gemini/config/hooks.json")
                 if isinstance(agy_hooks, dict) and (hooks_up_to_date or auto_fix):
-                    passed_items.append("Orca Command & Stdout Flood Guard (Backtick/Find/View/Subagent Blocker + 16MB Log Circuit-Breaker + Stream Filter) active.")
+                    passed_items.append("Orca Command & Stdout Flood Guard (Backtick/Find/View/Subagent/Poll Blocker + 16MB Log Circuit-Breaker + Stream Filter) active.")
             except Exception as e:
                 warning_issues.append(f"Không thể kiểm tra Orca Command Guard hook: {e}")
+
+        if auto_fix:
+            synced_acc = _sync_orca_antigravity_account_if_changed()
+            if synced_acc:
+                actions_taken.append(f"Tự động đồng bộ tài khoản Antigravity mới ({synced_acc}) vào kho Orca Accounts")
 
         # 4.1d Kiểm tra Orca Worktree Setup Hook (setup-runner.sh / ERR_PNPM_NO_PKG_MANIFEST Trap)
         try:

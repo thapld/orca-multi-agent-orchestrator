@@ -1523,7 +1523,13 @@ def _kill_runaway_process_for_log(
                 elif len(candidate_children) != 1:
                     candidate_children = []
 
-                for ch_pid, ch_pgid, _ in candidate_children:
+                for ch_pid, ch_pgid, ch_full_args in candidate_children:
+                    # Protect legitimate Docker BuildKit / package-manager builds from being killed if their PTY progress redraws exceed 16 MB
+                    if not require_jest and re.search(
+                        r"\b(?:docker\s+compose\b[^\n;|&]*\b(?:build|up|pull)|docker-compose\b[^\n;|&]*\b(?:build|up|pull)|docker\s+(?:buildx\s+)?build\b|buildkit|composer\s+install|npm\s+(?:ci|install)|pnpm\s+install|cargo\s+build)\b",
+                        ch_full_args.lower(),
+                    ):
+                        continue
                     # Kill all descendants bottom-up first
                     for d_pid in _collect_descendants(ch_pid, children_map):
                         d_info = proc_table.get(d_pid)
@@ -1547,6 +1553,61 @@ def _kill_runaway_process_for_log(
     return killed_any
 
 
+def _compact_buildkit_redraw_log_if_needed(log_file: Path, sz: int) -> bool:
+    """
+    When Docker BuildKit runs inside a PTY without `BUILDKIT_PROGRESS=plain`, it redraws its TUI
+    10 times per second, inflating `task-XX.log` to 1 MB–15 MB of duplicate `[+] Building` frames.
+    Once the command is idle (`>= 3.0s`), compact duplicate step timer lines so `task-XX.log`
+    drops from ~8 MB to ~40 KB, preventing `<SYSTEM_MESSAGE>` truncation and `bloated_logs` false alarms.
+    """
+    if sz < 256 * 1024:
+        return False
+    compact_marker = b"[ORCA BUILDKIT-COMPACTED:"
+    try:
+        with open(log_file, "rb") as bf:
+            head_sample = bf.read(16384)
+            if compact_marker in head_sample or b"[ORCA CIRCUIT-BREAKER:" in head_sample:
+                return False
+            if b"[+] Building " not in head_sample and b"[+] build " not in head_sample and b"=> [" not in head_sample:
+                return False
+            bf.seek(0)
+            raw_data = bf.read()
+        lines = raw_data.splitlines(keepends=True)
+        if len(lines) < 400:
+            return False
+        dedup: list[bytes] = []
+        seen_keys: dict[bytes, int] = {}
+        for ln in lines:
+            clean = re.sub(rb"\x1b\[[0-9;]*[A-Za-z]", b"", ln).strip()
+            if not clean:
+                continue
+            if re.match(rb"^\[\+\]\s+(?:Building|build)\s+\d", clean):
+                continue
+            if b"Image " in clean and b"Building" in clean and b"Built" not in clean:
+                continue
+            m = re.match(rb"^(=>\s+(?:=>\s+)?\[[^\]]+\]\s+.+?)\s+\d+\.\d+s$", clean)
+            if m:
+                key = m.group(1)
+                if key in seen_keys:
+                    dedup[seen_keys[key]] = ln
+                    continue
+                seen_keys[key] = len(dedup)
+            dedup.append(ln)
+        kept = dedup[-500:] if len(dedup) > 500 else dedup
+        header = (
+            f"[ORCA BUILDKIT-COMPACTED: Deduped {len(lines)} PTY BuildKit redraw lines ({sz / (1024 * 1024):.1f} MB) "
+            f"down to {len(kept)} unique step lines]\n"
+        ).encode("utf-8")
+        compacted_bytes = header + b"".join(kept)
+        if len(compacted_bytes) < sz * 0.6:
+            with open(log_file, "wb") as wf:
+                wf.write(compacted_bytes)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _enforce_task_log_cap(tasks_dir: Path) -> int:
     if not tasks_dir.is_dir():
         return 0
@@ -1565,6 +1626,10 @@ def _enforce_task_log_cap(tasks_dir: Path) -> int:
                 continue
             if sz <= MAX_TASK_LOG_BYTES:
                 idle_age = now_ts - mtime
+                if sz >= 256 * 1024 and idle_age >= 3.0:
+                    if _compact_buildkit_redraw_log_if_needed(log_file, sz):
+                        truncated_count += 1
+                        continue
                 if sz >= 120 and 3.0 <= idle_age <= 1800.0:
                     try:
                         with open(log_file, "rb") as jf:
@@ -2752,7 +2817,7 @@ def _maybe_rewrite_raw_check_wait_to_wait_events(cmd: str, sanitized_orch: str) 
         return ""
     if re.search(r"[;|&`\n<>]", stripped):
         return ""
-    ack_m = re.search(r"--ack(?:\s+|=)['\"]?(deliv_[A-Za-z0-9_-]+)", cmd)
+    ack_m = re.search(r"--ack(?:\s+|=)['\"]?((?:delivery|deliv)_[A-Za-z0-9_-]+)", cmd)
     run_m = re.search(r"--run(?:\s+|=)['\"]?(run_[A-Za-z0-9_-]+)", cmd)
     types_m = re.search(r"--types(?:\s+|=)['\"]?([A-Za-z0-9_,-]+)", cmd)
     parts = ["orca-team", "wait-events"]
@@ -2763,6 +2828,23 @@ def _maybe_rewrite_raw_check_wait_to_wait_events(cmd: str, sanitized_orch: str) 
     if types_m and types_m.group(1) != "worker_done,escalation,question,handoff":
         parts.extend(["--types", f'"{types_m.group(1)}"'])
     return " ".join(parts)
+
+
+def _maybe_inject_buildkit_plain_progress(cmd: str, sanitized_orch: str) -> str:
+    """
+    When a Worker runs `docker compose ... build` / `docker compose ... up ... --build` / `docker build`
+    inside Antigravity's PTY without `BUILDKIT_PROGRESS=plain` or `--progress`, BuildKit redraws its
+    25-line TUI 10 times per second, inflating `task-XX.log` to 5–15 MB and truncating `<SYSTEM_MESSAGE>`.
+    Prepending `export BUILDKIT_PROGRESS=plain; ` switches BuildKit to plain line-by-line logs.
+    """
+    if "BUILDKIT_PROGRESS" in cmd or "--progress" in cmd:
+        return ""
+    if not re.search(
+        r"(?:^|[;&|()\n]|\b(?:do|then|else|elif|env|command|sudo)\s+)\s*(?:\S*/)?(?:docker\s+compose\b[^\n;|&]*\b(?:build\b|up\b[^\n;|&]*--build\b)|docker-compose\b[^\n;|&]*\b(?:build\b|up\b[^\n;|&]*--build\b)|docker\s+(?:buildx\s+)?build\b)",
+        sanitized_orch,
+    ):
+        return ""
+    return f"export BUILDKIT_PROGRESS=plain; {cmd}"
 
 
 def _is_in_orca_meta_repo(payload: dict, args: dict) -> bool:
@@ -2839,8 +2921,10 @@ def _is_orca_managed_project(payload: dict, args: dict) -> bool:
 def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = None) -> str:
     """
     1. Block `invoke_subagent` inside Orca-managed projects (forces proper Orca worker orchestration).
-    2. Block `view_file` / `Read` on `.system_generated/logs/transcript*.jsonl` (prevents recursive context explosion).
-    3. Block `view_file` / `Read` on in-progress `.system_generated/tasks/task-*.log` (0 bytes or `_keepalive` without `"ok":true`)
+    2. Block `manage_task` (`status` / `list`) and `schedule` polling timers inside Orca-managed projects
+       (prevents 200k-token/turn background task polling loops; Antigravity automatically wakes the agent when `task-XX` completes).
+    3. Block `view_file` / `Read` on `.system_generated/logs/transcript*.jsonl` (prevents recursive context explosion).
+    4. Block `view_file` / `Read` on in-progress `.system_generated/tasks/task-*.log` (0 bytes or `_keepalive` without `"ok":true`)
        and block unbounded reads (> 120 lines) on `task-*.log`.
     """
     tc_obj = tc if isinstance(tc, dict) else {}
@@ -2851,6 +2935,25 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
             "Gọi subagent nội bộ tại Leader làm nhân đôi Context Window (200k+ tokens/lượt) và phá vỡ cơ chế Worktree độc lập của Orca. "
             "Cách sửa: Nếu cần tham vấn kiến trúc liên tầng phức tạp, hãy dùng 'critic-worker' của Orca; nếu là tác vụ cục bộ 1 module hoặc rõ nguyên nhân, hãy ghim thẳng 'orca-team plan pin' và giao 'dev-worker'!"
         )
+
+    if tool_name == "manage_task" and isinstance(args, dict) and _is_orca_managed_project(payload, args):
+        act = str(args.get("Action") or args.get("action") or "").strip().lower()
+        if act in ("status", "list"):
+            return (
+                f"[ORCA REACTIVE-WAKEUP GUARD] CẤM gọi 'manage_task(Action=\"{act}\")' để poll trạng thái tác vụ ngầm! "
+                "Mỗi lượt poll 'manage_task' ngốn ~200,000 tokens mà không giúp lệnh chạy nhanh hơn. "
+                "Cách sửa: DỪNG GỌI TOOL NGAY LẬP TỨC (stop calling tools to end your turn) — hệ thống Antigravity sẽ TỰ ĐỘNG đánh thức bạn (Reactive Wakeup) kèm toàn bộ kết quả ngay khi tác vụ ngầm hoàn tất!"
+            )
+
+    if tool_name == "schedule" and isinstance(args, dict) and _is_orca_managed_project(payload, args):
+        dur = args.get("DurationSeconds") if args.get("DurationSeconds") is not None else args.get("duration_seconds")
+        cron = args.get("CronExpression") if args.get("CronExpression") is not None else args.get("cron_expression")
+        if dur is not None and not cron:
+            return (
+                "[ORCA REACTIVE-WAKEUP GUARD] CẤM gọi 'schedule(DurationSeconds=...)' để hẹn giờ poll tác vụ ngầm hoặc chờ Worker! "
+                "Mỗi lần timer nổ khi tác vụ vẫn đang chạy sẽ đánh thức LLM vô ích và đốt 200,000+ tokens/lượt. "
+                "Cách sửa: DỪNG GỌI TOOL NGAY LẬP TỨC (stop calling tools to end your turn) — hệ thống sẽ TỰ ĐỘNG đánh thức bạn ngay khi background task hoàn tất!"
+            )
 
     if not isinstance(args, dict):
         return ""
@@ -3057,7 +3160,7 @@ def main() -> None:
             sys.stdout.flush()
             return
 
-        # Auto-Upgrade: Transparently rewrite standalone Leader `orca orchestration check ... --wait` -> `orca-team wait-events ...`
+        # Auto-Upgrade 1: Transparently rewrite standalone Leader `orca orchestration check ... --wait` -> `orca-team wait-events ...`
         rewritten_wait = _maybe_rewrite_raw_check_wait_to_wait_events(cmd[:200000], sanitized_orch)
         if rewritten_wait:
             if not is_claude_or_gemini_hook and isinstance(args, dict) and "CommandLine" in args:
@@ -3096,6 +3199,39 @@ def main() -> None:
             sys.stdout.write(_deny_json(collision_reason))
             sys.stdout.flush()
             return
+
+        # Auto-Upgrade 2: Transparently inject `export BUILDKIT_PROGRESS=plain; ` for `docker compose build` / `docker build`
+        rewritten_buildkit = _maybe_inject_buildkit_plain_progress(cmd[:200000], sanitized_orch)
+        if rewritten_buildkit:
+            if not is_claude_or_gemini_hook and isinstance(args, dict) and "CommandLine" in args:
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            "decision": "ask",
+                            "overwrite": {"CommandLine": rewritten_buildkit},
+                        }
+                    )
+                    + "\n"
+                )
+                sys.stdout.flush()
+                return
+            elif is_claude_or_gemini_hook and isinstance(args, dict) and "command" in args:
+                new_input = dict(args)
+                new_input["command"] = rewritten_buildkit
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "allow",
+                                "updatedInput": new_input,
+                            }
+                        }
+                    )
+                    + "\n"
+                )
+                sys.stdout.flush()
+                return
 
         # Trigger automatic post-release tab sweep when Leader runs `orca orchestration worker-release`
         _trigger_post_worker_release_sweep(cmd[:200000], payload, args)
