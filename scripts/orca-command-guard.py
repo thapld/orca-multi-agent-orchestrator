@@ -1555,9 +1555,9 @@ def _kill_runaway_process_for_log(
 
 def _compact_buildkit_redraw_log_if_needed(log_file: Path, sz: int) -> bool:
     """
-    When Docker BuildKit runs inside a PTY without `BUILDKIT_PROGRESS=plain`, it redraws its TUI
-    10 times per second, inflating `task-XX.log` to 1 MB–15 MB of duplicate `[+] Building` frames.
-    Once the command is idle (`>= 3.0s`), compact duplicate step timer lines so `task-XX.log`
+    When Docker BuildKit or `docker compose up` runs inside a PTY without plain progress, it redraws its TUI
+    10 times per second, inflating `task-XX.log` to 1 MB–15 MB of duplicate `[+] Building` / `[+] Running` frames.
+    Once the command is idle (`>= 3.0s`), compact duplicate step/container timer lines so `task-XX.log`
     drops from ~8 MB to ~40 KB, preventing `<SYSTEM_MESSAGE>` truncation and `bloated_logs` false alarms.
     """
     if sz < 256 * 1024:
@@ -1568,7 +1568,13 @@ def _compact_buildkit_redraw_log_if_needed(log_file: Path, sz: int) -> bool:
             head_sample = bf.read(16384)
             if compact_marker in head_sample or b"[ORCA CIRCUIT-BREAKER:" in head_sample:
                 return False
-            if b"[+] Building " not in head_sample and b"[+] build " not in head_sample and b"=> [" not in head_sample:
+            if (
+                b"[+] Building " not in head_sample
+                and b"[+] build " not in head_sample
+                and b"[+] Running " not in head_sample
+                and b"=> [" not in head_sample
+                and b"Container " not in head_sample
+            ):
                 return False
             bf.seek(0)
             raw_data = bf.read()
@@ -1581,11 +1587,15 @@ def _compact_buildkit_redraw_log_if_needed(log_file: Path, sz: int) -> bool:
             clean = re.sub(rb"\x1b\[[0-9;]*[A-Za-z]", b"", ln).strip()
             if not clean:
                 continue
-            if re.match(rb"^\[\+\]\s+(?:Building|build)\s+\d", clean):
+            if re.match(rb"^\[\+\]\s+(?:Building|build|Running)\s+\d", clean):
                 continue
             if b"Image " in clean and b"Building" in clean and b"Built" not in clean:
                 continue
+            if b"Container " in clean and any(st in clean for st in (b"Waiting", b"Starting", b"Creating", b"Recreating")):
+                continue
             m = re.match(rb"^(=>\s+(?:=>\s+)?\[[^\]]+\]\s+.+?)\s+\d+\.\d+s$", clean)
+            if not m:
+                m = re.match(rb"^(.+?\bContainer\s+\S+\s+\S+)\s+\d+\.\d+s$", clean)
             if m:
                 key = m.group(1)
                 if key in seen_keys:
@@ -1595,7 +1605,7 @@ def _compact_buildkit_redraw_log_if_needed(log_file: Path, sz: int) -> bool:
             dedup.append(ln)
         kept = dedup[-500:] if len(dedup) > 500 else dedup
         header = (
-            f"[ORCA BUILDKIT-COMPACTED: Deduped {len(lines)} PTY BuildKit redraw lines ({sz / (1024 * 1024):.1f} MB) "
+            f"[ORCA BUILDKIT-COMPACTED: Deduped {len(lines)} PTY Docker redraw lines ({sz / (1024 * 1024):.1f} MB) "
             f"down to {len(kept)} unique step lines]\n"
         ).encode("utf-8")
         compacted_bytes = header + b"".join(kept)
