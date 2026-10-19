@@ -2654,16 +2654,17 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
 
     has_check_wait = bool(
         re.search(r"\borca\s+orchestration\s+check\b[^\n;|&]*\s--wait\b", sanitized_orch)
+        or re.search(r"\borca-team\b[^\n;|&]*\b(?:wait-events|check-wait)\b", sanitized_orch)
     )
     if has_check_wait:
         if re.search(r"\borca\s+orchestration\s+(?:worker-start|worker-retain|task-create)\b", sanitized_orch):
             return (
-                "[ORCA CHECK-WAIT GUARD] CẤM nối chuỗi '&& orca orchestration check --wait' chung trong cùng 1 lệnh với "
+                "[ORCA CHECK-WAIT GUARD] CẤM nối chuỗi '&& orca-team wait-events' hoặc '&& orca orchestration check --wait' chung trong cùng 1 lệnh với "
                 "'worker-start', 'worker-retain', hoặc 'task-create'! "
-                "Lệnh 'check --wait' là lệnh chặn chờ sự kiện (blocking wait up to 15m); nối chung sẽ khiến tool call bị treo hoặc tạo trùng waiter. "
-                "Cách sửa: Tách riêng phần 'worker-start' / 'worker-retain' / 'task-create' chạy trước, sau đó gọi 'orca orchestration check --wait ...' ở một lệnh riêng biệt."
+                "Lệnh wait-events là lệnh chặn chờ sự kiện (blocking wait); nối chung sẽ khiến tool call bị treo hoặc tạo trùng waiter. "
+                "Cách sửa: Tách riêng phần 'worker-start' / 'worker-retain' / 'task-create' chạy trước, sau đó gọi 'orca-team wait-events' ở một lệnh riêng biệt."
             )
-        if not os.environ.get("ORCA_GUARD_SKIP_WAITER_CHECK"):
+        if not os.environ.get("ORCA_GUARD_SKIP_WAITER_CHECK") and os.environ.get("ORCA_INTERNAL_WAIT") != "1":
             try:
                 _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
                 real_cwd = os.path.realpath(cwd) if cwd else ""
@@ -2686,11 +2687,17 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
                     if p_id in (my_pid, my_ppid):
                         continue
                     p_args = parts[2]
-                    if (
-                        "orca orchestration check" in p_args
-                        and "--wait" in p_args
-                        and not any(sh_tok in p_args for sh_tok in ("zsh -c", "bash -c", "sh -c", "orca-command-guard"))
-                    ):
+                    is_waiter_proc = (
+                        (
+                            "orca orchestration check" in p_args
+                            and "--wait" in p_args
+                        )
+                        or (
+                            "orca-team" in p_args
+                            and any(w_sub in p_args for w_sub in ("wait-events", "check-wait"))
+                        )
+                    ) and not any(sh_tok in p_args for sh_tok in ("zsh -c", "bash -c", "sh -c", "orca-command-guard"))
+                    if is_waiter_proc:
                         # Check if the existing waiter belongs to the same cwd
                         proc_lsof = subprocess.run(
                             ["lsof", "-a", "-p", str(p_id), "-d", "cwd", "-Fn"],
@@ -2716,9 +2723,9 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
                                     pass
                                 continue
                             return (
-                                f"[ORCA WAITER-EXISTS GUARD] Đã có 1 tiến trình 'orca orchestration check --wait' đang chạy ngầm cho workspace này (PID {p_id})! "
-                                f"CẤM gọi thêm 'orca orchestration check --wait' song song (sẽ bị lỗi 'waiter_exists: A blocking check is already active'). "
-                                f"Cách sửa: Không gọi thêm lệnh check --wait nữa; hãy kết thúc lượt (stop calling tools) để hệ thống tự động đánh thức bạn khi tiến trình check --wait hiện tại nhận được sự kiện!"
+                                f"[ORCA WAITER-EXISTS GUARD] Đã có 1 tiến trình chờ sự kiện ('orca-team wait-events' / 'check --wait') đang chạy ngầm cho workspace này (PID {p_id})! "
+                                f"CẤM gọi thêm lệnh wait song song (sẽ bị lỗi 'waiter_exists: A blocking check is already active'). "
+                                f"Cách sửa: Không gọi thêm lệnh wait nữa; hãy kết thúc lượt (stop calling tools) để hệ thống tự động đánh thức bạn khi tiến trình wait hiện tại nhận được sự kiện!"
                             )
             except Exception:
                 pass
@@ -2726,12 +2733,125 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
     return ""
 
 
-def _check_unbounded_task_log_view(payload: dict, args: dict) -> str:
+def _maybe_rewrite_raw_check_wait_to_wait_events(cmd: str, sanitized_orch: str) -> str:
     """
-    Block unbounded `view_file` / `Read` calls on `.system_generated/tasks/task-*.log`
-    that dump 10,000–13,000 tokens of raw command output into the LLM context window.
-    Allow bounded reads when both StartLine and EndLine are provided with <= 160 lines.
+    If a Leader calls raw `orca orchestration check ... --wait ...` (without `--terminal`),
+    transparently rewrite it to `orca-team wait-events [--ack <ID>] [--run <ID>] [--types "<TYPES>"]`
+    so that:
+    1) `_keepalive` stderr noise and `"type": "heartbeat"` rows are stripped (preventing Antigravity `<SYSTEM_MESSAGE>` 4KB middle truncation and 230k-token `view_file(task-XX.log)` turns), and
+    2) Empty timeout wakeups while workers are still `working` are absorbed in the wrapper (preventing 5-minute Prompt Cache TTL misses).
     """
+    if os.environ.get("ORCA_INTERNAL_WAIT") == "1":
+        return ""
+    stripped = sanitized_orch.strip()
+    if not re.match(r"^(?:\S*/)?orca\s+orchestration\s+check\b", stripped):
+        return ""
+    if not re.search(r"\s--wait\b", stripped):
+        return ""
+    if re.search(r"\s--terminal(?:\s+|=|$)", stripped) or re.search(r"\s--peek\b", stripped):
+        return ""
+    if re.search(r"[;|&`\n<>]", stripped):
+        return ""
+    ack_m = re.search(r"--ack(?:\s+|=)['\"]?(deliv_[A-Za-z0-9_-]+)", cmd)
+    run_m = re.search(r"--run(?:\s+|=)['\"]?(run_[A-Za-z0-9_-]+)", cmd)
+    types_m = re.search(r"--types(?:\s+|=)['\"]?([A-Za-z0-9_,-]+)", cmd)
+    parts = ["orca-team", "wait-events"]
+    if ack_m:
+        parts.extend(["--ack", ack_m.group(1)])
+    if run_m:
+        parts.extend(["--run", run_m.group(1)])
+    if types_m and types_m.group(1) != "worker_done,escalation,question,handoff":
+        parts.extend(["--types", f'"{types_m.group(1)}"'])
+    return " ".join(parts)
+
+
+def _is_in_orca_meta_repo(payload: dict, args: dict) -> bool:
+    """Return True if the current workspace/cwd is the `orca-multi-agent-orchestrator` repo itself."""
+    candidates: list[str] = []
+    if isinstance(args, dict):
+        for k in ("Cwd", "cwd", "AbsolutePath", "file_path", "path"):
+            v = args.get(k)
+            if isinstance(v, str) and v.strip():
+                candidates.append(v.strip())
+    if isinstance(payload, dict):
+        for k in ("cwd",):
+            v = payload.get(k)
+            if isinstance(v, str) and v.strip():
+                candidates.append(v.strip())
+        wps = payload.get("workspacePaths")
+        if isinstance(wps, list):
+            for wp in wps:
+                if isinstance(wp, str) and wp.strip():
+                    candidates.append(wp.strip())
+    for c in candidates:
+        if "orca-multi-agent-orchestrator" in c:
+            return True
+        try:
+            if "orca-multi-agent-orchestrator" in os.path.realpath(c):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_orca_managed_project(payload: dict, args: dict) -> bool:
+    """Return True if workspace/cwd belongs to a project with `orca-team.json` (excluding `orca-multi-agent-orchestrator`)."""
+    if _is_in_orca_meta_repo(payload, args):
+        return False
+    _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
+    check_dirs: list[str] = []
+    if cwd:
+        check_dirs.append(cwd)
+    if isinstance(payload, dict):
+        wps = payload.get("workspacePaths")
+        if isinstance(wps, list):
+            for wp in wps:
+                if isinstance(wp, str) and wp.strip():
+                    check_dirs.append(wp.strip())
+    for d in check_dirs:
+        try:
+            cur = os.path.realpath(d)
+            if os.path.isfile(cur):
+                cur = os.path.dirname(cur)
+            for _ in range(6):
+                if not cur or cur == "/":
+                    break
+                if os.path.isfile(os.path.join(cur, "orca-team.json")):
+                    return True
+                git_dot = os.path.join(cur, ".git")
+                if os.path.isfile(git_dot):
+                    with open(git_dot, "r", encoding="utf-8", errors="ignore") as gf:
+                        fl = gf.readline().strip()
+                    if "/.git/worktrees/" in fl:
+                        g_val = fl.split(":", 1)[1].strip() if ":" in fl else fl
+                        m_root = g_val.split("/.git/worktrees/", 1)[0]
+                        if m_root and os.path.isfile(os.path.join(m_root, "orca-team.json")):
+                            return True
+                parent = os.path.dirname(cur)
+                if parent == cur:
+                    break
+                cur = parent
+        except Exception:
+            pass
+    return False
+
+
+def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = None) -> str:
+    """
+    1. Block `invoke_subagent` inside Orca-managed projects (forces proper Orca worker orchestration).
+    2. Block `view_file` / `Read` on `.system_generated/logs/transcript*.jsonl` (prevents recursive context explosion).
+    3. Block `view_file` / `Read` on in-progress `.system_generated/tasks/task-*.log` (0 bytes or `_keepalive` without `"ok":true`)
+       and block unbounded reads (> 120 lines) on `task-*.log`.
+    """
+    tc_obj = tc if isinstance(tc, dict) else {}
+    tool_name = str(tc_obj.get("name") or (payload or {}).get("tool_name") or "").strip().lower()
+    if tool_name == "invoke_subagent" and _is_orca_managed_project(payload, args):
+        return (
+            "[ORCA SUBAGENT GUARD] CẤM gọi tool nội bộ 'invoke_subagent' trong dự án điều phối bằng Orca! "
+            "Gọi subagent nội bộ tại Leader làm nhân đôi Context Window (200k+ tokens/lượt) và phá vỡ cơ chế Worktree độc lập của Orca. "
+            "Cách sửa: Nếu cần tham vấn kiến trúc liên tầng phức tạp, hãy dùng 'critic-worker' của Orca; nếu là tác vụ cục bộ 1 module hoặc rõ nguyên nhân, hãy ghim thẳng 'orca-team plan pin' và giao 'dev-worker'!"
+        )
+
     if not isinstance(args, dict):
         return ""
     fp = str(
@@ -2740,23 +2860,62 @@ def _check_unbounded_task_log_view(payload: dict, args: dict) -> str:
         or args.get("path")
         or ""
     ).strip()
-    if not fp or not re.search(r"[/\\]\.system_generated[/\\]tasks[/\\]task-\d+\.log$", fp):
+    if not fp:
         return ""
+
+    # Block reading internal conversation transcript JSONL files (outside orca-multi-agent-orchestrator)
+    if re.search(r"[/\\]\.system_generated[/\\]logs[/\\]transcript[^/\\]*\.jsonl$", fp):
+        if not _is_in_orca_meta_repo(payload, args):
+            return (
+                "[ORCA TOKEN-LEAK GUARD] CẤM gọi 'view_file' đọc file nhật ký hội thoại nội bộ ('transcript.jsonl' / 'transcript_full.jsonl')! "
+                "Đọc file này sẽ bơm đệ quy hàng trăm nghìn tokens lịch sử hội thoại vào Context Window và làm cạn kiệt Quota ngay lập tức. "
+                "Cách sửa: Dùng 'orca-team wait-events' để nhận tin nhắn từ Worker hoặc 'orca orchestration worker-list --run <RUN_ID> --json' để xem trạng thái."
+            )
+
+    if not re.search(r"[/\\]\.system_generated[/\\]tasks[/\\]task-\d+\.log$", fp):
+        return ""
+
+    base_log = os.path.basename(fp)
+    if not _is_in_orca_meta_repo(payload, args) and os.path.isfile(fp):
+        try:
+            f_sz = os.path.getsize(fp)
+            if f_sz == 0:
+                return (
+                    f"[ORCA TOKEN-LEAK GUARD] File log tác vụ ngầm '{base_log}' đang rỗng (0 bytes — tiến trình ngầm vẫn đang chạy/chờ sự kiện)! "
+                    f"CẤM gọi 'view_file' để poll '{base_log}' (mỗi lượt đọc ngốn 200,000+ tokens). "
+                    f"Cách sửa: Dừng gọi tool ngay lập tức (stop calling tools) — hệ thống sẽ tự động đánh thức bạn ngay khi tiến trình ngầm hoàn tất!"
+                )
+            with open(fp, "rb") as lf:
+                head_b = lf.read(2048)
+                tail_b = head_b
+                if f_sz > 2048:
+                    lf.seek(max(0, f_sz - 4096))
+                    tail_b = lf.read(4096)
+            if b'"_keepalive":true' in head_b:
+                if b'"ok":true' not in tail_b and b'"ok": true' not in tail_b:
+                    return (
+                        f"[ORCA TOKEN-LEAK GUARD] Tiến trình chờ sự kiện trong '{base_log}' vẫn đang chạy ngầm chờ Worker (chỉ mới có dòng _keepalive, chưa có kết quả cuối)! "
+                        f"CẤM gọi 'view_file' để poll '{base_log}' (mỗi lượt đọc ngốn 200,000+ tokens). "
+                        f"Cách sửa: Dừng gọi tool ngay lập tức (stop calling tools) — hệ thống sẽ tự động đánh thức bạn khi Worker gửi tin nhắn hoặc hoàn tất! "
+                        f"(Lưu ý: Từ lượt sau hãy dùng 'orca-team wait-events [--ack <DELIVERY_ID>]' thay cho 'orca orchestration check --wait')."
+                    )
+        except OSError:
+            pass
+
     start_ln = args.get("StartLine") if args.get("StartLine") is not None else args.get("start_line")
     end_ln = args.get("EndLine") if args.get("EndLine") is not None else args.get("end_line")
     if start_ln is not None and end_ln is not None:
         try:
             s_i = int(start_ln)
             e_i = int(end_ln)
-            if s_i >= 1 and e_i >= s_i and (e_i - s_i) <= 160:
+            if s_i >= 1 and e_i >= s_i and (e_i - s_i) <= 120:
                 return ""
         except (ValueError, TypeError):
             pass
-    base_log = os.path.basename(fp)
     return (
         f"[ORCA TOKEN-LEAK GUARD] CẤM gọi 'view_file' đọc toàn bộ file log tác vụ ngầm '{base_log}' không giới hạn dòng! "
-        f"Mỗi lần đọc thẳng '{base_log}' không truyền StartLine/EndLine sẽ bơm 10,000–13,000 tokens rác vào bộ nhớ ngữ cảnh. "
-        f"Cách sửa: Chỉ định rõ khoảng dòng ngắn (StartLine & EndLine cách nhau <= 120 dòng), hoặc dùng lệnh shell `tail -n 60 \"{fp}\"` để chỉ xem phần kết quả cuối!"
+        f"Mỗi lần đọc thẳng '{base_log}' không truyền StartLine/EndLine sẽ bơm 10,000–200,000 tokens rác vào bộ nhớ ngữ cảnh. "
+        f"Cách sửa: Chỉ định rõ khoảng dòng ngắn (StartLine & EndLine cách nhau <= 100 dòng), hoặc dùng lệnh shell `tail -n 50 \"{fp}\"` để chỉ xem phần kết quả cuối!"
     )
 
 
@@ -2812,7 +2971,7 @@ def main() -> None:
         _ensure_watcher_for_payload(payload, event, cmd)
 
         if event == "PreToolUse" and not cmd:
-            log_view_err = _check_unbounded_task_log_view(payload, args)
+            log_view_err = _check_unbounded_task_log_view(payload, args, tc=tc)
             if log_view_err:
                 sys.stdout.write(_deny_json(log_view_err))
                 sys.stdout.flush()
@@ -2876,7 +3035,7 @@ def main() -> None:
                 "[ORCA TOKEN-LEAK GUARD] CẤM gọi 'orca orchestration inbox' vì lệnh này xả toàn bộ lịch sử hòm thư đa Run làm phình Context Window! "
                 "Cách sửa: "
                 "• Nếu là Worker: dùng 'orca orchestration check [--ack <DELIVERY_ID>] --terminal <worker_handle> --json'. "
-                "• Nếu là Leader: dùng 'orca orchestration check [--ack <DELIVERY_ID>] --wait --types \"worker_done,escalation,question,handoff\" --timeout-ms 900000 --json'."
+                "• Nếu là Leader: dùng 'orca-team wait-events [--ack <DELIVERY_ID>] [--run <RUN_ID>]'."
             )
             sys.stdout.write(_deny_json(reason))
             sys.stdout.flush()
@@ -2897,6 +3056,39 @@ def main() -> None:
             sys.stdout.write(_deny_json(proto_reason))
             sys.stdout.flush()
             return
+
+        # Auto-Upgrade: Transparently rewrite standalone Leader `orca orchestration check ... --wait` -> `orca-team wait-events ...`
+        rewritten_wait = _maybe_rewrite_raw_check_wait_to_wait_events(cmd[:200000], sanitized_orch)
+        if rewritten_wait:
+            if not is_claude_or_gemini_hook and isinstance(args, dict) and "CommandLine" in args:
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            "decision": "ask",
+                            "overwrite": {"CommandLine": rewritten_wait},
+                        }
+                    )
+                    + "\n"
+                )
+                sys.stdout.flush()
+                return
+            elif is_claude_or_gemini_hook and isinstance(args, dict) and "command" in args:
+                new_input = dict(args)
+                new_input["command"] = rewritten_wait
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "allow",
+                                "updatedInput": new_input,
+                            }
+                        }
+                    )
+                    + "\n"
+                )
+                sys.stdout.flush()
+                return
 
         # Guard 6: Wave-Order Gate & Run-Scoped Elastic Worktree Guard on `worker-start`
         collision_reason = _check_hardcoded_worker_start_collision(cmd[:200000], payload, args)

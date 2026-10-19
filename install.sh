@@ -71,7 +71,7 @@ if hooks_path.exists():
 data["orca-command-guard"] = {
     "PreToolUse": [
         {
-            "matcher": "run_command",
+            "matcher": "run_command|view_file|read_file|Read|invoke_subagent|send_message",
             "hooks": [
                 {
                     "type": "command",
