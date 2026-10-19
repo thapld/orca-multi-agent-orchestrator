@@ -9580,49 +9580,32 @@ def cmd_monitor(root: Path, config: dict, args: list = None):
                 else:
                     passed_items.append(f"Orca Status Hooks active cho: {', '.join(sorted(configured_agents))}.")
 
-        # 4.1c Kiểm tra Orca Command & Stdout Flood Guard Hook (16MB Circuit-Breaker) — chạy cả khi Orca runtime đóng
+        # 4.1c Kiểm tra Orca Command & Stdout Flood Guard Hook (16MB Circuit-Breaker) đa Agent CLI — chạy cả khi Orca runtime đóng
         guard_bin = os.path.expanduser("~/.local/bin/orca-command-guard")
-        agy_hooks_path = os.path.expanduser("~/.gemini/config/hooks.json")
         if os.path.exists(guard_bin):
             try:
-                agy_hooks = {}
-                if os.path.exists(agy_hooks_path):
-                    with open(agy_hooks_path, "r", encoding="utf-8") as hf:
-                        agy_hooks = json.load(hf)
-                expected_pre = f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PreToolUse python3 '{guard_bin}' --event PreToolUse; else printf '{{\"decision\":\"ask\"}}\\n'; cat >/dev/null 2>&1 || :; fi"
-                expected_post = f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PostToolUse python3 '{guard_bin}' --event PostToolUse; else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi"
-                expected_pre_matcher = "run_command|view_file|read_file|Read|invoke_subagent|send_message|manage_task|schedule"
-                curr_pre = ""
-                curr_matcher = ""
-                try:
-                    pre_entry = agy_hooks.get("orca-command-guard", {}).get("PreToolUse", [{}])[0]
-                    curr_pre = pre_entry.get("hooks", [{}])[0].get("command", "")
-                    curr_matcher = str(pre_entry.get("matcher") or "")
-                except Exception:
-                    curr_pre = ""
-                    curr_matcher = ""
-                hooks_up_to_date = (
-                    isinstance(agy_hooks, dict)
-                    and curr_pre == expected_pre
-                    and curr_matcher == expected_pre_matcher
+                chk_flag = "--install-hooks" if auto_fix else "--check-hooks"
+                proc_g = subprocess.run(
+                    ["python3", guard_bin, chk_flag, guard_bin],
+                    capture_output=True,
+                    text=True,
+                    timeout=5.0,
                 )
-                if not hooks_up_to_date and not auto_fix:
-                    warning_issues.append("Orca Command Guard hook chưa được đăng ký/đã cũ trong ~/.gemini/config/hooks.json (chạy 'orca-monitor --fix').")
-                elif not hooks_up_to_date:
-                    if not isinstance(agy_hooks, dict):
-                        agy_hooks = {}
-                    agy_hooks["orca-command-guard"] = {
-                        "PreToolUse": [{"matcher": expected_pre_matcher, "hooks": [{"type": "command", "command": expected_pre, "timeout": 5}]}],
-                        "PostToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": expected_post, "timeout": 5}]}],
-                    }
-                    os.makedirs(os.path.dirname(agy_hooks_path), exist_ok=True)
-                    tmp_hooks_path = f"{agy_hooks_path}.{os.getpid()}.orca-tmp"
-                    with open(tmp_hooks_path, "w", encoding="utf-8") as hf:
-                        json.dump(agy_hooks, hf, indent=2)
-                    os.replace(tmp_hooks_path, agy_hooks_path)
-                    actions_taken.append("Kích hoạt Orca Command & Stdout Flood Guard (16MB Circuit-Breaker + View/Subagent/Poll Blocker) trong ~/.gemini/config/hooks.json")
-                if isinstance(agy_hooks, dict) and (hooks_up_to_date or auto_fix):
-                    passed_items.append("Orca Command & Stdout Flood Guard (Backtick/Find/View/Subagent/Poll Blocker + 16MB Log Circuit-Breaker + Stream Filter) active.")
+                g_info = json.loads((proc_g.stdout or "").strip() or "{}")
+                conf_clis = g_info.get("configured") or []
+                miss_clis = g_info.get("updatedOrMissing") or []
+                if miss_clis and not auto_fix:
+                    warning_issues.append(
+                        f"Orca Command Guard hook chưa được đăng ký/đã cũ cho Agent CLI: {', '.join(miss_clis)} (chạy 'orca-monitor --fix')."
+                    )
+                elif miss_clis and auto_fix:
+                    actions_taken.append(
+                        f"Kích hoạt Orca Command & Token-Leak Guard (PreToolUse/BeforeTool + 16MB Circuit-Breaker) cho: {', '.join(miss_clis)}"
+                    )
+                if conf_clis and (not miss_clis or auto_fix):
+                    passed_items.append(
+                        f"Orca Command & Token-Leak Guard active trên đa Agent CLI ({', '.join(conf_clis)})."
+                    )
             except Exception as e:
                 warning_issues.append(f"Không thể kiểm tra Orca Command Guard hook: {e}")
 

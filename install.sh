@@ -49,59 +49,12 @@ elif command -v orca >/dev/null 2>&1; then
   orca agent hooks on --json >/dev/null 2>&1 || true
 fi
 
-# Đăng ký Orca Command & Stdout Flood Guard Hook (chặn bẫy backtick trong nháy kép, chặn cat binary và giới hạn log >16MB)
-if python3 - "$INSTALL_DIR/orca-command-guard" << 'PY' >/dev/null 2>&1
-import json, os, sys
-from pathlib import Path
-
-guard_bin = sys.argv[1]
-hooks_path = Path.home() / ".gemini" / "config" / "hooks.json"
-hooks_path.parent.mkdir(parents=True, exist_ok=True)
-data = {}
-if hooks_path.exists():
-    try:
-        data = json.loads(hooks_path.read_text(encoding="utf-8"))
-    except Exception:
-        # KHÔNG ghi đè file hỏng (sẽ xóa mất hook khác của người dùng) — báo lỗi và bỏ qua đăng ký
-        sys.stderr.write(f"hooks.json không phải JSON hợp lệ: {hooks_path} — bỏ qua đăng ký guard, hãy sửa file rồi chạy lại install.sh\n")
-        sys.exit(3)
-    if not isinstance(data, dict):
-        sys.stderr.write(f"hooks.json không phải JSON object: {hooks_path} — bỏ qua đăng ký guard\n")
-        sys.exit(3)
-data["orca-command-guard"] = {
-    "PreToolUse": [
-        {
-            "matcher": "run_command|view_file|read_file|Read|invoke_subagent|send_message|manage_task|schedule",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PreToolUse python3 '{guard_bin}' --event PreToolUse; else printf '{{\"decision\":\"ask\"}}\\n'; cat >/dev/null 2>&1 || :; fi",
-                    "timeout": 5
-                }
-            ]
-        }
-    ],
-    "PostToolUse": [
-        {
-            "matcher": "run_command",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": f"if [ -r '{guard_bin}' ]; then ORCA_GUARD_EVENT=PostToolUse python3 '{guard_bin}' --event PostToolUse; else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi",
-                    "timeout": 5
-                }
-            ]
-        }
-    ]
-}
-tmp_path = hooks_path.with_name(f"{hooks_path.name}.{os.getpid()}.orca-tmp")
-tmp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-os.replace(tmp_path, hooks_path)
-PY
-then
-  echo "  🛡️  Đã kích hoạt Orca Command & Stdout Flood Guard Hook (PreToolUse + 16MB Log Circuit-Breaker)."
+# Đăng ký Orca Command & Stdout Flood Guard Hook trên toàn bộ Agent CLI hiện có (Antigravity, Claude Code, Gemini CLI, Kimi, OpenClaude, Qwen)
+if hook_res=$(python3 "$INSTALL_DIR/orca-command-guard" --install-hooks "$INSTALL_DIR/orca-command-guard" 2>/dev/null); then
+  hook_targets=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(", ".join(d.get("configured") or ["antigravity"]))' "$hook_res" 2>/dev/null || echo "antigravity, claude, gemini, kimi")
+  echo "  🛡️  Đã kích hoạt Orca Command & Token-Leak Guard Hook (PreToolUse/BeforeTool + 16MB Log Circuit-Breaker) cho: $hook_targets."
 else
-  echo "  ⚠️  Chưa đăng ký Orca Command Guard: ~/.gemini/config/hooks.json không hợp lệ (đã giữ nguyên file). Sửa file rồi chạy lại ./install.sh."
+  echo "  ⚠️  Chưa đăng ký đầy đủ Orca Command Guard cho một số Agent CLI. Chạy 'orca-monitor --fix' để kiểm tra chi tiết."
 fi
 
 # Đảm bảo ~/.zshenv có ~/.local/bin trong PATH cho cả non-interactive zsh -c (Claude Code / Codex / Antigravity)

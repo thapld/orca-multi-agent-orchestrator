@@ -2731,6 +2731,20 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
         re.search(r"\borca\s+orchestration\s+check\b[^\n;|&]*\s--wait\b", sanitized_orch)
         or re.search(r"\borca-team\b[^\n;|&]*\b(?:wait-events|check-wait)\b", sanitized_orch)
     )
+    if (
+        not has_check_wait
+        and re.search(r"(?:^|[;&|()\n]|\b(?:do|then|else|elif)\s+)\s*sleep\s+\d+", sanitized_orch)
+        and re.search(
+            r"\borca\s+orchestration\s+(?:check|worker-list|task-list|status|worker-read)\b",
+            sanitized_orch,
+        )
+    ):
+        return (
+            "[ORCA POLLING GUARD] CẤM dùng 'sleep N && orca orchestration ...' để poll trạng thái Worker theo chu kỳ! "
+            "Mỗi vòng lặp poll trên bất kỳ Agent CLI nào (Antigravity, Claude Code, Gemini CLI, Kimi, Codex) đều đốt 150,000–200,000 tokens. "
+            "Cách sửa: Dùng 'orca-team wait-events [--ack <DELIVERY_ID>] [--run <RUN_ID>]' để chặn chờ sự kiện ở mức 0 token (hoặc để Orca tự động bơm thông báo vào PTY khi rảnh)!"
+        )
+
     if has_check_wait:
         if re.search(r"\borca\s+orchestration\s+(?:worker-start|worker-retain|task-create)\b", sanitized_orch):
             return (
@@ -2861,7 +2875,7 @@ def _is_in_orca_meta_repo(payload: dict, args: dict) -> bool:
     """Return True if the current workspace/cwd is the `orca-multi-agent-orchestrator` repo itself."""
     candidates: list[str] = []
     if isinstance(args, dict):
-        for k in ("Cwd", "cwd", "AbsolutePath", "file_path", "path"):
+        for k in ("Cwd", "cwd", "AbsolutePath", "file_path", "filePath", "path"):
             v = args.get(k)
             if isinstance(v, str) and v.strip():
                 candidates.append(v.strip())
@@ -2928,20 +2942,95 @@ def _is_orca_managed_project(payload: dict, args: dict) -> bool:
     return False
 
 
-def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = None) -> str:
+def _extract_normalized_tool_call(payload: dict) -> tuple[str, dict, str]:
     """
-    1. Block `invoke_subagent` inside Orca-managed projects (forces proper Orca worker orchestration).
-    2. Block `manage_task` (`status` / `list`) and `schedule` polling timers inside Orca-managed projects
-       (prevents 200k-token/turn background task polling loops; Antigravity automatically wakes the agent when `task-XX` completes).
-    3. Block `view_file` / `Read` on `.system_generated/logs/transcript*.jsonl` (prevents recursive context explosion).
-    4. Block `view_file` / `Read` on in-progress `.system_generated/tasks/task-*.log` (0 bytes or `_keepalive` without `"ok":true`)
+    Normalize tool name, tool args dict, and shell command across all 22 Agent CLIs supported by Orca:
+    - Antigravity (`toolCall.name`, `toolCall.args.CommandLine`)
+    - Claude Code / OpenClaude / Qwen / CodeBuddy / Qoder (`tool_name`, `tool_input.command`)
+    - Gemini CLI (`tool_name`, `tool_input.command` on `BeforeTool`/`AfterTool`)
+    - Kimi Code CLI (`toolName`, `toolInput.command`)
+    - Cursor / Codex / Amp / Droid (`tool_name`/`toolName`/`tool`, `tool_input`/`input`/`arguments`/`args`)
+    """
+    if not isinstance(payload, dict):
+        return "", {}, ""
+    tc = payload.get("toolCall") or payload.get("tool_call") or {}
+    if not isinstance(tc, dict):
+        tc = {}
+    tool_name = str(
+        tc.get("name")
+        or tc.get("toolName")
+        or tc.get("tool_name")
+        or payload.get("tool_name")
+        or payload.get("toolName")
+        or payload.get("tool")
+        or payload.get("name")
+        or ""
+    ).strip()
+    raw_args = (
+        tc.get("args")
+        or payload.get("tool_input")
+        or payload.get("toolInput")
+        or payload.get("input")
+        or payload.get("arguments")
+        or payload.get("args")
+        or {}
+    )
+    if isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args)
+            raw_args = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            raw_args = {}
+    args = raw_args if isinstance(raw_args, dict) else {}
+    cmd = str(
+        args.get("CommandLine")
+        or args.get("command")
+        or args.get("cmd")
+        or payload.get("command")
+        or ""
+    )
+    return tool_name, args, cmd
+
+
+def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = None, tool_name_hint: str = "") -> str:
+    """
+    1. Block internal subagent tools (`invoke_subagent`, `Agent`, `Task`, `dispatch_agent`, `spawn_subagent`, `delegate_task`)
+       inside Orca-managed projects (forces proper Orca worktree worker orchestration across all Agent CLIs).
+    2. Block background task polling tools across all Agent CLIs inside Orca-managed projects:
+       - Antigravity: `manage_task(Action="status"|"list")` and `schedule(DurationSeconds=...)`
+       - Kimi Code CLI: `TaskOutput` / `TaskList` (Kimi has `automatic_notification: true` on `run_in_background=true`)
+       - Claude Code / OpenClaude / Qwen: `TaskOutput(block=false)` / `BashOutput` (Claude Code delivers `<task-notification>` automatically)
+    3. Block `view_file` / `Read` / `read_file` on `.system_generated/logs/transcript*.jsonl` (prevents recursive context explosion).
+    4. Block `view_file` / `Read` / `read_file` on in-progress `.system_generated/tasks/task-*.log` (0 bytes or `_keepalive` without `"ok":true`)
        and block unbounded reads (> 120 lines) on `task-*.log`.
     """
     tc_obj = tc if isinstance(tc, dict) else {}
-    tool_name = str(tc_obj.get("name") or (payload or {}).get("tool_name") or "").strip().lower()
-    if tool_name == "invoke_subagent" and _is_orca_managed_project(payload, args):
+    tool_name = (
+        tool_name_hint
+        or str(
+            tc_obj.get("name")
+            or tc_obj.get("toolName")
+            or (payload or {}).get("tool_name")
+            or (payload or {}).get("toolName")
+            or (payload or {}).get("tool")
+            or ""
+        )
+    ).strip().lower()
+
+    is_subagent_tool = tool_name in (
+        "invoke_subagent",
+        "agent",
+        "dispatch_agent",
+        "spawn_subagent",
+        "delegate_task",
+    ) or (
+        tool_name == "task"
+        and isinstance(args, dict)
+        and any(k in args for k in ("subagent_type", "subagentType", "prompt", "description"))
+    )
+    if is_subagent_tool and _is_orca_managed_project(payload, args):
         return (
-            "[ORCA SUBAGENT GUARD] CẤM gọi tool nội bộ 'invoke_subagent' trong dự án điều phối bằng Orca! "
+            f"[ORCA SUBAGENT GUARD] CẤM gọi tool subagent nội bộ ('{tool_name}') trong dự án điều phối bằng Orca! "
             "Gọi subagent nội bộ tại Leader làm nhân đôi Context Window (200k+ tokens/lượt) và phá vỡ cơ chế Worktree độc lập của Orca. "
             "Cách sửa: Nếu cần tham vấn kiến trúc liên tầng phức tạp, hãy dùng 'critic-worker' của Orca; nếu là tác vụ cục bộ 1 module hoặc rõ nguyên nhân, hãy ghim thẳng 'orca-team plan pin' và giao 'dev-worker'!"
         )
@@ -2952,7 +3041,7 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
             return (
                 f"[ORCA REACTIVE-WAKEUP GUARD] CẤM gọi 'manage_task(Action=\"{act}\")' để poll trạng thái tác vụ ngầm! "
                 "Mỗi lượt poll 'manage_task' ngốn ~200,000 tokens mà không giúp lệnh chạy nhanh hơn. "
-                "Cách sửa: DỪNG GỌI TOOL NGAY LẬP TỨC (stop calling tools to end your turn) — hệ thống Antigravity sẽ TỰ ĐỘNG đánh thức bạn (Reactive Wakeup) kèm toàn bộ kết quả ngay khi tác vụ ngầm hoàn tất!"
+                "Cách sửa: DỪNG GỌI TOOL NGAY LẬP TỨC (stop calling tools to end your turn) — hệ thống sẽ TỰ ĐỘNG đánh thức bạn (Reactive Wakeup) kèm toàn bộ kết quả ngay khi tác vụ ngầm hoàn tất!"
             )
 
     if tool_name == "schedule" and isinstance(args, dict) and _is_orca_managed_project(payload, args):
@@ -2965,11 +3054,22 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
                 "Cách sửa: DỪNG GỌI TOOL NGAY LẬP TỨC (stop calling tools to end your turn) — hệ thống sẽ TỰ ĐỘNG đánh thức bạn ngay khi background task hoàn tất!"
             )
 
+    if tool_name in ("taskoutput", "task_output", "tasklist", "task_list", "bashoutput", "bash_output") and isinstance(args, dict) and _is_orca_managed_project(payload, args):
+        is_kimi_payload = isinstance(payload, dict) and "toolName" in payload and "toolInput" in payload
+        block_param = args.get("block")
+        if is_kimi_payload or tool_name in ("tasklist", "task_list", "bashoutput", "bash_output") or block_param is False:
+            return (
+                f"[ORCA REACTIVE-WAKEUP GUARD] CẤM gọi '{tool_name}' để poll trạng thái tác vụ ngầm! "
+                "Trong Kimi Code CLI / Claude Code và Orca, các tiến trình ngầm (run_in_background=true) và hộp thư Orca đều có cơ chế TỰ ĐỘNG thông báo (automatic_notification / <task-notification> / Orca PTY Mailbox Pointer Delivery) ngay khi hoàn tất. "
+                "Cách sửa: DỪNG GỌI TOOL NGAY LẬP TỨC (kết thúc lượt) để hệ thống tự động đánh thức bạn khi tác vụ hoàn tất, hoặc chạy 'orca-team wait-events' ở chế độ đồng bộ!"
+            )
+
     if not isinstance(args, dict):
         return ""
     fp = str(
         args.get("AbsolutePath")
         or args.get("file_path")
+        or args.get("filePath")
         or args.get("path")
         or ""
     ).strip()
@@ -2980,7 +3080,7 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
     if re.search(r"[/\\]\.system_generated[/\\]logs[/\\]transcript[^/\\]*\.jsonl$", fp):
         if not _is_in_orca_meta_repo(payload, args):
             return (
-                "[ORCA TOKEN-LEAK GUARD] CẤM gọi 'view_file' đọc file nhật ký hội thoại nội bộ ('transcript.jsonl' / 'transcript_full.jsonl')! "
+                "[ORCA TOKEN-LEAK GUARD] CẤM đọc file nhật ký hội thoại nội bộ ('transcript.jsonl' / 'transcript_full.jsonl')! "
                 "Đọc file này sẽ bơm đệ quy hàng trăm nghìn tokens lịch sử hội thoại vào Context Window và làm cạn kiệt Quota ngay lập tức. "
                 "Cách sửa: Dùng 'orca-team wait-events' để nhận tin nhắn từ Worker hoặc 'orca orchestration worker-list --run <RUN_ID> --json' để xem trạng thái."
             )
@@ -2995,7 +3095,7 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
             if f_sz == 0:
                 return (
                     f"[ORCA TOKEN-LEAK GUARD] File log tác vụ ngầm '{base_log}' đang rỗng (0 bytes — tiến trình ngầm vẫn đang chạy/chờ sự kiện)! "
-                    f"CẤM gọi 'view_file' để poll '{base_log}' (mỗi lượt đọc ngốn 200,000+ tokens). "
+                    f"CẤM đọc/poll '{base_log}' (mỗi lượt đọc ngốn 200,000+ tokens). "
                     f"Cách sửa: Dừng gọi tool ngay lập tức (stop calling tools) — hệ thống sẽ tự động đánh thức bạn ngay khi tiến trình ngầm hoàn tất!"
                 )
             with open(fp, "rb") as lf:
@@ -3008,15 +3108,16 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
                 if b'"ok":true' not in tail_b and b'"ok": true' not in tail_b:
                     return (
                         f"[ORCA TOKEN-LEAK GUARD] Tiến trình chờ sự kiện trong '{base_log}' vẫn đang chạy ngầm chờ Worker (chỉ mới có dòng _keepalive, chưa có kết quả cuối)! "
-                        f"CẤM gọi 'view_file' để poll '{base_log}' (mỗi lượt đọc ngốn 200,000+ tokens). "
+                        f"CẤM đọc/poll '{base_log}' (mỗi lượt đọc ngốn 200,000+ tokens). "
                         f"Cách sửa: Dừng gọi tool ngay lập tức (stop calling tools) — hệ thống sẽ tự động đánh thức bạn khi Worker gửi tin nhắn hoặc hoàn tất! "
                         f"(Lưu ý: Từ lượt sau hãy dùng 'orca-team wait-events [--ack <DELIVERY_ID>]' thay cho 'orca orchestration check --wait')."
                     )
         except OSError:
             pass
 
-    start_ln = args.get("StartLine") if args.get("StartLine") is not None else args.get("start_line")
+    start_ln = args.get("StartLine") if args.get("StartLine") is not None else (args.get("start_line") if args.get("start_line") is not None else args.get("offset"))
     end_ln = args.get("EndLine") if args.get("EndLine") is not None else args.get("end_line")
+    limit_ln = args.get("limit")
     if start_ln is not None and end_ln is not None:
         try:
             s_i = int(start_ln)
@@ -3025,11 +3126,336 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
                 return ""
         except (ValueError, TypeError):
             pass
+    elif limit_ln is not None:
+        try:
+            if 1 <= int(limit_ln) <= 120:
+                return ""
+        except (ValueError, TypeError):
+            pass
     return (
-        f"[ORCA TOKEN-LEAK GUARD] CẤM gọi 'view_file' đọc toàn bộ file log tác vụ ngầm '{base_log}' không giới hạn dòng! "
-        f"Mỗi lần đọc thẳng '{base_log}' không truyền StartLine/EndLine sẽ bơm 10,000–200,000 tokens rác vào bộ nhớ ngữ cảnh. "
-        f"Cách sửa: Chỉ định rõ khoảng dòng ngắn (StartLine & EndLine cách nhau <= 100 dòng), hoặc dùng lệnh shell `tail -n 50 \"{fp}\"` để chỉ xem phần kết quả cuối!"
+        f"[ORCA TOKEN-LEAK GUARD] CẤM đọc toàn bộ file log tác vụ ngầm '{base_log}' không giới hạn dòng! "
+        f"Mỗi lần đọc thẳng '{base_log}' không truyền StartLine/EndLine (hoặc offset/limit) sẽ bơm 10,000–200,000 tokens rác vào bộ nhớ ngữ cảnh. "
+        f"Cách sửa: Chỉ định rõ khoảng dòng ngắn (<= 100 dòng), hoặc dùng lệnh shell `tail -n 50 \"{fp}\"` để chỉ xem phần kết quả cuối!"
     )
+
+
+KIMI_GUARD_START_MARKER = "# >>> orca-command-guard-hooks (managed by Orca Multi-Agent Orchestrator) >>>"
+KIMI_GUARD_END_MARKER = "# <<< orca-command-guard-hooks <<<"
+
+
+def ensure_all_cli_command_guard_hooks(guard_bin: str | None = None, check_only: bool = False) -> tuple[bool, list[str], list[str]]:
+    """
+    Ensure `orca-command-guard` is registered across all installed Agent CLIs (without disturbing Orca's native status hooks):
+      1. Antigravity (`~/.gemini/config/hooks.json`)
+      2. Claude Code (`~/.claude/settings.json`) & OpenClaude / Qwen / CodeBuddy if present
+      3. Gemini CLI (`~/.gemini/settings.json`)
+      4. Kimi Code CLI (`~/.kimi-code/config.toml`)
+      5. Cursor Agent (`~/.cursor/hooks.json`) if present
+    Returns `(all_up_to_date, configured_targets, updated_or_missing_targets)`.
+    """
+    g_bin = guard_bin or os.path.expanduser("~/.local/bin/orca-command-guard")
+    home = Path.home()
+    configured: list[str] = []
+    missing_or_updated: list[str] = []
+
+    pre_cmd_agy = (
+        f"if [ -r '{g_bin}' ]; then ORCA_GUARD_EVENT=PreToolUse python3 '{g_bin}' --event PreToolUse; "
+        f"else printf '{{\"decision\":\"ask\"}}\\n'; cat >/dev/null 2>&1 || :; fi"
+    )
+    post_cmd_agy = (
+        f"if [ -r '{g_bin}' ]; then ORCA_GUARD_EVENT=PostToolUse python3 '{g_bin}' --event PostToolUse; "
+        f"else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi"
+    )
+    pre_cmd_generic = (
+        f"if [ -r '{g_bin}' ]; then ORCA_GUARD_EVENT=PreToolUse python3 '{g_bin}' --event PreToolUse; "
+        f"else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi"
+    )
+    post_cmd_generic = (
+        f"if [ -r '{g_bin}' ]; then ORCA_GUARD_EVENT=PostToolUse python3 '{g_bin}' --event PostToolUse; "
+        f"else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi"
+    )
+    pre_cmd_gemini = (
+        f"if [ -r '{g_bin}' ]; then ORCA_GUARD_CLIENT=gemini ORCA_GUARD_EVENT=BeforeTool python3 '{g_bin}' --event BeforeTool; "
+        f"else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi"
+    )
+    post_cmd_gemini = (
+        f"if [ -r '{g_bin}' ]; then ORCA_GUARD_CLIENT=gemini ORCA_GUARD_EVENT=AfterTool python3 '{g_bin}' --event AfterTool; "
+        f"else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi"
+    )
+    agy_matcher = "run_command|view_file|read_file|Read|invoke_subagent|send_message|manage_task|schedule"
+
+    # 1. Antigravity (~/.gemini/config/hooks.json)
+    agy_path = home / ".gemini" / "config" / "hooks.json"
+    try:
+        agy_data = {}
+        if agy_path.exists():
+            agy_data = json.loads(agy_path.read_text(encoding="utf-8"))
+        if isinstance(agy_data, dict):
+            pre_entry = (agy_data.get("orca-command-guard") or {}).get("PreToolUse", [{}])[0]
+            curr_pre = (pre_entry.get("hooks") or [{}])[0].get("command", "")
+            curr_m = str(pre_entry.get("matcher") or "")
+            if curr_pre == pre_cmd_agy and curr_m == agy_matcher:
+                configured.append("antigravity")
+            else:
+                missing_or_updated.append("antigravity")
+                if not check_only:
+                    agy_path.parent.mkdir(parents=True, exist_ok=True)
+                    agy_data["orca-command-guard"] = {
+                        "PreToolUse": [{"matcher": agy_matcher, "hooks": [{"type": "command", "command": pre_cmd_agy, "timeout": 5}]}],
+                        "PostToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": post_cmd_agy, "timeout": 5}]}],
+                    }
+                    tmp_p = agy_path.with_name(f"{agy_path.name}.{os.getpid()}.orca-tmp")
+                    tmp_p.write_text(json.dumps(agy_data, indent=2) + "\n", encoding="utf-8")
+                    os.replace(tmp_p, agy_path)
+                    configured.append("antigravity")
+    except Exception:
+        missing_or_updated.append("antigravity")
+
+    # 2. Claude Code family (~/.claude/settings.json, ~/.openclaude/settings.json, ~/.qwen/settings.json, ~/.codebuddy/settings.json)
+    for cli_label, dir_name in (
+        ("claude", ".claude"),
+        ("openclaude", ".openclaude"),
+        ("qwen-code", ".qwen"),
+        ("codebuddy", ".codebuddy"),
+    ):
+        cfg_dir = home / dir_name
+        cfg_path = cfg_dir / "settings.json"
+        if not cfg_path.exists():
+            continue
+        try:
+            c_data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if not isinstance(c_data, dict):
+                continue
+            hooks_obj = c_data.get("hooks")
+            if not isinstance(hooks_obj, dict):
+                hooks_obj = {}
+            pre_list = hooks_obj.get("PreToolUse") if isinstance(hooks_obj.get("PreToolUse"), list) else []
+            post_list = hooks_obj.get("PostToolUse") if isinstance(hooks_obj.get("PostToolUse"), list) else []
+
+            def _has_exact_guard(arr: list, expected_cmd: str) -> bool:
+                for item in arr:
+                    if not isinstance(item, dict):
+                        continue
+                    for h in item.get("hooks") or []:
+                        if isinstance(h, dict) and h.get("command") == expected_cmd:
+                            return True
+                return False
+
+            def _strip_old_guard(arr: list) -> list:
+                cleaned_arr = []
+                for item in arr:
+                    if not isinstance(item, dict):
+                        cleaned_arr.append(item)
+                        continue
+                    h_list = item.get("hooks")
+                    if isinstance(h_list, list):
+                        kept_h = [
+                            h for h in h_list
+                            if not (isinstance(h, dict) and "orca-command-guard" in str(h.get("command") or ""))
+                        ]
+                        if kept_h:
+                            new_item = dict(item)
+                            new_item["hooks"] = kept_h
+                            cleaned_arr.append(new_item)
+                    elif "orca-command-guard" not in str(item.get("command") or ""):
+                        cleaned_arr.append(item)
+                return cleaned_arr
+
+            if _has_exact_guard(pre_list, pre_cmd_generic) and _has_exact_guard(post_list, post_cmd_generic):
+                configured.append(cli_label)
+            else:
+                missing_or_updated.append(cli_label)
+                if not check_only:
+                    new_pre = _strip_old_guard(pre_list)
+                    new_pre.append({"matcher": "*", "hooks": [{"type": "command", "command": pre_cmd_generic, "timeout": 10}]})
+                    new_post = _strip_old_guard(post_list)
+                    new_post.append({"matcher": "*", "hooks": [{"type": "command", "command": post_cmd_generic, "timeout": 10}]})
+                    hooks_obj["PreToolUse"] = new_pre
+                    hooks_obj["PostToolUse"] = new_post
+                    c_data["hooks"] = hooks_obj
+                    tmp_p = cfg_path.with_name(f"{cfg_path.name}.{os.getpid()}.orca-tmp")
+                    tmp_p.write_text(json.dumps(c_data, indent=2) + "\n", encoding="utf-8")
+                    os.replace(tmp_p, cfg_path)
+                    configured.append(cli_label)
+        except Exception:
+            missing_or_updated.append(cli_label)
+
+    # 3. Gemini CLI (~/.gemini/settings.json — uses BeforeTool / AfterTool and timeout in ms)
+    gem_path = home / ".gemini" / "settings.json"
+    if gem_path.exists():
+        try:
+            g_data = json.loads(gem_path.read_text(encoding="utf-8"))
+            if isinstance(g_data, dict):
+                hooks_obj = g_data.get("hooks")
+                if not isinstance(hooks_obj, dict):
+                    hooks_obj = {}
+                bt_list = hooks_obj.get("BeforeTool") if isinstance(hooks_obj.get("BeforeTool"), list) else []
+                at_list = hooks_obj.get("AfterTool") if isinstance(hooks_obj.get("AfterTool"), list) else []
+
+                def _has_gem_guard(arr: list, expected_cmd: str) -> bool:
+                    for item in arr:
+                        if not isinstance(item, dict):
+                            continue
+                        for h in item.get("hooks") or []:
+                            if isinstance(h, dict) and h.get("command") == expected_cmd:
+                                return True
+                    return False
+
+                def _strip_gem_guard(arr: list) -> list:
+                    cleaned_arr = []
+                    for item in arr:
+                        if not isinstance(item, dict):
+                            cleaned_arr.append(item)
+                            continue
+                        h_list = item.get("hooks")
+                        if isinstance(h_list, list):
+                            kept_h = [
+                                h for h in h_list
+                                if not (isinstance(h, dict) and "orca-command-guard" in str(h.get("command") or ""))
+                            ]
+                            if kept_h:
+                                new_item = dict(item)
+                                new_item["hooks"] = kept_h
+                                cleaned_arr.append(new_item)
+                        elif "orca-command-guard" not in str(item.get("command") or ""):
+                            cleaned_arr.append(item)
+                    return cleaned_arr
+
+                if _has_gem_guard(bt_list, pre_cmd_gemini) and _has_gem_guard(at_list, post_cmd_gemini):
+                    configured.append("gemini")
+                else:
+                    missing_or_updated.append("gemini")
+                    if not check_only:
+                        new_bt = _strip_gem_guard(bt_list)
+                        new_bt.append({"hooks": [{"type": "command", "command": pre_cmd_gemini, "timeout": 10000}]})
+                        new_at = _strip_gem_guard(at_list)
+                        new_at.append({"hooks": [{"type": "command", "command": post_cmd_gemini, "timeout": 10000}]})
+                        hooks_obj["BeforeTool"] = new_bt
+                        hooks_obj["AfterTool"] = new_at
+                        g_data["hooks"] = hooks_obj
+                        tmp_p = gem_path.with_name(f"{gem_path.name}.{os.getpid()}.orca-tmp")
+                        tmp_p.write_text(json.dumps(g_data, indent=2) + "\n", encoding="utf-8")
+                        os.replace(tmp_p, gem_path)
+                        configured.append("gemini")
+        except Exception:
+            missing_or_updated.append("gemini")
+
+    # 4. Kimi Code CLI (~/.kimi-code/config.toml)
+    kimi_dir = Path(os.environ.get("KIMI_CODE_HOME", "").strip() or str(home / ".kimi-code"))
+    kimi_cfg = kimi_dir / "config.toml"
+    if kimi_cfg.exists():
+        try:
+            k_txt = kimi_cfg.read_text(encoding="utf-8")
+            esc_pre = pre_cmd_generic.replace("\\", "\\\\").replace('"', '\\"')
+            esc_post = post_cmd_generic.replace("\\", "\\\\").replace('"', '\\"')
+            expected_block = (
+                f"{KIMI_GUARD_START_MARKER}\n"
+                f"[[hooks]]\n"
+                f'event = "PreToolUse"\n'
+                f'command = "{esc_pre}"\n'
+                f"timeout = 10\n"
+                f"[[hooks]]\n"
+                f'event = "PostToolUse"\n'
+                f'command = "{esc_post}"\n'
+                f"timeout = 10\n"
+                f"{KIMI_GUARD_END_MARKER}"
+            )
+            if expected_block in k_txt:
+                configured.append("kimi")
+            else:
+                missing_or_updated.append("kimi")
+                if not check_only:
+                    cleaned_k = re.sub(
+                        re.escape(KIMI_GUARD_START_MARKER) + r".*?" + re.escape(KIMI_GUARD_END_MARKER) + r"\n?",
+                        "",
+                        k_txt,
+                        flags=re.DOTALL,
+                    ).rstrip()
+                    new_k = f"{cleaned_k}\n\n{expected_block}\n" if cleaned_k else f"{expected_block}\n"
+                    tmp_p = kimi_cfg.with_name(f"{kimi_cfg.name}.{os.getpid()}.orca-tmp")
+                    tmp_p.write_text(new_k, encoding="utf-8")
+                    os.replace(tmp_p, kimi_cfg)
+                    configured.append("kimi")
+        except Exception:
+            missing_or_updated.append("kimi")
+
+    return len(missing_or_updated) == 0, configured, missing_or_updated
+
+
+def uninstall_all_cli_command_guard_hooks() -> None:
+    """Remove `orca-command-guard` hooks from all Agent CLI configs while preserving Orca status hooks and user hooks."""
+    home = Path.home()
+    agy_path = home / ".gemini" / "config" / "hooks.json"
+    if agy_path.exists():
+        try:
+            data = json.loads(agy_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and "orca-command-guard" in data:
+                del data["orca-command-guard"]
+                tmp_p = agy_path.with_name(f"{agy_path.name}.{os.getpid()}.orca-tmp")
+                tmp_p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                os.replace(tmp_p, agy_path)
+        except Exception:
+            pass
+
+    for cfg_rel in (".claude/settings.json", ".openclaude/settings.json", ".qwen/settings.json", ".codebuddy/settings.json", ".gemini/settings.json"):
+        cfg_path = home / cfg_rel
+        if not cfg_path.exists():
+            continue
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("hooks"), dict):
+                continue
+            hooks_obj = data["hooks"]
+            changed = False
+            for ev_k in list(hooks_obj.keys()):
+                arr = hooks_obj.get(ev_k)
+                if not isinstance(arr, list):
+                    continue
+                new_arr = []
+                for item in arr:
+                    if not isinstance(item, dict):
+                        new_arr.append(item)
+                        continue
+                    h_list = item.get("hooks")
+                    if isinstance(h_list, list):
+                        kept = [h for h in h_list if not (isinstance(h, dict) and "orca-command-guard" in str(h.get("command") or ""))]
+                        if len(kept) != len(h_list):
+                            changed = True
+                        if kept:
+                            ni = dict(item)
+                            ni["hooks"] = kept
+                            new_arr.append(ni)
+                    elif "orca-command-guard" in str(item.get("command") or ""):
+                        changed = True
+                    else:
+                        new_arr.append(item)
+                if new_arr:
+                    hooks_obj[ev_k] = new_arr
+                else:
+                    del hooks_obj[ev_k]
+            if changed:
+                tmp_p = cfg_path.with_name(f"{cfg_path.name}.{os.getpid()}.orca-tmp")
+                tmp_p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                os.replace(tmp_p, cfg_path)
+        except Exception:
+            pass
+
+    kimi_cfg = Path(os.environ.get("KIMI_CODE_HOME", "").strip() or str(home / ".kimi-code")) / "config.toml"
+    if kimi_cfg.exists():
+        try:
+            k_txt = kimi_cfg.read_text(encoding="utf-8")
+            cleaned_k = re.sub(
+                r"\n?" + re.escape(KIMI_GUARD_START_MARKER) + r".*?" + re.escape(KIMI_GUARD_END_MARKER) + r"\n?",
+                "\n",
+                k_txt,
+                flags=re.DOTALL,
+            )
+            if cleaned_k != k_txt:
+                tmp_p = kimi_cfg.with_name(f"{kimi_cfg.name}.{os.getpid()}.orca-tmp")
+                tmp_p.write_text(cleaned_k.rstrip() + "\n", encoding="utf-8")
+                os.replace(tmp_p, kimi_cfg)
+        except Exception:
+            pass
 
 
 def main() -> None:
@@ -3041,34 +3467,82 @@ def main() -> None:
         _run_background_watcher(sys.argv[2])
         return
 
-    event = os.environ.get("ORCA_GUARD_EVENT", "PreToolUse")
-    if len(sys.argv) >= 3 and sys.argv[1] == "--event":
-        event = sys.argv[2]
+    if len(sys.argv) >= 2 and sys.argv[1] in ("--install-hooks", "--check-hooks", "--uninstall-hooks"):
+        act_flag = sys.argv[1]
+        if act_flag == "--uninstall-hooks":
+            uninstall_all_cli_command_guard_hooks()
+            print(json.dumps({"ok": True, "action": "uninstalled"}))
+            return
+        g_bin_arg = sys.argv[2] if len(sys.argv) >= 3 else os.path.abspath(__file__)
+        ok, conf, miss = ensure_all_cli_command_guard_hooks(
+            guard_bin=g_bin_arg,
+            check_only=(act_flag == "--check-hooks"),
+        )
+        print(json.dumps({"ok": ok, "configured": conf, "updatedOrMissing": miss}))
+        sys.exit(0 if ok or act_flag == "--install-hooks" else 1)
 
-    allow_out = '{"decision":"ask"}\n' if event == "PreToolUse" else "{}\n"
+    raw_event = os.environ.get("ORCA_GUARD_EVENT", "PreToolUse")
+    if len(sys.argv) >= 3 and sys.argv[1] == "--event":
+        raw_event = sys.argv[2]
+
+    is_pre_event = raw_event in ("PreToolUse", "BeforeTool", "preToolUse", "beforeShellExecution", "tool.call")
+    event = "PreToolUse" if is_pre_event else "PostToolUse"
+    allow_out = '{"decision":"ask"}\n' if is_pre_event else "{}\n"
 
     try:
         payload = _read_json_stdin_nonblocking()
-        is_claude_or_gemini_hook = (
-            isinstance(payload, dict)
-            and "tool_input" in payload
-            and "toolCall" not in payload
-            and "tool_call" not in payload
+        if not isinstance(payload, dict):
+            payload = {}
+
+        payload_event = str(
+            payload.get("hook_event_name")
+            or payload.get("hookEventName")
+            or payload.get("event")
+            or ""
+        ).strip()
+        if payload_event in ("BeforeTool", "PreToolUse", "preToolUse", "beforeShellExecution", "tool.call"):
+            is_pre_event = True
+            event = "PreToolUse"
+        elif payload_event in ("AfterTool", "PostToolUse", "PostToolUseFailure", "postToolUse", "tool.result"):
+            is_pre_event = False
+            event = "PostToolUse"
+
+        is_antigravity_hook = bool(
+            "toolCall" in payload
+            or "tool_call" in payload
+            or os.environ.get("ORCA_ANTIGRAVITY_EVENT")
         )
-        if is_claude_or_gemini_hook:
+        is_kimi_hook = bool(
+            not is_antigravity_hook
+            and "toolName" in payload
+            and "toolInput" in payload
+        )
+        is_gemini_cli_hook = bool(
+            not is_antigravity_hook
+            and (
+                raw_event in ("BeforeTool", "AfterTool")
+                or payload_event in ("BeforeTool", "AfterTool")
+                or os.environ.get("ORCA_GUARD_CLIENT") == "gemini"
+            )
+        )
+
+        if not is_antigravity_hook:
             allow_out = "{}\n"
 
         def _deny_json(reason_msg: str) -> str:
-            if is_claude_or_gemini_hook:
+            if not is_antigravity_hook:
+                hook_ev_name = "BeforeTool" if is_gemini_cli_hook else "PreToolUse"
                 return (
                     json.dumps(
                         {
                             "decision": "block",
                             "reason": reason_msg,
+                            "message": reason_msg,
                             "hookSpecificOutput": {
-                                "hookEventName": "PreToolUse",
+                                "hookEventName": hook_ev_name,
                                 "permissionDecision": "deny",
                                 "permissionDecisionReason": reason_msg,
+                                "message": reason_msg,
                             },
                         }
                     )
@@ -3077,20 +3551,19 @@ def main() -> None:
             return json.dumps({"decision": "deny", "reason": reason_msg}) + "\n"
 
         tc = payload.get("toolCall") or payload.get("tool_call") or {}
-        args = tc.get("args") or payload.get("tool_input") or {}
-        cmd = str(args.get("CommandLine") or args.get("command") or "")
+        tool_name, args, cmd = _extract_normalized_tool_call(payload)
 
         _ensure_child_worktree_hygiene(payload, args)
         _ensure_watcher_for_payload(payload, event, cmd)
 
-        if event == "PreToolUse" and not cmd:
-            log_view_err = _check_unbounded_task_log_view(payload, args, tc=tc)
+        if is_pre_event and not cmd:
+            log_view_err = _check_unbounded_task_log_view(payload, args, tc=tc, tool_name_hint=tool_name)
             if log_view_err:
                 sys.stdout.write(_deny_json(log_view_err))
                 sys.stdout.flush()
                 return
 
-        if event != "PreToolUse" or not cmd:
+        if not is_pre_event or not cmd:
             sys.stdout.write(allow_out)
             sys.stdout.flush()
             return
@@ -3163,44 +3636,64 @@ def main() -> None:
             sys.stdout.flush()
             return
 
-        # Guard 5b: Orca CLI Protocol & Shell Quoting Guards (backticks in --body "...", task-update --spec/--status canceled, && check --wait, waiter_exists)
+        # Guard 5b: Orca CLI Protocol & Shell Quoting Guards (backticks in --body "...", task-update --spec/--status canceled, && check --wait, waiter_exists, sleep polling)
         proto_reason = _check_orca_cli_protocol_guards(cmd[:200000], sanitized_orch, payload, args)
         if proto_reason:
             sys.stdout.write(_deny_json(proto_reason))
             sys.stdout.flush()
             return
 
-        # Auto-Upgrade 1: Transparently rewrite standalone Leader `orca orchestration check ... --wait` -> `orca-team wait-events ...`
-        rewritten_wait = _maybe_rewrite_raw_check_wait_to_wait_events(cmd[:200000], sanitized_orch)
-        if rewritten_wait:
-            if not is_claude_or_gemini_hook and isinstance(args, dict) and "CommandLine" in args:
+        def _emit_rewritten_cmd(new_cmd: str, block_on_kimi_reason: str = "") -> bool:
+            if is_antigravity_hook and isinstance(args, dict) and "CommandLine" in args:
                 sys.stdout.write(
                     json.dumps(
                         {
                             "decision": "ask",
-                            "overwrite": {"CommandLine": rewritten_wait},
+                            "overwrite": {"CommandLine": new_cmd},
                         }
                     )
                     + "\n"
                 )
                 sys.stdout.flush()
-                return
-            elif is_claude_or_gemini_hook and isinstance(args, dict) and "command" in args:
+                return True
+            if is_kimi_hook:
+                if block_on_kimi_reason:
+                    sys.stdout.write(_deny_json(block_on_kimi_reason))
+                    sys.stdout.flush()
+                    return True
+                return False
+            if not is_antigravity_hook and isinstance(args, dict) and ("command" in args or "cmd" in args):
                 new_input = dict(args)
-                new_input["command"] = rewritten_wait
+                if "command" in new_input:
+                    new_input["command"] = new_cmd
+                else:
+                    new_input["cmd"] = new_cmd
+                hook_ev_name = "BeforeTool" if is_gemini_cli_hook else "PreToolUse"
                 sys.stdout.write(
                     json.dumps(
                         {
                             "hookSpecificOutput": {
-                                "hookEventName": "PreToolUse",
+                                "hookEventName": hook_ev_name,
                                 "permissionDecision": "allow",
                                 "updatedInput": new_input,
+                                "tool_input": new_input,
                             }
                         }
                     )
                     + "\n"
                 )
                 sys.stdout.flush()
+                return True
+            return False
+
+        # Auto-Upgrade 1: Transparently rewrite standalone Leader `orca orchestration check ... --wait` -> `orca-team wait-events ...`
+        rewritten_wait = _maybe_rewrite_raw_check_wait_to_wait_events(cmd[:200000], sanitized_orch)
+        if rewritten_wait:
+            kimi_wait_msg = (
+                f"[ORCA WAIT-EVENTS GUARD] CẤM gọi trực tiếp 'orca orchestration check --wait' (gây rác _keepalive/heartbeat)! "
+                f"Hãy chạy lệnh chuẩn: `{rewritten_wait}`"
+            )
+            if _emit_rewritten_cmd(rewritten_wait, block_on_kimi_reason=kimi_wait_msg):
                 return
 
         # Guard 6: Wave-Order Gate & Run-Scoped Elastic Worktree Guard on `worker-start`
@@ -3213,34 +3706,7 @@ def main() -> None:
         # Auto-Upgrade 2: Transparently inject `export BUILDKIT_PROGRESS=plain; ` for `docker compose build` / `docker build`
         rewritten_buildkit = _maybe_inject_buildkit_plain_progress(cmd[:200000], sanitized_orch)
         if rewritten_buildkit:
-            if not is_claude_or_gemini_hook and isinstance(args, dict) and "CommandLine" in args:
-                sys.stdout.write(
-                    json.dumps(
-                        {
-                            "decision": "ask",
-                            "overwrite": {"CommandLine": rewritten_buildkit},
-                        }
-                    )
-                    + "\n"
-                )
-                sys.stdout.flush()
-                return
-            elif is_claude_or_gemini_hook and isinstance(args, dict) and "command" in args:
-                new_input = dict(args)
-                new_input["command"] = rewritten_buildkit
-                sys.stdout.write(
-                    json.dumps(
-                        {
-                            "hookSpecificOutput": {
-                                "hookEventName": "PreToolUse",
-                                "permissionDecision": "allow",
-                                "updatedInput": new_input,
-                            }
-                        }
-                    )
-                    + "\n"
-                )
-                sys.stdout.flush()
+            if _emit_rewritten_cmd(rewritten_buildkit):
                 return
 
         # Trigger automatic post-release tab sweep when Leader runs `orca orchestration worker-release`
@@ -3255,4 +3721,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

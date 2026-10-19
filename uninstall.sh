@@ -48,7 +48,10 @@ for bin in "${BINARIES[@]}"; do
   fi
 done
 
-# Gỡ bỏ orca-command-guard khỏi ~/.gemini/config/hooks.json và dọn khối cấu hình cũ trong ~/.zshrc, ~/.bashrc
+# Gỡ bỏ orca-command-guard khỏi toàn bộ cấu hình Agent CLI (~/.gemini/config/hooks.json, ~/.claude/settings.json, ~/.gemini/settings.json, ~/.kimi-code/config.toml) và dọn khối cấu hình cũ trong ~/.zshrc, ~/.bashrc
+if [[ -f "$SCRIPT_DIR/scripts/orca-command-guard.py" ]]; then
+  python3 "$SCRIPT_DIR/scripts/orca-command-guard.py" --uninstall-hooks >/dev/null 2>&1 || true
+fi
 python3 - << 'PY' >/dev/null 2>&1 || true
 import json, os, re
 from pathlib import Path
