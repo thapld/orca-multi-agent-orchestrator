@@ -2558,15 +2558,16 @@ def _has_unescaped_backtick_in_double_quoted_prose_flag(cmd: str) -> str:
     """
     if "`" not in cmd:
         return ""
-    if not re.search(r"\borca(?:-team)?\b", cmd):
+    scan_cmd = _strip_quoted_heredocs(_strip_non_piped_cat_tee_heredocs(cmd))
+    if "`" not in scan_cmd or not re.search(r"\borca(?:-team)?\b", scan_cmd):
         return ""
     flag_re = re.compile(r"--(body|subject|question|summary|content|title)(?:\s+|=)\"")
-    n = len(cmd)
+    n = len(scan_cmd)
     i = 0
     in_single = False
     in_double = False
     while i < n:
-        ch = cmd[i]
+        ch = scan_cmd[i]
         if in_single:
             if ch == "'":
                 in_single = False
@@ -2589,21 +2590,14 @@ def _has_unescaped_backtick_in_double_quoted_prose_flag(cmd: str) -> str:
             i += 1
             continue
         if ch == "-":
-            m = flag_re.match(cmd, i)
+            m = flag_re.match(scan_cmd, i)
             if m:
                 flag_name = f"--{m.group(1)}"
-                j = m.end()  # right after the opening `"`
-                while j < n:
-                    c2 = cmd[j]
-                    if c2 == "\\":
-                        j += 2
-                        continue
-                    if c2 == '"':
-                        break
-                    if c2 == "`":
-                        return flag_name
-                    j += 1
-                i = j + 1
+                open_dq_idx = m.end() - 1
+                if _double_quoted_arg_has_backtick(scan_cmd, open_dq_idx):
+                    return flag_name
+                end_dq = _find_double_quote_end(scan_cmd, open_dq_idx)
+                i = (end_dq + 1) if end_dq != -1 else m.end()
                 continue
         if ch == '"':
             in_double = True
@@ -2617,7 +2611,7 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
     """
     Prevent recurring real-world Orca CLI errors:
     1. Unescaped backticks in double-quoted `--body "..."` / `--subject "..."` / `--question "..."`.
-    2. Invalid `orca orchestration task-update` flags (`--spec` or `--status canceled`/`cancelled`).
+    2. Invalid `orca orchestration task-update` flags (`--spec`, `--task`, or invalid `--status`).
     3. Chaining `orca orchestration check --wait` with `worker-start`, `worker-retain`, or `task-create`.
     4. Duplicate concurrent `orca orchestration check --wait` (`waiter_exists`) in the same workspace.
     """
@@ -2638,15 +2632,24 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
             if re.search(r"\s--spec(?:\s+|=|$)", seg_raw):
                 return (
                     "[ORCA CLI SYNTAX GUARD] Lệnh 'orca orchestration task-update' KHÔNG hỗ trợ cờ '--spec'! "
-                    "Các cờ hợp lệ của task-update: '--task <id> [--status <todo|ready|assigned|in_progress|blocked|review|done|failed>] "
-                    "[--title <title>] [--role <role>] [--priority <n>]'. "
+                    "Cú pháp chuẩn của task-update: 'orca orchestration task-update --id <task_id> --status <pending|ready|dispatched|completed|failed|blocked> "
+                    "[--result <text>] [--run <run_id>] [--json]'. "
                     "Nếu cần cập nhật kế hoạch chi tiết, hãy dùng 'orca-team plan pin --run <RUN_ID> --content \"...\"' hoặc gửi tin nhắn qua 'orca orchestration send'."
                 )
-            if re.search(r"--status(?:\s+|=)['\"]?(?:canceled|cancelled)\b", seg_raw, re.IGNORECASE):
+            if re.search(r"\s--task(?:\s+|=|$)", seg_raw) and not re.search(r"\s--id(?:\s+|=)", seg_raw):
                 return (
-                    "[ORCA CLI SYNTAX GUARD] Giá trị '--status canceled/cancelled' KHÔNG hợp lệ trong 'orca orchestration task-update'! "
-                    "Các trạng thái hợp lệ: todo, ready, assigned, in_progress, blocked, review, done, failed "
-                    "(nếu muốn đóng/bỏ qua task, hãy dùng '--status done' hoặc '--status failed')."
+                    "[ORCA CLI SYNTAX GUARD] Lệnh 'orca orchestration task-update' dùng cờ '--id <task_id>' (KHÔNG phải '--task')! "
+                    "Cú pháp chuẩn: 'orca orchestration task-update --id <task_id> --status <pending|ready|dispatched|completed|failed|blocked> [--result <text>] [--json]'."
+                )
+            if re.search(
+                r"--status(?:\s+|=)['\"]?(?:canceled|cancelled|done|todo|in_progress|assigned|review)\b",
+                seg_raw,
+                re.IGNORECASE,
+            ):
+                return (
+                    "[ORCA CLI SYNTAX GUARD] Giá trị '--status' KHÔNG hợp lệ trong 'orca orchestration task-update'! "
+                    "Các trạng thái hợp lệ của Orca CLI: pending, ready, dispatched, completed, failed, blocked "
+                    "(nếu muốn đánh dấu hoàn tất hoặc đóng task, hãy dùng '--status completed' hoặc '--status failed')."
                 )
 
     has_check_wait = bool(
@@ -2664,8 +2667,10 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
             try:
                 _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
                 real_cwd = os.path.realpath(cwd) if cwd else ""
+                cur_run_m = re.search(r"--run(?:\s+|=)['\"]?(run_[A-Za-z0-9_-]+)", sanitized_orch)
+                cur_run_id = cur_run_m.group(1) if cur_run_m else ""
                 proc_ps = subprocess.run(
-                    ["ps", "-eo", "pid=,args="],
+                    ["ps", "-eo", "pid=,ppid=,args="],
                     capture_output=True,
                     text=True,
                     timeout=1.5,
@@ -2673,13 +2678,14 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
                 my_pid = os.getpid()
                 my_ppid = os.getppid()
                 for line in (proc_ps.stdout or "").splitlines():
-                    parts = line.strip().split(None, 1)
-                    if len(parts) < 2 or not parts[0].isdigit():
+                    parts = line.strip().split(None, 2)
+                    if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
                         continue
                     p_id = int(parts[0])
+                    p_ppid = int(parts[1])
                     if p_id in (my_pid, my_ppid):
                         continue
-                    p_args = parts[1]
+                    p_args = parts[2]
                     if (
                         "orca orchestration check" in p_args
                         and "--wait" in p_args
@@ -2698,6 +2704,17 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
                                 waiter_cwd = os.path.realpath(l_line[1:].strip())
                                 break
                         if waiter_cwd and real_cwd and waiter_cwd == real_cwd:
+                            old_run_m = re.search(r"--run(?:\s+|=)['\"]?(run_[A-Za-z0-9_-]+)", p_args)
+                            old_run_id = old_run_m.group(1) if old_run_m else ""
+                            is_stale_waiter = (p_ppid <= 1) or bool(
+                                cur_run_id and old_run_id and cur_run_id != old_run_id
+                            )
+                            if is_stale_waiter:
+                                try:
+                                    os.kill(p_id, signal.SIGTERM)
+                                except OSError:
+                                    pass
+                                continue
                             return (
                                 f"[ORCA WAITER-EXISTS GUARD] Đã có 1 tiến trình 'orca orchestration check --wait' đang chạy ngầm cho workspace này (PID {p_id})! "
                                 f"CẤM gọi thêm 'orca orchestration check --wait' song song (sẽ bị lỗi 'waiter_exists: A blocking check is already active'). "
@@ -2707,6 +2724,40 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
                 pass
 
     return ""
+
+
+def _check_unbounded_task_log_view(payload: dict, args: dict) -> str:
+    """
+    Block unbounded `view_file` / `Read` calls on `.system_generated/tasks/task-*.log`
+    that dump 10,000–13,000 tokens of raw command output into the LLM context window.
+    Allow bounded reads when both StartLine and EndLine are provided with <= 160 lines.
+    """
+    if not isinstance(args, dict):
+        return ""
+    fp = str(
+        args.get("AbsolutePath")
+        or args.get("file_path")
+        or args.get("path")
+        or ""
+    ).strip()
+    if not fp or not re.search(r"[/\\]\.system_generated[/\\]tasks[/\\]task-\d+\.log$", fp):
+        return ""
+    start_ln = args.get("StartLine") if args.get("StartLine") is not None else args.get("start_line")
+    end_ln = args.get("EndLine") if args.get("EndLine") is not None else args.get("end_line")
+    if start_ln is not None and end_ln is not None:
+        try:
+            s_i = int(start_ln)
+            e_i = int(end_ln)
+            if s_i >= 1 and e_i >= s_i and (e_i - s_i) <= 160:
+                return ""
+        except (ValueError, TypeError):
+            pass
+    base_log = os.path.basename(fp)
+    return (
+        f"[ORCA TOKEN-LEAK GUARD] CẤM gọi 'view_file' đọc toàn bộ file log tác vụ ngầm '{base_log}' không giới hạn dòng! "
+        f"Mỗi lần đọc thẳng '{base_log}' không truyền StartLine/EndLine sẽ bơm 10,000–13,000 tokens rác vào bộ nhớ ngữ cảnh. "
+        f"Cách sửa: Chỉ định rõ khoảng dòng ngắn (StartLine & EndLine cách nhau <= 120 dòng), hoặc dùng lệnh shell `tail -n 60 \"{fp}\"` để chỉ xem phần kết quả cuối!"
+    )
 
 
 def main() -> None:
@@ -2759,6 +2810,13 @@ def main() -> None:
 
         _ensure_child_worktree_hygiene(payload, args)
         _ensure_watcher_for_payload(payload, event, cmd)
+
+        if event == "PreToolUse" and not cmd:
+            log_view_err = _check_unbounded_task_log_view(payload, args)
+            if log_view_err:
+                sys.stdout.write(_deny_json(log_view_err))
+                sys.stdout.flush()
+                return
 
         if event != "PreToolUse" or not cmd:
             sys.stdout.write(allow_out)

@@ -964,7 +964,8 @@ def release_settled_worker_terminals(
 
 def _heal_completed_tasks_after_gate(run_ids) -> int:
     """Tự động cập nhật lại tasks.status = 'completed' cho các Task đã có result succeeded hoặc dispatch succeeded
-    nhưng bị Orca reset về 'ready'/'blocked' sau khi tạo và đóng Decision Gate (gate-resolve)."""
+    nhưng bị Orca reset về 'ready'/'blocked' sau khi tạo và đóng Decision Gate (gate-resolve), đồng thời tự đóng
+    các pending gate mồ côi nếu Task chứa gate đó đã hoàn tất thành công (succeeded) và không còn dispatch nào đang chạy."""
     import sqlite3
     db_p = _find_orca_orchestration_db()
     if not db_p or not run_ids:
@@ -977,6 +978,36 @@ def _heal_completed_tasks_after_gate(run_ids) -> int:
         conn = sqlite3.connect(str(db_p), timeout=2.0)
         with conn:
             ph = ",".join("?" for _ in rids)
+            conn.execute(
+                f"""
+                UPDATE decision_gates
+                SET status = 'resolved',
+                    resolution = COALESCE(resolution, 'auto-resolved (task already succeeded)'),
+                    resolved_at = COALESCE(resolved_at, datetime('now'))
+                WHERE run_id IN ({ph})
+                  AND status = 'pending'
+                  AND task_id IS NOT NULL
+                  AND task_id IN (
+                      SELECT t.id
+                      FROM tasks t
+                      WHERE t.run_id IN ({ph})
+                        AND (
+                            (t.result IS NOT NULL AND (t.result LIKE '%"outcome":"succeeded"%' OR t.result LIKE '%"outcome": "succeeded"%'))
+                            OR t.status = 'completed'
+                        )
+                  )
+                  AND task_id NOT IN (
+                      SELECT dc2.task_id
+                      FROM dispatch_contexts dc2
+                      LEFT JOIN worker_dispatches wd2 ON wd2.dispatch_id = dc2.id
+                      WHERE dc2.run_id IN ({ph})
+                        AND dc2.task_id IS NOT NULL
+                        AND dc2.status IN ('pending', 'dispatched')
+                        AND COALESCE(wd2.state, '') NOT IN ('succeeded', 'completed', 'failed', 'stopped', 'timed_out', 'canceled', 'cancelled')
+                  )
+                """,
+                tuple(rids * 3),
+            )
             cur = conn.execute(
                 f"""
                 UPDATE tasks
@@ -2325,6 +2356,8 @@ def resolve_run_upstream_branches(
         if is_to_main or r_name in ("main", "leader", "coordinator"):
             all_p = ("dev", "ui", "fix", "devops", "qa", "sec", "bench")
             return all_p, all_p, all_p
+        if r_name in ("dev", "ui", "fix", "critic", "re", "pr", "issue", "doc"):
+            return (), (), ()
         if r_name == "devops":
             p = ("dev", "ui", "fix")
             return p, p, p
@@ -2627,6 +2660,7 @@ def resolve_run_upstream_branches(
                         "rolePrefix": slot_prefix,
                         "terminalHandle": str(dr["agent_terminal_handle"] or ""),
                         "createdAt": dr["created_at"],
+                        "completedAt": dr["completed_at"],
                     })
 
                 try:
@@ -2732,6 +2766,7 @@ def resolve_run_upstream_branches(
                         "rolePrefix": slot_prefix,
                         "terminalHandle": str(w.get("agentTerminalHandle") or ""),
                         "createdAt": w.get("createdAt") or w.get("startedAt"),
+                        "completedAt": w.get("completedAt") or w.get("settledAt"),
                     })
 
             rc_ml, out_ml, _ = run_orca_json(
@@ -2760,22 +2795,34 @@ def resolve_run_upstream_branches(
             for d in dispatches_in_run
             if d.get("dispatchId")
         }
-        slot_to_disp: dict[str, str] = {}
-        handle_to_disp: dict[str, str] = {}
+        disp_created_ts: dict[str, float] = {}
         for d in dispatches_in_run:
             did_v = str(d.get("dispatchId") or "").strip()
-            slot_v = str(d.get("slotName") or d.get("branch") or "").strip()
-            th_v = str(d.get("terminalHandle") or "").strip()
             if did_v:
-                handle_to_disp[did_v] = did_v
-                handle_to_disp[f"dispatch:{did_v}"] = did_v
+                disp_created_ts[did_v] = _to_epoch_secs(d.get("createdAt"))
+
+        def _build_active_maps_at_ts(msg_ts: float):
+            s_map: dict[str, str] = {}
+            h_map: dict[str, str] = {}
+            for d in dispatches_in_run:
+                did_v = str(d.get("dispatchId") or "").strip()
+                if not did_v:
+                    continue
+                c_ts = disp_created_ts.get(did_v, 0.0)
+                if msg_ts > 0 and c_ts > 0 and c_ts > (msg_ts + 2.0):
+                    continue
+                slot_v = str(d.get("slotName") or d.get("branch") or "").strip()
+                th_v = str(d.get("terminalHandle") or "").strip()
+                h_map[did_v] = did_v
+                h_map[f"dispatch:{did_v}"] = did_v
                 if slot_v:
-                    slot_to_disp[slot_v] = did_v
-            if did_v and th_v:
-                norm_th = th_v[len("terminal:"):] if th_v.startswith("terminal:") else th_v
-                handle_to_disp[th_v] = did_v
-                handle_to_disp[norm_th] = did_v
-                handle_to_disp[f"terminal:{norm_th}"] = did_v
+                    s_map[slot_v] = did_v
+                if th_v:
+                    norm_th = th_v[len("terminal:"):] if th_v.startswith("terminal:") else th_v
+                    h_map[th_v] = did_v
+                    h_map[norm_th] = did_v
+                    h_map[f"terminal:{norm_th}"] = did_v
+            return s_map, h_map
 
         latest_global_reject_ts = 0.0
         latest_slot_reject_ts: dict[str, float] = {}
@@ -2785,10 +2832,13 @@ def resolve_run_upstream_branches(
             m_type = str(mr.get("type") or "").strip().lower()
             if m_type not in ("handoff", "escalation"):
                 continue
+            m_ts = _to_epoch_secs(mr.get("createdAt") or mr.get("created_at"))
+            slot_to_disp, handle_to_disp = _build_active_maps_at_ts(m_ts)
             fd_id, _ = _extract_msg_dispatch_and_task(mr, handle_to_disp=handle_to_disp)
+            if fd_id and m_ts > 0 and disp_created_ts.get(fd_id, 0.0) > (m_ts + 2.0):
+                fd_id = ""
             m_subj = str(mr.get("subject") or "")
             m_body = str(mr.get("body") or "")
-            m_ts = _to_epoch_secs(mr.get("createdAt") or mr.get("created_at"))
             msg_cls = _classify_p2p_message(m_type, m_subj, m_body)
             if msg_cls == "reject":
                 targeted_dids: set[str] = set()
@@ -2798,11 +2848,22 @@ def resolve_run_upstream_branches(
                 combined_txt = f"{m_subj} {m_body}"
                 for cand_did in disp_role_map:
                     if cand_did and cand_did != fd_id and cand_did in combined_txt:
-                        targeted_dids.add(cand_did)
+                        if m_ts <= 0 or disp_created_ts.get(cand_did, 0.0) <= (m_ts + 2.0):
+                            targeted_dids.add(cand_did)
                 for cand_slot, cand_did in slot_to_disp.items():
                     if cand_slot and cand_did != fd_id:
                         if re.search(rf"\b{re.escape(cand_slot)}(?!-\d)\b", combined_txt):
                             targeted_dids.add(cand_did)
+                if not targeted_dids:
+                    active_builders_at_ts = [
+                        did_c
+                        for did_c, r_p in disp_role_map.items()
+                        if r_p in ("dev", "ui", "fix")
+                        and did_c != fd_id
+                        and (m_ts <= 0 or disp_created_ts.get(did_c, 0.0) <= (m_ts + 2.0))
+                    ]
+                    if len(active_builders_at_ts) == 1:
+                        targeted_dids.add(active_builders_at_ts[0])
                 if targeted_dids:
                     for td in targeted_dids:
                         if m_ts > latest_slot_reject_ts.get(td, 0.0):
@@ -2820,6 +2881,17 @@ def resolve_run_upstream_branches(
             r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
             if r_ts > max_ready_ts_by_grp.get(r_grp, 0.0):
                 max_ready_ts_by_grp[r_grp] = r_ts
+        for d in dispatches_in_run:
+            if d.get("isSucceeded"):
+                did_v = str(d.get("dispatchId") or "").strip()
+                r_pref = disp_role_map.get(did_v, str(d.get("rolePrefix") or "dev"))
+                r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
+                comp_ts = max(
+                    _to_epoch_secs(d.get("completedAt")),
+                    _to_epoch_secs(d.get("createdAt")),
+                )
+                if comp_ts > max_ready_ts_by_grp.get(r_grp, 0.0):
+                    max_ready_ts_by_grp[r_grp] = comp_ts
         for fd_id, r_ts in latest_ready_ts_by_disp.items():
             r_pref = disp_role_map.get(fd_id, "dev")
             r_grp = "builder" if r_pref in ("dev", "ui", "fix") else r_pref
@@ -2980,7 +3052,7 @@ def resolve_run_upstream_branches(
                     })
 
     ready_to_merge = (
-        bool(resolved_run_id)
+        (bool(resolved_run_id) or not upstream_prefixes)
         and len(blocking_active_upstream) == 0
         and len(blocking_unstarted_upstream) == 0
         and len(blocking_failed_upstream) == 0
@@ -3334,10 +3406,119 @@ def cmd_kb(args: list, caller_dir: Path = None):
         sys.exit(1)
 
 
+def _git_merge_branch_safe(git_cwd: Path, branch_name: str, abort_on_conflict: bool = True) -> tuple[int, str, list[str], list[str]]:
+    """Chạy `git merge --no-edit <branch_name>` an toàn:
+    1) Nếu lỗi do 'untracked working tree files would be overwritten by merge', tự động dọn các file untracked gây va chạm và thử lại 1 lần.
+    2) Nếu xảy ra xung đột (CONFLICT), thu thập danh sách file xung đột và tự động chạy `git merge --abort` (khi abort_on_conflict=True)
+       để không bao giờ để lại MERGE_HEAD bẩn trên nhánh main hoặc worktree của QA/Sec/Bench."""
+    cleaned_untracked: list[str] = []
+    conflict_files: list[str] = []
+    git_cwd_real = os.path.realpath(str(git_cwd))
+
+    proc = subprocess.run(
+        ["git", "merge", "--no-edit", branch_name],
+        cwd=str(git_cwd),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0:
+        return 0, "", [], []
+
+    combined_out = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+    if "untracked working tree files would be overwritten by merge" in combined_out.lower():
+        cand_rels: list[str] = []
+        in_untracked_block = False
+        for raw_ln in combined_out.splitlines():
+            ln_low = raw_ln.strip().lower()
+            if "untracked working tree files would be overwritten by merge" in ln_low:
+                in_untracked_block = True
+                continue
+            if in_untracked_block:
+                if (
+                    ln_low.startswith("please move or remove")
+                    or ln_low.startswith("aborting")
+                    or ln_low.startswith("merge with strategy")
+                    or ln_low.startswith("error:")
+                    or ln_low.startswith("fatal:")
+                ):
+                    break
+                rel_p = raw_ln.strip()
+                if rel_p:
+                    cand_rels.append(rel_p)
+        if not cand_rels:
+            try:
+                p_untr = subprocess.run(
+                    ["git", "ls-files", "--others", "--exclude-standard"],
+                    cwd=str(git_cwd),
+                    capture_output=True,
+                    text=True,
+                )
+                p_diff = subprocess.run(
+                    ["git", "diff", "--name-only", f"HEAD..{branch_name}"],
+                    cwd=str(git_cwd),
+                    capture_output=True,
+                    text=True,
+                )
+                untr_set = {x.strip() for x in (p_untr.stdout or "").splitlines() if x.strip()}
+                diff_set = {x.strip() for x in (p_diff.stdout or "").splitlines() if x.strip()}
+                cand_rels = sorted(untr_set & diff_set)
+            except Exception:
+                cand_rels = []
+
+        for rel_p in cand_rels:
+            full_p = os.path.realpath(os.path.join(git_cwd_real, rel_p))
+            if full_p.startswith(git_cwd_real + os.sep) and os.path.lexists(full_p):
+                try:
+                    if os.path.isdir(full_p) and not os.path.islink(full_p):
+                        shutil.rmtree(full_p, ignore_errors=True)
+                    else:
+                        os.unlink(full_p)
+                    cleaned_untracked.append(rel_p)
+                except OSError:
+                    pass
+
+        if cleaned_untracked:
+            proc = subprocess.run(
+                ["git", "merge", "--no-edit", branch_name],
+                cwd=str(git_cwd),
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode == 0:
+                return 0, "", [], cleaned_untracked
+            combined_out = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+
+    try:
+        p_cf = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            cwd=str(git_cwd),
+            capture_output=True,
+            text=True,
+        )
+        conflict_files = [x.strip() for x in (p_cf.stdout or "").splitlines() if x.strip()]
+    except Exception:
+        conflict_files = []
+
+    if abort_on_conflict:
+        try:
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                cwd=str(git_cwd),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+    err_msg = (proc.stderr or proc.stdout or "").strip()
+    return proc.returncode or 1, err_msg, conflict_files, cleaned_untracked
+
+
 def cmd_merge_upstream(args: list, caller_dir: Path = None):
     """
     CLI: orca-team merge-upstream [--run <RUN_ID>] [--dispatch <CTX_ID>] [--task <TASK_ID>]
          [--terminal <TERM_ID>] [--role <ROLE>] [--to-main] [--allow-live|--p2p]
+         [--from-branch <BRANCH>] [--keep-conflict]
          [--wait|--no-wait] [--wait-timeout <SECS>] [--check-only|--list-only] [--json]
     Đồng bộ (git merge --no-edit) nhánh gốc (main/develop) và CHỈ các nhánh upstream thuộc ĐÚNG Run hiện tại
     sau khi đã xác minh 100% upstream worker trong cùng Run đã hoàn tất (succeeded) hoặc đã gửi P2P handoff (DEV_READY).
@@ -3356,6 +3537,8 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
     explicit_wait = False
     no_wait = False
     wait_timeout = 1800.0
+    explicit_branches: list[str] = []
+    keep_conflict = False
 
     idx = 0
     while idx < len(args):
@@ -3364,6 +3547,7 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
             print(
                 "Sử dụng: orca-team merge-upstream [--role <dev|ui|devops|sec|qa|bench>] [--run <RUN_ID>]\n"
                 "         [--task-id <TASK_ID>] [--dispatch-id <DISPATCH_ID>] [--terminal <HANDLE>]\n"
+                "         [--from-branch <BRANCH>] [--keep-conflict]\n"
                 "         [--to-main] [--allow-live|--p2p] [--wait|--no-wait] [--wait-timeout <SECS>]\n"
                 "         [--check-only] [--list-only] [--json]"
             )
@@ -3397,6 +3581,21 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
             idx += 2
         elif tok.startswith("--role="):
             role_str = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--from-branch", "--peer", "--peer-branch") and idx + 1 < len(args):
+            for b_item in str(args[idx + 1]).split(","):
+                b_clean = b_item.strip()
+                if b_clean and b_clean not in explicit_branches:
+                    explicit_branches.append(b_clean)
+            idx += 2
+        elif tok.startswith("--from-branch=") or tok.startswith("--peer=") or tok.startswith("--peer-branch="):
+            for b_item in tok.split("=", 1)[1].split(","):
+                b_clean = b_item.strip()
+                if b_clean and b_clean not in explicit_branches:
+                    explicit_branches.append(b_clean)
+            idx += 1
+        elif tok == "--keep-conflict":
+            keep_conflict = True
             idx += 1
         elif tok == "--to-main":
             to_main = True
@@ -3446,6 +3645,13 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
         to_main=to_main,
         allow_live=allow_live,
     )
+    if explicit_branches:
+        up_brs = list(info.get("upstreamBranches") or [])
+        for eb in explicit_branches:
+            if eb and eb != info.get("callerBranch") and eb not in up_brs:
+                up_brs.append(eb)
+        info["upstreamBranches"] = up_brs
+        info["readyToMerge"] = True
 
     try:
         main_root_p = Path(info.get("mainRoot") or target_dir)
@@ -3582,7 +3788,9 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
 
     git_cwd = Path(info["mainRoot"]) if to_main else Path(info["callerWorktree"])
     merged_branches: list[str] = []
+    cleaned_untracked_all: list[str] = []
     main_br = info.get("mainBranch") or "main"
+    abort_on_conflict = not keep_conflict
 
     if not to_main and info.get("isInWorkerWorktree"):
         _strip_leader_directives_in_child_worktree(git_cwd, Path(info["mainRoot"]))
@@ -3596,20 +3804,31 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
             stderr=subprocess.DEVNULL,
         ).returncode
         if rc_v == 0:
-            proc_m = subprocess.run(
-                ["git", "merge", "--no-edit", main_br],
-                cwd=str(git_cwd),
-                capture_output=True,
-                text=True,
+            rc_m, err_msg, cf_list, cl_untr = _git_merge_branch_safe(
+                git_cwd, main_br, abort_on_conflict=abort_on_conflict
             )
-            if proc_m.returncode != 0:
-                err_msg = (proc_m.stderr or proc_m.stdout or "").strip()
+            if cl_untr:
+                cleaned_untracked_all.extend(cl_untr)
+            if rc_m != 0:
+                info["mergeError"] = f"Conflict/error merging {main_br}: {err_msg}"
+                info["conflictBranch"] = main_br
+                info["conflictFiles"] = cf_list
+                info["conflictAborted"] = abort_on_conflict
+                if cleaned_untracked_all:
+                    info["cleanedUntrackedFiles"] = cleaned_untracked_all
                 if as_json:
-                    info["mergeError"] = f"Conflict/error merging {main_br}: {err_msg}"
                     print(json.dumps(info, ensure_ascii=False, indent=2))
                 else:
                     print(f"❌ Lỗi khi merge nhánh '{main_br}' vào '{info.get('callerBranch')}':\n{err_msg}", file=sys.stderr)
-                sys.exit(proc_m.returncode or 1)
+                    if cf_list:
+                        print(f"   • Các file xung đột: {', '.join(cf_list)}", file=sys.stderr)
+                    if abort_on_conflict:
+                        print(
+                            f"   💡 Đã tự động chạy 'git merge --abort' để giữ sạch worktree. "
+                            f"Nếu bạn là Dev/Fix worker muốn tự giải quyết conflict với '{main_br}', hãy chạy kèm cờ '--keep-conflict'.",
+                            file=sys.stderr,
+                        )
+                sys.exit(rc_m or 1)
             merged_branches.append(main_br)
 
     # Bước 2: Lọc bỏ các nhánh đã là ancestor của một nhánh downstream khác trong danh sách (Ancestor Branch Pruning)
@@ -3657,22 +3876,51 @@ def cmd_merge_upstream(args: list, caller_dir: Path = None):
             if br not in merged_branches:
                 merged_branches.append(br)
             continue
-        proc_b = subprocess.run(
-            ["git", "merge", "--no-edit", br],
-            cwd=str(git_cwd),
-            capture_output=True,
-            text=True,
+        rc_b, err_msg, cf_list, cl_untr = _git_merge_branch_safe(
+            git_cwd, br, abort_on_conflict=abort_on_conflict
         )
-        if proc_b.returncode != 0:
-            err_msg = (proc_b.stderr or proc_b.stdout or "").strip()
+        if cl_untr:
+            cleaned_untracked_all.extend(cl_untr)
+        if rc_b != 0:
+            info["mergedBranches"] = merged_branches
+            info["mergeError"] = f"Conflict/error merging {br}: {err_msg}"
+            info["conflictBranch"] = br
+            info["conflictFiles"] = cf_list
+            info["conflictAborted"] = abort_on_conflict
+            if cleaned_untracked_all:
+                info["cleanedUntrackedFiles"] = cleaned_untracked_all
             if as_json:
-                info["mergedBranches"] = merged_branches
-                info["mergeError"] = f"Conflict/error merging {br}: {err_msg}"
                 print(json.dumps(info, ensure_ascii=False, indent=2))
             else:
                 print(f"❌ Lỗi/xung đột khi merge nhánh '{br}' (thuộc Run {info.get('runId')}):\n{err_msg}", file=sys.stderr)
-            sys.exit(proc_b.returncode or 1)
+                if cf_list:
+                    print(f"   • Các file xung đột ({len(cf_list)}): {', '.join(cf_list)}", file=sys.stderr)
+                if abort_on_conflict:
+                    prev_merged = [b for b in merged_branches if b != main_br]
+                    peer_hint = prev_merged[-1] if prev_merged else main_br
+                    if to_main:
+                        print(
+                            f"   🛡️ [AUTO-ABORT CLEANUP] Đã tự động chạy 'git merge --abort' để giữ sạch nhánh '{main_br}' (Leader cấm tự sửa code giải quyết conflict).\n"
+                            f"   👉 Cách xử lý chuẩn: Giao/mở lại Dev hoặc Fix worker trên nhánh '{br}' chạy:\n"
+                            f"      `orca-team merge-upstream --role dev --from-branch {peer_hint} --keep-conflict`\n"
+                            f"      để giải quyết conflict, chạy test xanh và git commit trước khi Leader merge lại vào '{main_br}'!",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"   🛡️ [AUTO-ABORT CLEANUP] Đã tự động chạy 'git merge --abort' để giữ sạch worktree '{info.get('callerBranch')}'.\n"
+                            f"   👉 Nếu bạn là QA/Sec/Bench (không tự sửa business logic của Dev): Hãy gửi P2P handoff/escalation "
+                            f"('QA_REJECT: Merge conflict trên nhánh {br} tại {', '.join(cf_list[:4]) or 'files'}') yêu cầu worker '{br}' chạy:\n"
+                            f"      `orca-team merge-upstream --role dev --from-branch {peer_hint} --keep-conflict`\n"
+                            f"      để giải quyết conflict, test xanh, commit và gửi lại DEV_READY!\n"
+                            f"   👉 Nếu bạn là Dev/Fix worker đang muốn tự giải quyết conflict với '{br}': hãy chạy lại lệnh kèm cờ `--keep-conflict`.",
+                            file=sys.stderr,
+                        )
+            sys.exit(rc_b or 1)
         merged_branches.append(br)
+
+    if cleaned_untracked_all:
+        info["cleanedUntrackedFiles"] = cleaned_untracked_all
 
     if not to_main and info.get("isInWorkerWorktree"):
         _strip_leader_directives_in_child_worktree(git_cwd, Path(info["mainRoot"]))
@@ -7193,11 +7441,25 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
                     if g_tok > max_tool_output_tok:
                         max_tool_output_tok = g_tok
                         max_tool_cmd = cmd_label_short
+                    is_task_log_view = bool(
+                        not is_shell_cmd
+                        and cmd_label_short.startswith("view_file(")
+                        and re.search(r"\btask-\d+\.log\)", cmd_label_short)
+                    )
+                    is_huge_file_view = bool(
+                        not is_shell_cmd and cmd_label_short.startswith("view_file(") and g_tok >= 15000
+                    )
                     if (
-                        is_shell_cmd
-                        and g_tok >= 3500
+                        (
+                            (
+                                is_shell_cmd
+                                and g_tok >= 3500
+                                and not re.search(r"\borca\s+orchestration\s+ask\b", raw_shell_cmd)
+                            )
+                            or (is_task_log_view and g_tok >= 3500)
+                            or is_huge_file_view
+                        )
                         and cmd_label_short
-                        and not re.search(r"\borca\s+orchestration\s+ask\b", raw_shell_cmd)
                         and not any(cmd_label_short in cb for cb in context_bomb_cmds)
                     ):
                         context_bomb_cmds.append(f"{cmd_label_short} (~{g_tok:,} tok)")
