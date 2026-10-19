@@ -4746,45 +4746,28 @@ def _is_role_enabled(data: dict, is_optional: bool = True) -> bool:
     return has_valid_agent if is_optional else (ag_norm != "none")
 
 def _sync_discovery_links(root: Path, config: dict, create_missing: bool = False):
-    """Đảm bảo GEMINI.md và CLAUDE.md/AGENTS.md ở root luôn trỏ tới .agents/GEMINI.md (không ghi đè file riêng của user)."""
+    """Đảm bảo GEMINI.md, AGENTS.md và CLAUDE.md ở root luôn trỏ tới .agents/GEMINI.md (không ghi đè file riêng của user) để đổi CLI nào làm Leader cũng nhận đủ directive."""
     gemini_md = root / ".agents" / "GEMINI.md"
     if not gemini_md.exists():
         return
     root_gemini_md = root / "GEMINI.md"
     claude_md = root / "CLAUDE.md"
     agents_md = root / "AGENTS.md"
-    c_agent = str(((config or {}).get("coordinator") or {}).get("agent") or "antigravity").strip().lower()
-    both_linked = _is_orca_discovery_link(claude_md) and _is_orca_discovery_link(agents_md)
     has_any_orca_link = (
         create_missing
         or _is_orca_discovery_link(root_gemini_md)
         or _is_orca_discovery_link(claude_md)
         or _is_orca_discovery_link(agents_md)
     )
-
-    if has_any_orca_link and not os.path.lexists(root_gemini_md):
-        try:
-            os.symlink(".agents/GEMINI.md", root_gemini_md)
-        except OSError:
-            pass
-    if both_linked:
+    if not has_any_orca_link:
         return
-    if c_agent == "claude":
-        if has_any_orca_link and not os.path.lexists(claude_md):
+
+    for link_path in (root_gemini_md, agents_md, claude_md):
+        if not os.path.lexists(link_path):
             try:
-                os.symlink(".agents/GEMINI.md", claude_md)
+                os.symlink(".agents/GEMINI.md", link_path)
             except OSError:
                 pass
-        if _is_orca_discovery_link(agents_md):
-            agents_md.unlink(missing_ok=True)
-    else:
-        if has_any_orca_link and not os.path.lexists(agents_md):
-            try:
-                os.symlink(".agents/GEMINI.md", agents_md)
-            except OSError:
-                pass
-        if _is_orca_discovery_link(claude_md):
-            claude_md.unlink(missing_ok=True)
 
 
 def sync_gemini_directive(root: Path, config: dict):
@@ -5001,8 +4984,19 @@ def sync_gemini_directive(root: Path, config: dict):
         flags=re.M
     )
     content = re.sub(
+        r"^> 🔴 \*\*LUẬT CẤM VƯỢT RÀO TẠI ROOT WORKSPACE[^\n]*\n> - Tuyệt đối \*\*KHÔNG\*\* dùng file-editing tools[^\n]*\n> - Tuyệt đối \*\*KHÔNG\*\* tự chạy lệnh build[^\n]*\n> - Tuyệt đối \*\*KHÔNG\*\* gọi[^\n]*",
+        (
+            "> 🔴 **LUẬT CẤM VƯỢT RÀO TẠI ROOT WORKSPACE (STRICT LEADER BOUNDARIES — ĐA CLI):**\n"
+            "> - Tuyệt đối **KHÔNG** dùng file-editing tools (`write_to_file`, `replace_file_content`, `Write`, `Edit`, `MultiEdit`) để sửa code, config hay viết test tại root.\n"
+            "> - Tuyệt đối **KHÔNG** tự chạy lệnh build, test, benchmark, dịch ngược, đóng gói hay hạ tầng (`docker`, `kubectl`, `helm`, `mvn`, `gradle`, `npm/pytest`, `k6`, `wrk`, `rea`, `psql`, `curl` test...) trực tiếp trên terminal của Leader!\n"
+            "> - Tuyệt đối **KHÔNG** gọi subagent/plan nội bộ (`invoke_subagent`, `Agent`, `AgentSwarm`, `Task`, `EnterPlanMode`), **KHÔNG** dùng tool poll lệnh ngầm (`manage_task`, `schedule`, `TaskOutput`, `BashOutput`, `WaitFor`, `CronCreate`), và **KHÔNG** gọi `view_file`/`Read` đọc `task-*.log` hay `transcript*.jsonl` / `wire.jsonl` (mỗi lần đọc ngốn 150k–250k tokens!)."
+        ),
+        content,
+        flags=re.M,
+    )
+    content = re.sub(
         r"^> - Tại root workspace, Leader \*\*CHỈ ĐƯỢC PHÉP\*\*[^\n]*",
-        lambda m: "> - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy lệnh `orca orchestration ...`, `orca-team ...` và `git merge` (sau khi qua Human Gate); **CẤM** gọi `invoke_subagent` nội bộ hoặc dùng `view_file` đọc `task-*.log` / `transcript*.jsonl`.",
+        lambda m: "> - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy lệnh `orca orchestration ...`, `orca-team ...` và `git merge` (sau khi qua Human Gate); **CẤM** gọi `invoke_subagent`/`Agent`/`AgentSwarm`/`Task` nội bộ hoặc dùng `view_file`/`Read` đọc `task-*.log` / `transcript*.jsonl` / `wire.jsonl`.",
         content,
         flags=re.M
     )
@@ -7255,7 +7249,7 @@ def _fmt_tok(n: int) -> str:
 def _command_from_tool_call(tc: dict) -> str:
     if not isinstance(tc, dict):
         return ""
-    if str(tc.get("name") or "") not in ("run_command", "Bash", "bash"):
+    if str(tc.get("name") or "") not in ("run_command", "Bash", "bash", "Shell", "shell", "run_shell_command"):
         return ""
     args = tc.get("arguments") or tc.get("args") or tc.get("input") or {}
     if isinstance(args, str):
@@ -7268,11 +7262,117 @@ def _command_from_tool_call(tc: dict) -> str:
     return ""
 
 
+def _epoch_to_iso_utc(raw_t) -> str:
+    try:
+        val = float(raw_t)
+        if val <= 0:
+            return ""
+        if val >= 1e11:
+            val /= 1000.0
+        return datetime.fromtimestamp(val, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return ""
+
+
 def _load_normalized_transcript_steps(tf_path: Path) -> list:
-    """Load and normalize steps from either Antigravity (`transcript.jsonl`) or Claude Code (`~/.claude/projects/*/*.jsonl`)."""
+    """Load and normalize steps from Antigravity (`transcript.jsonl`), Claude Code (`~/.claude/projects/*/*.jsonl`), or Kimi Code CLI (`wire.jsonl`)."""
     if not tf_path or not tf_path.exists():
         return []
-    is_claude = ".claude/projects" in str(tf_path) or tf_path.name not in ("transcript.jsonl", "transcript_full.jsonl")
+    tf_str = str(tf_path)
+    if tf_path.name == "wire.jsonl" or ".kimi-code" in tf_str:
+        try:
+            raw_lines = tf_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            return []
+        steps = []
+        active_step = None
+        last_ts = ""
+        for ln in raw_lines:
+            if not ln.strip():
+                continue
+            try:
+                obj = json.loads(ln)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            t = obj.get("type")
+            ts = _epoch_to_iso_utc(obj.get("time")) or str(obj.get("created_at") or "")
+            if ts:
+                last_ts = ts
+            if t == "turn.prompt":
+                inp = obj.get("input") or []
+                u_str = (
+                    "\n".join(str(x.get("text") or "") for x in inp if isinstance(x, dict))
+                    if isinstance(inp, list)
+                    else str(inp or "")
+                )
+                if u_str:
+                    if u_str.lstrip().startswith("<task-notification>"):
+                        steps.append({"type": "SYSTEM_MESSAGE", "created_at": ts or last_ts, "content": f"[Message from background task]\n{u_str}"})
+                    else:
+                        steps.append({"type": "USER_INPUT", "created_at": ts or last_ts, "content": u_str})
+            elif t == "context.append_loop_event":
+                ev = obj.get("event") or {}
+                if not isinstance(ev, dict):
+                    continue
+                et = ev.get("type")
+                if et == "step.begin":
+                    active_step = {
+                        "type": "PLANNER_RESPONSE",
+                        "created_at": ts or last_ts,
+                        "completed_at": ts or last_ts,
+                        "input_tokens": 0,
+                        "cache_read_tokens": 0,
+                        "output_tokens": 0,
+                        "content": "",
+                        "tool_calls": [],
+                        "_generics": [],
+                    }
+                elif et == "content.part" and active_step is not None:
+                    part = ev.get("part") or {}
+                    if isinstance(part, dict) and part.get("text"):
+                        active_step["content"] += str(part.get("text"))
+                elif et == "tool.call" and active_step is not None:
+                    b_name = str(ev.get("name") or "")
+                    b_args = ev.get("args") or {}
+                    if isinstance(b_args, str):
+                        try:
+                            b_args = json.loads(b_args)
+                        except Exception:
+                            b_args = {}
+                    active_step["tool_calls"].append({"name": b_name, "args": b_args if isinstance(b_args, dict) else {}})
+                elif et == "tool.result":
+                    res = ev.get("result") or {}
+                    out_s = str(res.get("output") or res.get("error") or "") if isinstance(res, dict) else str(res or "")
+                    is_err = bool(isinstance(res, dict) and (res.get("isError") or res.get("error")))
+                    g_obj = {
+                        "type": "GENERIC",
+                        "created_at": ts or last_ts,
+                        "status": "ERROR" if is_err else "DONE",
+                        "content": f"Completed At: {ts}\n{out_s}" if ts else out_s,
+                    }
+                    if active_step is not None:
+                        active_step["_generics"].append(g_obj)
+                    else:
+                        steps.append(g_obj)
+                elif et == "step.end" and active_step is not None:
+                    usage = ev.get("usage") or {}
+                    if isinstance(usage, dict):
+                        active_step["input_tokens"] = int(usage.get("inputOther") or 0) + int(usage.get("inputCacheCreation") or 0)
+                        active_step["cache_read_tokens"] = int(usage.get("inputCacheRead") or 0)
+                        active_step["output_tokens"] = int(usage.get("output") or 0)
+                    if ts:
+                        active_step["completed_at"] = ts
+                    gens = active_step.pop("_generics", [])
+                    if active_step["input_tokens"] > 0 or active_step["cache_read_tokens"] > 0 or active_step["output_tokens"] > 0 or active_step["tool_calls"]:
+                        steps.append(active_step)
+                        for g_item in gens:
+                            steps.append(g_item)
+                    active_step = None
+        return steps
+
+    is_claude = ".claude/projects" in tf_str or tf_path.name not in ("transcript.jsonl", "transcript_full.jsonl")
     if not is_claude:
         full_tf = tf_path.parent / "transcript_full.jsonl"
         read_tf = full_tf if full_tf.exists() else tf_path
@@ -7340,8 +7440,12 @@ def _load_normalized_transcript_steps(tf_path: Path) -> list:
                     if isinstance(cnt, str)
                     else ("\n".join(str(x.get("text") or "") for x in cnt if isinstance(x, dict)) if isinstance(cnt, list) else "")
                 )
-                if u_str and not u_str.lstrip().startswith(("<local-command-", "<command-name>", "<task-notification>")):
-                    steps.append({"type": "USER_INPUT", "created_at": ts or last_ts or "", "content": u_str})
+                if u_str:
+                    u_l = u_str.lstrip()
+                    if u_l.startswith("<task-notification>"):
+                        steps.append({"type": "SYSTEM_MESSAGE", "created_at": ts or last_ts or "", "content": f"[Message from background task]\n{u_str}"})
+                    elif not u_l.startswith(("<local-command-", "<command-name>")):
+                        steps.append({"type": "USER_INPUT", "created_at": ts or last_ts or "", "content": u_str})
             if ts:
                 last_ts = ts
             i += 1
@@ -7806,7 +7910,7 @@ def _analyze_antigravity_transcript(tf_path: Path, scope_id: str = None) -> dict
             if tc_names_in_turn:
                 last_tool_name = tc_names_in_turn[-1]
                 is_pure_poll_tools = all(
-                    nm_item in ("manage_task", "schedule", "TaskOutput", "BashOutput", "Sleep")
+                    nm_item in ("manage_task", "schedule", "TaskOutput", "BashOutput", "WaitFor", "CronCreate", "Sleep")
                     for nm_item in tc_names_in_turn
                 )
                 is_pure_sleep_cmd = bool(tc_cmds) and all(
@@ -8200,6 +8304,19 @@ def _index_cli_transcripts() -> dict:
                     continue
                 parsed_steps = _load_normalized_transcript_steps(claude_tf)
                 _index_parsed_steps(claude_tf, parsed_steps, 1)
+            except Exception:
+                continue
+
+    kimi_dir = Path.home() / ".kimi-code" / "sessions"
+    if kimi_dir.is_dir():
+        for kimi_tf in kimi_dir.glob("wd_*/session_*/agents/main/wire.jsonl"):
+            try:
+                with open(kimi_tf, "r", encoding="utf-8", errors="ignore") as f:
+                    raw_text = f.read()
+                if "You are a dispatched worker" not in raw_text and "orchestration" not in raw_text:
+                    continue
+                parsed_steps = _load_normalized_transcript_steps(kimi_tf)
+                _index_parsed_steps(kimi_tf, parsed_steps, 1)
             except Exception:
                 continue
 

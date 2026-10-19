@@ -1293,25 +1293,9 @@ safe_rm_symlink() {
 }
 
 safe_link .agents/GEMINI.md "$PROJECT_PATH/GEMINI.md"
-
-case "$COORD_AGENT" in
-  "claude")
-    safe_link .agents/GEMINI.md "$PROJECT_PATH/CLAUDE.md"
-    safe_rm_symlink "$PROJECT_PATH/AGENTS.md"
-    LINK_MSG="GEMINI.md & CLAUDE.md -> .agents/GEMINI.md"
-    ;;
-  "codex"|"cursor"|"opencode")
-    safe_link .agents/GEMINI.md "$PROJECT_PATH/AGENTS.md"
-    safe_rm_symlink "$PROJECT_PATH/CLAUDE.md"
-    LINK_MSG="GEMINI.md & AGENTS.md -> .agents/GEMINI.md"
-    ;;
-  *)
-    # Với Antigravity / Gemini / chung: Kích hoạt GEMINI.md và AGENTS.md ở root
-    safe_link .agents/GEMINI.md "$PROJECT_PATH/AGENTS.md"
-    safe_rm_symlink "$PROJECT_PATH/CLAUDE.md"
-    LINK_MSG="GEMINI.md & AGENTS.md -> .agents/GEMINI.md"
-    ;;
-esac
+safe_link .agents/GEMINI.md "$PROJECT_PATH/AGENTS.md"
+safe_link .agents/GEMINI.md "$PROJECT_PATH/CLAUDE.md"
+LINK_MSG="GEMINI.md, AGENTS.md & CLAUDE.md -> .agents/GEMINI.md"
 # ── Đảm bảo .gitignore & .git/info/exclude bỏ qua cấu hình Orchestrator & runtime Orca (.orca/) ──
 GITIGNORE_FILE="$PROJECT_PATH/.gitignore"
 ORCA_IGNORE_ENTRIES=(

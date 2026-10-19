@@ -41,13 +41,32 @@ PROTECTED_AGENT_MARKERS = (
     "antigravity",
     "/agy",
     "claude",
+    "openclaude",
     "kimi",
+    "gemini",
+    "codex",
+    "cursor",
+    "opencode",
+    "qwen",
+    "codebuddy",
+    "copilot",
+    "droid",
+    "hermes",
+    "aider",
+    "goose",
     "orca",
     "electron",
 )
 EXCLUDED_CHILD_MARKERS = (
     "orca-command-guard",
     "antigravity-hook",
+    "claude-hook",
+    "gemini-hook",
+    "kimi-hook",
+    "codex-hook",
+    "cursor-hook",
+    "agent-hooks/",
+    "-hook.sh",
     "language_server",
     " mcp",
     "/mcp",
@@ -2561,19 +2580,34 @@ def _ensure_child_worktree_hygiene(payload: dict, args: dict) -> None:
         if not main_root or not os.path.isdir(main_root) or os.path.realpath(main_root) == cwd_path:
             return
 
-        # 1. Strip .agents/GEMINI.md in child worktree
-        agents_gemini = os.path.join(cwd_path, ".agents", "GEMINI.md")
-        if os.path.lexists(agents_gemini):
-            try:
-                os.unlink(agents_gemini)
-            except OSError:
-                pass
-            agents_dir = os.path.join(cwd_path, ".agents")
-            try:
-                if os.path.isdir(agents_dir) and not os.listdir(agents_dir):
-                    os.rmdir(agents_dir)
-            except OSError:
-                pass
+        # 1. Strip .agents/GEMINI.md, GEMINI.md, AGENTS.md, CLAUDE.md in child worktree across all Agent CLIs
+        for rel_d in (".agents/GEMINI.md", "GEMINI.md", "AGENTS.md", "CLAUDE.md"):
+            cand_d = os.path.join(cwd_path, rel_d)
+            if not os.path.lexists(cand_d):
+                continue
+            should_strip = (rel_d == ".agents/GEMINI.md") or os.path.islink(cand_d)
+            if not should_strip and os.path.isfile(cand_d):
+                try:
+                    with open(cand_d, "r", encoding="utf-8", errors="ignore") as df:
+                        head_txt = df.read(4096)
+                    if (
+                        "Orca Multi-Agent Orchestration Directive" in head_txt
+                        or "Principal Chief Architect & Lead Orchestrator" in head_txt
+                    ):
+                        should_strip = True
+                except OSError:
+                    pass
+            if should_strip:
+                try:
+                    os.unlink(cand_d)
+                except OSError:
+                    pass
+        agents_dir = os.path.join(cwd_path, ".agents")
+        try:
+            if os.path.isdir(agents_dir) and not os.listdir(agents_dir):
+                os.rmdir(agents_dir)
+        except OSError:
+            pass
 
         # 2. Ensure <cwd>/.orca/runs -> <main_root>/.orca/runs
         main_runs = os.path.join(main_root, ".orca", "runs")
@@ -2819,6 +2853,59 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
             except Exception:
                 pass
 
+    if _is_orca_managed_project(payload, args) and not _is_in_orca_meta_repo(payload, args):
+        # Block shell commands reading internal Agent CLI transcript JSONL files directly
+        if re.search(
+            r"(?:[/\\]\.system_generated[/\\]logs[/\\]transcript[^/\\\s'\"]*\.jsonl|[/\\]\.kimi(?:-code)?[/\\](?:sessions[/\\][^\s'\"]*[/\\]wire\.jsonl|server[/\\]events[/\\]session_[^\s'\"]*\.jsonl)|[/\\]\.claude[/\\]projects[/\\][^\s'\"]*\.jsonl|[/\\]\.gemini[/\\]tmp[/\\][^\s'\"]*[/\\]chats[/\\]session-[^\s'\"]*\.json|[/\\]\.codex[/\\]sessions[/\\][^\s'\"]*\.jsonl)",
+            sanitized_orch,
+        ):
+            return (
+                "[ORCA TOKEN-LEAK GUARD] CẤM dùng lệnh shell đọc file nhật ký hội thoại nội bộ ('transcript.jsonl' / 'wire.jsonl' / session '.jsonl')! "
+                "Đọc file này sẽ bơm đệ quy hàng trăm nghìn tokens vào Context Window và làm cạn kiệt Quota ngay lập tức. "
+                "Cách sửa: Dùng 'orca-team wait-events' để nhận tin nhắn từ Worker hoặc 'orca orchestration worker-list --run <RUN_ID> --json' để xem trạng thái."
+            )
+
+        # Block infinite foreground commands (tail -f, docker logs -f, docker compose up without -d, foreground docker run server.js)
+        # unless bounded by timeout/alarm or piped into head / grep -m
+        has_timeout_wrapper = bool(
+            re.search(r"\b(?:timeout|gtimeout)\s+\d+|\bperl\s+-e\s+['\"]alarm\b", sanitized_orch)
+        )
+        for seg_fg in _split_top_level_shell_segments(_strip_quoted_heredocs(cmd)):
+            if re.search(r"\|\s*(?:head|grep\s+[^\n|]*-m\s*\d+)\b", seg_fg):
+                continue
+            if not has_timeout_wrapper and re.search(r"(?:^|\s)tail\s+(?:-[a-zA-Z]*[fF]\b|--follow\b)", seg_fg):
+                return (
+                    "[ORCA INFINITE-STREAM GUARD] CẤM chạy 'tail -f' / 'tail --follow' (treo vĩnh viễn không bao giờ kết thúc)! "
+                    "Cách sửa: Dùng 'tail -n 80 <file>' để đọc log tĩnh."
+                )
+            if not has_timeout_wrapper and re.search(
+                r"\bdocker(?:\s+compose|-compose)?\s+logs\b[^\n;|&]*(?:\s-[a-zA-Z]*f\b|\s--follow\b)",
+                seg_fg,
+            ) and "--until" not in seg_fg:
+                return (
+                    "[ORCA INFINITE-STREAM GUARD] CẤM chạy 'docker [compose] logs -f' / '--follow' (stream log vô tận làm treo Worker/Leader)! "
+                    "Cách sửa: Bỏ cờ '-f' và dùng 'docker [compose] logs --tail 80 <service>'."
+                )
+            if re.search(r"\bdocker(?:\s+compose|-compose)\b[^\n;|&]*\bup\b", seg_fg):
+                if not re.search(
+                    r"(?:\s-[a-zA-Z]*d\b|\s--detach\b|\s--abort-on-container-exit\b|\s--exit-code-from\b|\s--help\b)",
+                    seg_fg,
+                ):
+                    return (
+                        "[ORCA INFINITE-DAEMON GUARD] CẤM chạy 'docker compose up' ở chế độ foreground (thiếu cờ '-d') vì tiến trình sẽ treo vĩnh viễn! "
+                        "Cách sửa: Thêm cờ '-d' ('docker compose up -d')."
+                    )
+            if not has_timeout_wrapper and re.search(r"\bdocker\s+run\b", seg_fg):
+                if not re.search(r"(?:\s-[a-zA-Z]*d\b|\s--detach\b|\s--help\b)", seg_fg):
+                    if re.search(
+                        r"\b(?:node\s+\S*(?:server|index|app|main)\.m?js|npm\s+(?:run\s+)?(?:start|dev|serve)|uvicorn\s+\S+|gunicorn\s+\S+|php\s+-S\s+\S+)\s*(?:2>&1|\s)*$",
+                        seg_fg.strip(),
+                    ):
+                        return (
+                            "[ORCA INFINITE-DAEMON GUARD] CẤM chạy 'docker run' ở chế độ foreground (thiếu cờ '-d') với entrypoint là tiến trình HTTP server chạy vô tận ('node .../server.js', 'npm start', ...) vì lệnh sẽ không bao giờ kết thúc! "
+                            "Cách sửa: Thêm cờ '-d' vào 'docker run -d ...' rồi kiểm tra bằng 'docker logs --tail 50 <container>', hoặc bọc giới hạn thời gian bằng 'perl -e \"alarm 8; exec @ARGV\" docker run ...'."
+                        )
+
     return ""
 
 
@@ -2994,15 +3081,15 @@ def _extract_normalized_tool_call(payload: dict) -> tuple[str, dict, str]:
 
 def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = None, tool_name_hint: str = "") -> str:
     """
-    1. Block internal subagent tools (`invoke_subagent`, `Agent`, `Task`, `dispatch_agent`, `spawn_subagent`, `delegate_task`)
-       inside Orca-managed projects (forces proper Orca worktree worker orchestration across all Agent CLIs).
+    1. Block internal subagent tools (`invoke_subagent`, `Agent`, `AgentSwarm`, `Task`, `TowerInit`, `dispatch_agent`, `spawn_subagent`, `delegate_task`)
+       and interactive `EnterPlanMode` inside Orca-managed projects (forces proper Orca worktree worker orchestration across all Agent CLIs).
     2. Block background task polling tools across all Agent CLIs inside Orca-managed projects:
        - Antigravity: `manage_task(Action="status"|"list")` and `schedule(DurationSeconds=...)`
-       - Kimi Code CLI: `TaskOutput` / `TaskList` (Kimi has `automatic_notification: true` on `run_in_background=true`)
+       - Kimi Code CLI: `TaskOutput` / `TaskList` / `WaitFor` / `CronCreate` (Kimi has `automatic_notification: true` on `run_in_background=true`)
        - Claude Code / OpenClaude / Qwen: `TaskOutput(block=false)` / `BashOutput` (Claude Code delivers `<task-notification>` automatically)
-    3. Block `view_file` / `Read` / `read_file` on `.system_generated/logs/transcript*.jsonl` (prevents recursive context explosion).
+    3. Block `view_file` / `Read` / `read_file` on `.system_generated/logs/transcript*.jsonl`, `wire.jsonl`, and CLI session `.jsonl`/`.json` files.
     4. Block `view_file` / `Read` / `read_file` on in-progress `.system_generated/tasks/task-*.log` (0 bytes or `_keepalive` without `"ok":true`)
-       and block unbounded reads (> 120 lines) on `task-*.log`.
+       or running Kimi `tasks/bash-*.json`, and block unbounded reads (> 120 lines) on `task-*.log`.
     """
     tc_obj = tc if isinstance(tc, dict) else {}
     tool_name = (
@@ -3020,6 +3107,10 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
     is_subagent_tool = tool_name in (
         "invoke_subagent",
         "agent",
+        "agentswarm",
+        "agent_swarm",
+        "towerinit",
+        "tower_init",
         "dispatch_agent",
         "spawn_subagent",
         "delegate_task",
@@ -3031,8 +3122,14 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
     if is_subagent_tool and _is_orca_managed_project(payload, args):
         return (
             f"[ORCA SUBAGENT GUARD] CẤM gọi tool subagent nội bộ ('{tool_name}') trong dự án điều phối bằng Orca! "
-            "Gọi subagent nội bộ tại Leader làm nhân đôi Context Window (200k+ tokens/lượt) và phá vỡ cơ chế Worktree độc lập của Orca. "
+            "Gọi subagent nội bộ tại Leader/Worker làm nhân đôi Context Window (200k+ tokens/lượt) và phá vỡ cơ chế Worktree độc lập của Orca. "
             "Cách sửa: Nếu cần tham vấn kiến trúc liên tầng phức tạp, hãy dùng 'critic-worker' của Orca; nếu là tác vụ cục bộ 1 module hoặc rõ nguyên nhân, hãy ghim thẳng 'orca-team plan pin' và giao 'dev-worker'!"
+        )
+
+    if tool_name in ("enterplanmode", "enter_plan_mode") and _is_orca_managed_project(payload, args):
+        return (
+            f"[ORCA PLAN-MODE GUARD] CẤM gọi '{tool_name}' (chế độ Plan Mode tương tác của CLI sẽ khóa quyền ghi và chặn đứng tiến trình chờ người dùng bấm duyệt 'ExitPlanMode')! "
+            "Cách sửa: Nếu bạn là Leader, hãy ghim kế hoạch bằng lệnh 'orca-team plan pin --run <RUN_ID> --title \"...\" --content \"[P1]...\"'; nếu bạn là Worker, hãy thực thi thẳng nhiệm vụ trong Role Spec!"
         )
 
     if tool_name == "manage_task" and isinstance(args, dict) and _is_orca_managed_project(payload, args):
@@ -3044,22 +3141,22 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
                 "Cách sửa: DỪNG GỌI TOOL NGAY LẬP TỨC (stop calling tools to end your turn) — hệ thống sẽ TỰ ĐỘNG đánh thức bạn (Reactive Wakeup) kèm toàn bộ kết quả ngay khi tác vụ ngầm hoàn tất!"
             )
 
-    if tool_name == "schedule" and isinstance(args, dict) and _is_orca_managed_project(payload, args):
+    if tool_name in ("schedule", "croncreate", "cron_create") and isinstance(args, dict) and _is_orca_managed_project(payload, args):
         dur = args.get("DurationSeconds") if args.get("DurationSeconds") is not None else args.get("duration_seconds")
-        cron = args.get("CronExpression") if args.get("CronExpression") is not None else args.get("cron_expression")
-        if dur is not None and not cron:
+        cron = args.get("CronExpression") if args.get("CronExpression") is not None else (args.get("cron_expression") or args.get("cron"))
+        if tool_name in ("croncreate", "cron_create") or (dur is not None and not cron):
             return (
-                "[ORCA REACTIVE-WAKEUP GUARD] CẤM gọi 'schedule(DurationSeconds=...)' để hẹn giờ poll tác vụ ngầm hoặc chờ Worker! "
+                f"[ORCA REACTIVE-WAKEUP GUARD] CẤM gọi '{tool_name}' để hẹn giờ poll tác vụ ngầm hoặc chờ Worker! "
                 "Mỗi lần timer nổ khi tác vụ vẫn đang chạy sẽ đánh thức LLM vô ích và đốt 200,000+ tokens/lượt. "
                 "Cách sửa: DỪNG GỌI TOOL NGAY LẬP TỨC (stop calling tools to end your turn) — hệ thống sẽ TỰ ĐỘNG đánh thức bạn ngay khi background task hoàn tất!"
             )
 
-    if tool_name in ("taskoutput", "task_output", "tasklist", "task_list", "bashoutput", "bash_output") and isinstance(args, dict) and _is_orca_managed_project(payload, args):
+    if tool_name in ("taskoutput", "task_output", "tasklist", "task_list", "bashoutput", "bash_output", "waitfor", "wait_for") and isinstance(args, dict) and _is_orca_managed_project(payload, args):
         is_kimi_payload = isinstance(payload, dict) and "toolName" in payload and "toolInput" in payload
         block_param = args.get("block")
-        if is_kimi_payload or tool_name in ("tasklist", "task_list", "bashoutput", "bash_output") or block_param is False:
+        if is_kimi_payload or tool_name in ("tasklist", "task_list", "bashoutput", "bash_output", "waitfor", "wait_for") or block_param is False:
             return (
-                f"[ORCA REACTIVE-WAKEUP GUARD] CẤM gọi '{tool_name}' để poll trạng thái tác vụ ngầm! "
+                f"[ORCA REACTIVE-WAKEUP GUARD] CẤM gọi '{tool_name}' để poll hoặc chờ lặp trạng thái tác vụ ngầm! "
                 "Trong Kimi Code CLI / Claude Code và Orca, các tiến trình ngầm (run_in_background=true) và hộp thư Orca đều có cơ chế TỰ ĐỘNG thông báo (automatic_notification / <task-notification> / Orca PTY Mailbox Pointer Delivery) ngay khi hoàn tất. "
                 "Cách sửa: DỪNG GỌI TOOL NGAY LẬP TỨC (kết thúc lượt) để hệ thống tự động đánh thức bạn khi tác vụ hoàn tất, hoặc chạy 'orca-team wait-events' ở chế độ đồng bộ!"
             )
@@ -3076,14 +3173,31 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
     if not fp:
         return ""
 
-    # Block reading internal conversation transcript JSONL files (outside orca-multi-agent-orchestrator)
-    if re.search(r"[/\\]\.system_generated[/\\]logs[/\\]transcript[^/\\]*\.jsonl$", fp):
+    # Block reading internal conversation transcript JSONL/JSON files across all Agent CLIs (outside orca-multi-agent-orchestrator)
+    if re.search(
+        r"(?:[/\\]\.system_generated[/\\]logs[/\\]transcript[^/\\]*\.jsonl|[/\\]\.kimi(?:-code)?[/\\](?:sessions[/\\].*[/\\]wire\.jsonl|server[/\\]events[/\\]session_[^/\\]*\.jsonl)|[/\\]\.claude[/\\]projects[/\\].*\.jsonl|[/\\]\.gemini[/\\]tmp[/\\].*[/\\]chats[/\\]session-[^/\\]*\.json|[/\\]\.codex[/\\]sessions[/\\].*\.jsonl)$",
+        fp,
+    ):
         if not _is_in_orca_meta_repo(payload, args):
             return (
-                "[ORCA TOKEN-LEAK GUARD] CẤM đọc file nhật ký hội thoại nội bộ ('transcript.jsonl' / 'transcript_full.jsonl')! "
+                f"[ORCA TOKEN-LEAK GUARD] CẤM đọc file nhật ký hội thoại nội bộ ('{os.path.basename(fp)}')! "
                 "Đọc file này sẽ bơm đệ quy hàng trăm nghìn tokens lịch sử hội thoại vào Context Window và làm cạn kiệt Quota ngay lập tức. "
                 "Cách sửa: Dùng 'orca-team wait-events' để nhận tin nhắn từ Worker hoặc 'orca orchestration worker-list --run <RUN_ID> --json' để xem trạng thái."
             )
+
+    # Block polling running Kimi background bash task files (`~/.kimi-code/sessions/.../tasks/bash-*.json`)
+    if re.search(r"[/\\]\.kimi(?:-code)?[/\\]sessions[/\\].*[/\\]tasks[/\\](?:bash|agent)-[^/\\]*\.json$", fp):
+        if not _is_in_orca_meta_repo(payload, args) and os.path.isfile(fp):
+            try:
+                with open(fp, "rb") as kf:
+                    k_b = kf.read(4096)
+                if b'"status":"running"' in k_b or b'"status": "running"' in k_b:
+                    return (
+                        f"[ORCA REACTIVE-WAKEUP GUARD] Tác vụ ngầm '{os.path.basename(fp)}' vẫn đang chạy (status=running)! "
+                        "CẤM đọc/poll file trạng thái tác vụ ngầm. Hãy kết thúc lượt (stop calling tools) — Kimi sẽ tự động gửi thông báo ngay khi tiến trình ngầm hoàn tất!"
+                    )
+            except OSError:
+                pass
 
     if not re.search(r"[/\\]\.system_generated[/\\]tasks[/\\]task-\d+\.log$", fp):
         return ""
@@ -3115,9 +3229,17 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
         except OSError:
             pass
 
-    start_ln = args.get("StartLine") if args.get("StartLine") is not None else (args.get("start_line") if args.get("start_line") is not None else args.get("offset"))
+    start_ln = (
+        args.get("StartLine")
+        if args.get("StartLine") is not None
+        else (
+            args.get("start_line")
+            if args.get("start_line") is not None
+            else (args.get("offset") if args.get("offset") is not None else args.get("line_offset"))
+        )
+    )
     end_ln = args.get("EndLine") if args.get("EndLine") is not None else args.get("end_line")
-    limit_ln = args.get("limit")
+    limit_ln = args.get("limit") if args.get("limit") is not None else args.get("n_lines")
     if start_ln is not None and end_ln is not None:
         try:
             s_i = int(start_ln)
@@ -3132,9 +3254,15 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
                 return ""
         except (ValueError, TypeError):
             pass
+    elif start_ln is not None:
+        try:
+            if -120 <= int(start_ln) < 0:
+                return ""
+        except (ValueError, TypeError):
+            pass
     return (
         f"[ORCA TOKEN-LEAK GUARD] CẤM đọc toàn bộ file log tác vụ ngầm '{base_log}' không giới hạn dòng! "
-        f"Mỗi lần đọc thẳng '{base_log}' không truyền StartLine/EndLine (hoặc offset/limit) sẽ bơm 10,000–200,000 tokens rác vào bộ nhớ ngữ cảnh. "
+        f"Mỗi lần đọc thẳng '{base_log}' không truyền StartLine/EndLine (hoặc offset/limit / line_offset/n_lines) sẽ bơm 10,000–200,000 tokens rác vào bộ nhớ ngữ cảnh. "
         f"Cách sửa: Chỉ định rõ khoảng dòng ngắn (<= 100 dòng), hoặc dùng lệnh shell `tail -n 50 \"{fp}\"` để chỉ xem phần kết quả cuối!"
     )
 
