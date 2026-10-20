@@ -2317,10 +2317,21 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
         seen_slots_in_cmd.add(seg_slot)
         candidates.append((seg_slot, is_new_child, seg_task_id, seg_run_id))
 
-    # Wave-Order Check 1: Prevent starting Wave 1 (dev/ui/fix) and Wave 2 (devops/sec/qa/bench) simultaneously in one command
+    # Wave-Order Check 1: Prevent starting Wave 0 (critic), Wave 1 (dev/ui/fix), and Wave 2 (devops/sec/qa/bench) simultaneously in one command
     if len(started_roles_in_cmd) > 1:
+        w0_roles = sorted({r for r, _, _ in started_roles_in_cmd if r == "critic"})
         w1_roles = sorted({r for r, _, _ in started_roles_in_cmd if r in ("dev", "ui", "fix")})
         w2_roles = sorted({r for r, _, _ in started_roles_in_cmd if r in ("devops", "sec", "qa", "bench")})
+        if w0_roles and (w1_roles or w2_roles):
+            other_roles = sorted(set(w1_roles + w2_roles))
+            return (
+                f"[ORCA WAVE-ORDER GUARD] Phát hiện lệnh khởi chạy đồng thời Quân sư 'critic-worker' (Wave 0) "
+                f"và Worker thi công/kiểm thử ({', '.join(other_roles)}) trong cùng một đợt! "
+                f"CẤM chạy song song critic-worker với các Worker khác vì critic-worker BẮT BUỘC phải tranh biện 2 chiều (ask <-> reply) "
+                f"và chốt CRITIC_VERDICT: CONSENSUS_REACHED + ghim 'orca-team plan pin' TRƯỚC khi giao việc cho {', '.join(other_roles)}! "
+                f"Cách sửa: Chỉ khởi chạy 'critic-worker' trước, gọi 'orca-team wait-events' để nhận câu hỏi phản biện 'CRITIC_CHALLENGE', "
+                f"trả lời qua 'orca orchestration reply', chờ 'CONSENSUS_REACHED' và ghim 'orca-team plan pin' rồi mới khởi chạy {', '.join(other_roles)}."
+            )
         if w1_roles and w2_roles:
             return (
                 f"[ORCA WAVE-ORDER GUARD] Phát hiện lệnh khởi chạy đồng thời Worker viết code ({', '.join(w1_roles)}) "
@@ -2336,10 +2347,10 @@ def _check_hardcoded_worker_start_collision(cmd: str, payload: dict, args: dict)
                 f"Khi Run có devops-worker, bạn phải chờ devops-worker dựng xong hạ tầng/container và commit xong rồi mới khởi chạy {'/'.join(verifiers)}-worker."
             )
 
-    # Wave-Order Check 2: Verify in orchestration.db that no upstream worker in the same Run is still working/unstarted/failed
+    # Wave-Order Check 2: Verify in orchestration.db that no upstream worker (including Wave 0 critic) in the same Run is still working/unstarted/failed
     if orca_team_bin:
         for seg_role, seg_tid, seg_rid in started_roles_in_cmd:
-            if seg_role not in ("devops", "sec", "qa", "bench"):
+            if seg_role not in ("dev", "ui", "fix", "devops", "sec", "qa", "bench"):
                 continue
             if not seg_tid and not seg_rid:
                 continue
@@ -2716,6 +2727,391 @@ def _has_unescaped_backtick_in_double_quoted_prose_flag(cmd: str) -> str:
     return ""
 
 
+def _find_orca_orchestration_db_path() -> str:
+    """Locate Orca's SQLite orchestration.db across macOS/Linux/XDG paths."""
+    env_p = os.environ.get("ORCA_DB_PATH") or os.environ.get("ORCA_ORCHESTRATION_DB")
+    if env_p and os.path.isfile(env_p):
+        return env_p
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(home, "Library", "Application Support", "orca", "orchestration.db"),
+        os.path.join(home, ".config", "orca", "orchestration.db"),
+        os.path.join(home, ".local", "share", "orca", "orchestration.db"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
+def _extract_cli_flag_value(cmd_text: str, flag_names: tuple[str, ...]) -> str:
+    """Extract the unquoted value of the first matching `--flag` in `cmd_text`."""
+    alt = "|".join(re.escape(f) for f in flag_names)
+    m = re.search(
+        rf"(?:^|\s)--(?:{alt})(?:\s+|=)(?:\"((?:\\.|[^\"])*)\"|'([^']*)'|([^\s;|&\"']+))",
+        cmd_text,
+    )
+    if not m:
+        return ""
+    if m.group(1) is not None:
+        return m.group(1).replace('\\"', '"').replace("\\\\", "\\")
+    if m.group(2) is not None:
+        return m.group(2)
+    return m.group(3) or ""
+
+
+def _check_critic_two_way_debate_and_question_guards(
+    cmd: str, sanitized_orch: str, payload: dict, args: dict
+) -> str:
+    """
+    Enforce mandatory 2-way debate (`ask` <-> `reply`) between Leader and `critic-worker`:
+    1. `[ORCA CRITIC 2-WAY DEBATE GUARD]`:
+       - Block chaining `orca orchestration ask` and `orca orchestration send` in the same command.
+       - Block `critic-worker` from sending `handoff` (`Critic Consensus` / `Critic Deadlock`) or `worker_done`
+         unless at least 1 `question_threads` row from that Critic dispatch has been `answered` by Leader (`reply`).
+    2. `[ORCA CRITIC REVIEW DEPTH GUARD]`:
+       - Block Leader from calling `orca orchestration reply` to a Critic question with a superficial body (< 60 chars).
+    3. `[ORCA REPLY GUARD]`:
+       - Block Leader from calling `orca orchestration send --to dispatch:<did>` when `<did>` has a `pending` question in `question_threads`
+         (must use `orca orchestration reply --id <msg_id>` so the blocking `ask` wakes up).
+    4. `[ORCA PENDING-QUESTION GUARD]`:
+       - Block Leader from calling `orca-team plan pin`, `orca orchestration worker-start`, or `orca-team wait-events` (after question was already delivered)
+         while a `status = 'pending'` question from a worker in the active Run remains unanswered.
+    """
+    if not re.search(r"\borca(?:-team)?\b", sanitized_orch):
+        return ""
+    no_heredoc = _strip_quoted_heredocs(cmd)
+
+    # 1a. Block chaining `orca orchestration ask` and `orca orchestration send` in the same command
+    if re.search(r"\borca\s+orchestration\s+ask\b", sanitized_orch) and re.search(
+        r"\borca\s+orchestration\s+send\b", sanitized_orch
+    ):
+        return (
+            "[ORCA CRITIC 2-WAY DEBATE GUARD] CẤM nối chuỗi 'orca orchestration ask' và 'orca orchestration send' trong cùng một lệnh! "
+            "Quân sư 'critic-worker' BẮT BUỘC phải thực hiện quy trình 2 pha tách biệt: "
+            "Pha 1: Chạy duy nhất lệnh 'orca orchestration ask --from <worker_handle> --question \"CRITIC_CHALLENGE vòng 1/3: ...\" --timeout-ms 900000 --json' để gửi phản biện/câu hỏi kiểm chứng cho Leader và chờ Leader trả lời qua 'orca orchestration reply'; "
+            "Pha 2: Chỉ SAU KHI lệnh 'ask' trả về câu trả lời của Leader và hai bên đã thống nhất 100%, ở lượt (turn) tiếp theo mới được chạy 'orca orchestration send --type handoff ... && orca orchestration send --type worker_done ...'."
+        )
+
+    db_path = _find_orca_orchestration_db_path()
+    if not db_path:
+        return ""
+
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+        conn.row_factory = sqlite3.Row
+    except Exception:
+        return ""
+
+    try:
+        raw_cwd_in = str(
+            args.get("Cwd")
+            or args.get("cwd")
+            or (payload.get("cwd") if isinstance(payload, dict) else "")
+            or ""
+        ).strip()
+        _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
+        real_cwd = os.path.realpath(cwd) if cwd else ""
+        cwd_slot = (
+            _extract_canonical_worker_slot(os.path.basename(raw_cwd_in.rstrip("/")))
+            or (_extract_canonical_worker_slot(os.path.basename(real_cwd)) if real_cwd else "")
+        )
+
+        # 1b. Critic 2-Way Debate Guard on `orca orchestration send`
+        if re.search(r"\borca\s+orchestration\s+send\b", sanitized_orch):
+            has_handoff_or_done = bool(
+                re.search(r"--type(?:\s+|=)['\"]?(?:handoff|worker_done)\b", no_heredoc)
+            )
+            is_failed_done_only = bool(
+                re.search(r"--outcome(?:\s+|=)['\"]?failed\b", no_heredoc)
+                and not re.search(r"--type(?:\s+|=)['\"]?handoff\b", no_heredoc)
+                and not re.search(r"CONSENSUS_REACHED|Critic\s+Consensus", no_heredoc, re.IGNORECASE)
+            )
+            disp_id = _extract_cli_flag_value(no_heredoc, ("dispatch-id", "dispatch"))
+            task_id = _extract_cli_flag_value(no_heredoc, ("task-id", "task"))
+            from_handle = _extract_cli_flag_value(no_heredoc, ("from",))
+            to_target = _extract_cli_flag_value(no_heredoc, ("to",))
+
+            # Check Guard 3 ([ORCA REPLY GUARD]): Leader sending `orca orchestration send --to ...` when target has a pending question
+            if to_target and to_target != "@all":
+                target_disp = to_target.split("dispatch:", 1)[1].strip() if to_target.startswith("dispatch:") else ""
+                pend_row = None
+                if target_disp:
+                    pend_row = conn.execute(
+                        "SELECT message_id, dispatch_id, asker_handle FROM question_threads "
+                        "WHERE dispatch_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+                        (target_disp,),
+                    ).fetchone()
+                elif to_target.startswith("term_"):
+                    pend_row = conn.execute(
+                        "SELECT message_id, dispatch_id, asker_handle FROM question_threads "
+                        "WHERE asker_handle = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+                        (to_target,),
+                    ).fetchone()
+                if pend_row:
+                    p_mid = pend_row["message_id"]
+                    return (
+                        f"[ORCA REPLY GUARD] Worker '{to_target}' đang chặn chờ câu trả lời qua lệnh 'orca orchestration ask' (Question ID: {p_mid})! "
+                        f"Nếu bạn dùng 'orca orchestration send --to {to_target}', lệnh 'ask' của Worker sẽ KHÔNG nhận được tín hiệu trả lời và sẽ bị treo timeout. "
+                        f"Cách sửa bắt buộc: Dùng lệnh 'orca orchestration reply --id {p_mid} --body \"<Nội dung phản biện/quyết định chi tiết>\" --json' để trả lời trực tiếp vào luồng ask!"
+                    )
+
+            if has_handoff_or_done and not is_failed_done_only:
+                is_critic_sender = bool(
+                    (cwd_slot and cwd_slot.startswith("critic-worker"))
+                    or re.search(
+                        r"\b(?:Critic\s+Consensus|Critic\s+Deadlock|CRITIC_VERDICT|Worker\s+Done:\s*critic-worker)\b",
+                        no_heredoc,
+                        re.IGNORECASE,
+                    )
+                )
+                resolved_run_id = ""
+                if disp_id:
+                    r_dc = conn.execute(
+                        "SELECT dc.run_id, dc.task_id, dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id, t.spec "
+                        "FROM dispatch_contexts dc "
+                        "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                        "LEFT JOIN tasks t ON t.id = dc.task_id "
+                        "WHERE dc.id = ? LIMIT 1",
+                        (disp_id,),
+                    ).fetchone()
+                    if r_dc:
+                        resolved_run_id = str(r_dc["run_id"] or "")
+                        task_id = task_id or str(r_dc["task_id"] or "")
+                        from_handle = (
+                            from_handle
+                            or str(r_dc["agent_terminal_handle"] or "")
+                            or str(r_dc["assignee_handle"] or "")
+                        )
+                        wt_s = _extract_canonical_worker_slot(os.path.basename(str(r_dc["worktree_id"] or "")))
+                        t_spec = str(r_dc["spec"] or "")
+                        if (wt_s and wt_s.startswith("critic-worker")) or "[ROLE: PRINCIPAL RESEARCH, ADVERSARIAL CRITIC" in t_spec:
+                            is_critic_sender = True
+                if not is_critic_sender and task_id:
+                    r_tk = conn.execute(
+                        "SELECT run_id, spec FROM tasks WHERE id = ? LIMIT 1",
+                        (task_id,),
+                    ).fetchone()
+                    if r_tk:
+                        resolved_run_id = resolved_run_id or str(r_tk["run_id"] or "")
+                        if "[ROLE: PRINCIPAL RESEARCH, ADVERSARIAL CRITIC" in str(r_tk["spec"] or ""):
+                            is_critic_sender = True
+
+                if is_critic_sender:
+                    if not disp_id and from_handle:
+                        r_fh = conn.execute(
+                            "SELECT dc.id, dc.run_id, dc.task_id "
+                            "FROM dispatch_contexts dc "
+                            "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                            "WHERE dc.assignee_handle = ? OR wd.agent_terminal_handle = ? "
+                            "ORDER BY dc.created_at DESC LIMIT 1",
+                            (from_handle, from_handle),
+                        ).fetchone()
+                        if r_fh:
+                            disp_id = str(r_fh["id"] or "")
+                            resolved_run_id = resolved_run_id or str(r_fh["run_id"] or "")
+                            task_id = task_id or str(r_fh["task_id"] or "")
+
+                    q_rows = []
+                    if disp_id and from_handle:
+                        q_rows = conn.execute(
+                            "SELECT message_id, status, answered_at, answer_message_id FROM question_threads "
+                            "WHERE dispatch_id = ? OR asker_handle = ? ORDER BY created_at DESC",
+                            (disp_id, from_handle),
+                        ).fetchall()
+                    elif disp_id:
+                        q_rows = conn.execute(
+                            "SELECT message_id, status, answered_at, answer_message_id FROM question_threads "
+                            "WHERE dispatch_id = ? ORDER BY created_at DESC",
+                            (disp_id,),
+                        ).fetchall()
+                    elif from_handle:
+                        q_rows = conn.execute(
+                            "SELECT message_id, status, answered_at, answer_message_id FROM question_threads "
+                            "WHERE asker_handle = ? ORDER BY created_at DESC",
+                            (from_handle,),
+                        ).fetchall()
+                    elif resolved_run_id:
+                        q_rows = conn.execute(
+                            "SELECT message_id, status, answered_at, answer_message_id FROM question_threads "
+                            "WHERE run_id = ? ORDER BY created_at DESC",
+                            (resolved_run_id,),
+                        ).fetchall()
+
+                    total_q = len(q_rows)
+                    answered_q = sum(
+                        1
+                        for r in q_rows
+                        if str(r["status"] or "") == "answered"
+                        or r["answered_at"] is not None
+                        or r["answer_message_id"] is not None
+                    )
+                    pending_mid = next(
+                        (
+                            str(r["message_id"])
+                            for r in q_rows
+                            if str(r["status"] or "") == "pending" and r["answered_at"] is None
+                        ),
+                        "",
+                    )
+
+                    # Fallback check in `messages` table if `question_threads` had no rows
+                    if total_q == 0 and (disp_id or from_handle):
+                        sender_handles = [h for h in (f"dispatch:{disp_id}" if disp_id else "", from_handle) if h]
+                        if sender_handles:
+                            ph = ",".join("?" for _ in sender_handles)
+                            m_q = conn.execute(
+                                f"SELECT id FROM messages WHERE type = 'question' AND from_handle IN ({ph}) ORDER BY created_at DESC",
+                                tuple(sender_handles),
+                            ).fetchall()
+                            total_q = len(m_q)
+                            if total_q > 0:
+                                q_ids = [str(x["id"]) for x in m_q]
+                                ph_q = ",".join("?" for _ in q_ids)
+                                m_ans = conn.execute(
+                                    f"SELECT COUNT(*) AS cnt FROM messages WHERE thread_id IN ({ph_q}) AND type != 'question'",
+                                    tuple(q_ids),
+                                ).fetchone()
+                                answered_q = int(m_ans["cnt"] or 0) if m_ans else 0
+                                if answered_q == 0:
+                                    pending_mid = q_ids[0]
+
+                    from_hint = from_handle or "<worker_handle>"
+                    if total_q == 0:
+                        return (
+                            f"[ORCA CRITIC 2-WAY DEBATE GUARD] CẤM Quân sư 'critic-worker' gửi thẳng 'handoff (Critic Consensus)' hoặc 'worker_done' ở lượt đầu tiên mà BỎ QUA bước tranh biện 2 chiều ('orca orchestration ask') với Leader! "
+                            f"Hiến pháp bắt buộc Quân sư phải thực hiện Pha 1 (Cross-Examination) trước: đối chiếu bằng chứng `file:line` độc lập và gửi ít nhất 1 câu hỏi thẩm định/phản biện qua 'orca orchestration ask' để kiểm chứng với Leader (về lỗ hổng logic/race-condition, ranh giới file Disjoint File Ownership giữa các dev-worker*, hoặc phạm vi vai trò dev/devops/qa/sec). "
+                            f"Cách sửa bắt buộc ngay lúc này: Chạy lệnh:\n"
+                            f"orca orchestration ask --from {from_hint} --question 'CRITIC_CHALLENGE vòng 1/3: [Bằng chứng file:line + 5 trục System Eng] | [Điểm cần chỉnh hoặc câu hỏi xác nhận ranh giới file/edge-case cho [P1..Pn]]' --timeout-ms 900000 --json\n"
+                            f"Chỉ SAU KHI Leader trả lời qua 'orca orchestration reply' và hai bên thống nhất, bạn mới được gửi 'CONSENSUS_REACHED' + 'worker_done'!"
+                        )
+                    if answered_q == 0:
+                        resume_flag = f"--resume {pending_mid} " if pending_mid else ""
+                        return (
+                            f"[ORCA CRITIC 2-WAY DEBATE GUARD] Câu hỏi phản biện '{pending_mid or 'CRITIC_CHALLENGE'}' của bạn đang ở trạng thái 'pending' (Leader chưa trả lời qua 'orca orchestration reply')! "
+                            f"CẤM tự ý chốt 'Critic Consensus' hoặc 'worker_done' khi chưa nhận được phản hồi 2 chiều từ Leader. "
+                            f"Cách sửa bắt buộc: Chạy lệnh chờ câu trả lời của Leader:\n"
+                            f"orca orchestration ask --from {from_hint} {resume_flag}--timeout-ms 900000 --json"
+                        )
+
+        # 2. Critic Review Depth Guard on Leader's `orca orchestration reply`
+        if re.search(r"\borca\s+orchestration\s+reply\b", sanitized_orch):
+            reply_id = _extract_cli_flag_value(no_heredoc, ("id", "message-id"))
+            reply_body = _extract_cli_flag_value(no_heredoc, ("body",))
+            if reply_id:
+                q_info = conn.execute(
+                    "SELECT qt.dispatch_id, m.body AS q_body, wd.worktree_id, t.spec "
+                    "FROM question_threads qt "
+                    "LEFT JOIN messages m ON m.id = qt.message_id "
+                    "LEFT JOIN dispatch_contexts dc ON dc.id = qt.dispatch_id "
+                    "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = qt.dispatch_id "
+                    "LEFT JOIN tasks t ON t.id = dc.task_id "
+                    "WHERE qt.message_id = ? LIMIT 1",
+                    (reply_id,),
+                ).fetchone()
+                is_critic_q = False
+                if q_info:
+                    wt_s = _extract_canonical_worker_slot(os.path.basename(str(q_info["worktree_id"] or "")))
+                    q_body_str = str(q_info["q_body"] or "")
+                    t_spec_str = str(q_info["spec"] or "")
+                    if (
+                        (wt_s and wt_s.startswith("critic-worker"))
+                        or "CRITIC_CHALLENGE" in q_body_str
+                        or "[ROLE: PRINCIPAL RESEARCH, ADVERSARIAL CRITIC" in t_spec_str
+                    ):
+                        is_critic_q = True
+                if is_critic_q and len(reply_body.strip()) < 60:
+                    return (
+                        f"[ORCA CRITIC REVIEW DEPTH GUARD] Nội dung trả lời 'orca orchestration reply --id {reply_id}' cho Quân sư 'critic-worker' quá ngắn ({len(reply_body.strip())} ký tự < 60 ký tự tối thiểu)! "
+                        f"CẤM trả lời qua loa ('ok', 'đồng ý') khi tranh biện kiến trúc 2 chiều. "
+                        f"Cách sửa bắt buộc: Trả lời chi tiết (>= 60 ký tự) xác nhận rõ: (1) Chấp thuận hay phản biện các điểm `file:line` của Critic, "
+                        f"(2) Chốt Checklist `[P1..Pn]` + phân chia Disjoint File Ownership giữa các `dev-worker*`, và (3) Ranh giới vai trò (`dev`/`devops`/`qa`/`sec`)."
+                    )
+
+        # 4. Pending-Question Guard on Leader (`orca-team plan pin`, `orca orchestration worker-start`, or `wait-events` after question already read)
+        is_in_main_root = bool(real_cwd and not cwd_slot)
+        if is_in_main_root:
+            is_plan_pin = bool(re.search(r"\borca-team\b[^\n;|&]*\bplan\s+pin\b", sanitized_orch))
+            is_worker_start = bool(re.search(r"\borca\s+orchestration\s+worker-start\b", sanitized_orch))
+            is_wait_events = bool(
+                re.search(r"\borca\s+orchestration\s+check\b[^\n;|&]*\s--wait\b", sanitized_orch)
+                or re.search(r"\borca-team\b[^\n;|&]*\b(?:wait-events|check-wait)\b", sanitized_orch)
+            )
+            if is_plan_pin or is_worker_start or is_wait_events:
+                explicit_run_id = _extract_cli_flag_value(no_heredoc, ("run",))
+                if not explicit_run_id:
+                    # Find latest run associated with this workspace that has active dispatches or pending questions
+                    r_active = conn.execute(
+                        "SELECT dc.run_id FROM dispatch_contexts dc "
+                        "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                        "WHERE (wd.worktree_id LIKE ? OR wd.worktree_id LIKE ?) "
+                        "ORDER BY dc.created_at DESC LIMIT 1",
+                        (f"{real_cwd}%", f"%{os.path.basename(real_cwd)}%"),
+                    ).fetchone()
+                    if r_active:
+                        explicit_run_id = str(r_active["run_id"] or "")
+
+                if explicit_run_id:
+                    pend_qs = conn.execute(
+                        "SELECT qt.message_id, qt.dispatch_id, qt.asker_handle, m.read AS msg_read, "
+                        "m.delivered_at AS msg_delivered_at, m.body AS msg_body, wd.worktree_id, t.spec "
+                        "FROM question_threads qt "
+                        "LEFT JOIN messages m ON m.id = qt.message_id "
+                        "LEFT JOIN dispatch_contexts dc ON dc.id = qt.dispatch_id "
+                        "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = qt.dispatch_id "
+                        "LEFT JOIN tasks t ON t.id = dc.task_id "
+                        "WHERE qt.run_id = ? AND qt.status = 'pending' AND qt.answered_at IS NULL "
+                        "ORDER BY qt.created_at ASC",
+                        (explicit_run_id,),
+                    ).fetchall()
+                    if pend_qs:
+                        pq = pend_qs[0]
+                        p_mid = str(pq["message_id"] or "")
+                        p_wt = _extract_canonical_worker_slot(os.path.basename(str(pq["worktree_id"] or "")))
+                        if not p_wt and "[ROLE: PRINCIPAL RESEARCH, ADVERSARIAL CRITIC" in str(pq["spec"] or ""):
+                            p_wt = "critic-worker"
+                        p_wt = p_wt or str(pq["dispatch_id"] or "worker")
+                        p_snip = str(pq["msg_body"] or "").strip().replace("\n", " ")[:180]
+                        already_delivered = bool(
+                            (pq["msg_read"] is not None and int(pq["msg_read"] or 0) == 1)
+                            or pq["msg_delivered_at"] is not None
+                            or re.search(r"\s--ack(?:\s+|=)", no_heredoc)
+                        )
+                        if is_plan_pin and p_wt.startswith("critic-worker"):
+                            return (
+                                f"[ORCA PENDING-QUESTION GUARD] Quân sư '{p_wt}' đang chờ bạn trả lời câu hỏi phản biện (Question ID: {p_mid}) trong Run '{explicit_run_id}'! "
+                                f"CẤM chạy 'orca-team plan pin' trước khi trả lời câu hỏi của Critic và chốt CONSENSUS_REACHED. "
+                                f"Nội dung câu hỏi: \"{p_snip}\". "
+                                f"Cách sửa bắt buộc: Chạy 'orca orchestration reply --id {p_mid} --body \"<Phản hồi chi tiết >= 60 ký tự>\" --json', chờ Critic xác nhận CONSENSUS_REACHED rồi mới ghim 'orca-team plan pin'!"
+                            )
+                        if is_worker_start:
+                            return (
+                                f"[ORCA PENDING-QUESTION GUARD] Worker '{p_wt}' đang chặn chờ bạn trả lời câu hỏi 'ask' (Question ID: {p_mid}) trong Run '{explicit_run_id}'! "
+                                f"CẤM khởi chạy thêm Worker mới khi câu hỏi phản biện/kiến trúc hiện tại chưa được trả lời. "
+                                f"Nội dung câu hỏi: \"{p_snip}\". "
+                                f"Cách sửa bắt buộc: Chạy 'orca orchestration reply --id {p_mid} --body \"<Phản hồi chi tiết>\" --json' trước!"
+                            )
+                        if is_wait_events and already_delivered:
+                            return (
+                                f"[ORCA PENDING-QUESTION GUARD] Bạn đã nhận được câu hỏi 'question' (ID: {p_mid}) từ '{p_wt}' nhưng CHƯA trả lời qua 'orca orchestration reply'! "
+                                f"Nếu bạn gọi 'orca-team wait-events' lúc này, cả Leader và '{p_wt}' sẽ bị DEADLOCK (hai bên cùng chờ nhau)! "
+                                f"Nội dung câu hỏi: \"{p_snip}\". "
+                                f"Cách sửa bắt buộc: Trả lời ngay bằng lệnh:\n"
+                                f"orca orchestration reply --id {p_mid} --body \"<Nội dung phản biện/quyết định chi tiết >= 60 ký tự>\" --json\n"
+                                f"Sau khi chạy 'reply' xong, bạn mới gọi 'orca-team wait-events' để chờ kết quả tiếp theo từ '{p_wt}'!"
+                            )
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return ""
+
+
 def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict, args: dict) -> str:
     """
     Prevent recurring real-world Orca CLI errors:
@@ -2723,6 +3119,7 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
     2. Invalid `orca orchestration task-update` flags (`--spec`, `--task`, or invalid `--status`).
     3. Chaining `orca orchestration check --wait` with `worker-start`, `worker-retain`, or `task-create`.
     4. Duplicate concurrent `orca orchestration check --wait` (`waiter_exists`) in the same workspace.
+    5. Mandatory 2-Way Debate (`ask` <-> `reply`) between Leader and `critic-worker`.
     """
     bad_bt_flag = _has_unescaped_backtick_in_double_quoted_prose_flag(cmd)
     if bad_bt_flag:
@@ -2732,6 +3129,10 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
             f"(gây lỗi 'permission denied' / 'command not found' và làm mất chữ trong nội dung tin nhắn). "
             f"Cách sửa: Bọc giá trị của '{bad_bt_flag}' bằng dấu ngoặc đơn ('...'), hoặc bỏ dấu backtick, hoặc escape thành \\`."
         )
+
+    critic_debate_err = _check_critic_two_way_debate_and_question_guards(cmd, sanitized_orch, payload, args)
+    if critic_debate_err:
+        return critic_debate_err
 
     if "task-update" in sanitized_orch and re.search(r"\borca\s+orchestration\s+task-update\b", sanitized_orch):
         no_heredoc = _strip_quoted_heredocs(cmd)
