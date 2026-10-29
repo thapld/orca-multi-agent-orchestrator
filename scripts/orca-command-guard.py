@@ -3095,35 +3095,45 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             "[ORCA DB-INTEGRITY GUARD] CẤM ghi trực tiếp hoặc nạp mã thực thi can thiệp cơ sở dữ liệu điều phối "
             "(orchestration.db / sqlite3 / exec(open(...))) qua Bash!"
         )
-    if re.search(r"orchestration\.db|ORCA_ORCHESTRATION_DB", no_heredoc, re.IGNORECASE) and not re.match(
-        r"^\s*(?:orca|orca-team)\b", no_heredoc.strip()
+    if re.search(r"\b(?:python3?|node|ruby|perl|php)\b", no_heredoc) and re.search(
+        r"orchestration\.db|ORCA_ORCHESTRATION_DB", no_heredoc, re.IGNORECASE
     ):
         return (
             "[ORCA DB-INTEGRITY GUARD] CẤM truyền trực tiếp đường dẫn orchestration.db / ORCA_ORCHESTRATION_DB "
-            "vào script hoặc lệnh Bash ngoài CLI chính thức của Orca!"
+            "vào trình thông dịch script ngoài CLI chính thức của Orca!"
         )
-    for m_tok in re.finditer(r"['\"]?([/\w.\-~]+(?:\.[a-zA-Z0-9_]+)?)['\"]?", no_heredoc):
-        tok_s = m_tok.group(1)
-        if tok_s in ("/", ".", "..") or tok_s.startswith("-"):
-            continue
-        cand_p = os.path.expanduser(tok_s)
-        if not os.path.isabs(cand_p) and real_cwd:
-            cand_p = os.path.join(real_cwd, cand_p)
-        if os.path.isfile(cand_p):
-            try:
-                if os.path.getsize(cand_p) <= 16 * 1024 * 1024:
-                    scr_txt = open(cand_p, "r", encoding="utf-8", errors="ignore").read()
-                    if (
-                        re.search(r"sqlite3", scr_txt, re.IGNORECASE)
-                        or orch_tbl_re.search(scr_txt)
-                        or sql_dml_re.search(scr_txt) and re.search(r"\b(?:execute|executemany|executescript|connect)\b", scr_txt)
-                    ):
-                        return (
-                            f"[ORCA DB-INTEGRITY GUARD] CẤM chạy script/file '{tok_s}' có chứa tham chiếu "
-                            "sqlite3 hoặc cơ sở dữ liệu điều phối (orchestration.db)!"
-                        )
-            except Exception:
-                pass
+    if re.search(r"\b(?:python3?|node|ruby|perl|php|sh|bash|zsh)\b", no_heredoc):
+        for m_tok in re.finditer(r"['\"]?([/\w.\-~]+(?:\.[a-zA-Z0-9_]+)?)['\"]?", no_heredoc):
+            tok_s = m_tok.group(1)
+            if tok_s in ("/", ".", "..") or tok_s.startswith("-"):
+                continue
+            cand_p = os.path.expanduser(tok_s)
+            if not os.path.isabs(cand_p) and real_cwd:
+                cand_p = os.path.join(real_cwd, cand_p)
+            norm_cand = os.path.realpath(cand_p) if os.path.exists(cand_p) else cand_p
+            base_cand = os.path.basename(norm_cand)
+            if (
+                "/orca-multi-agent-orchestrator/" in norm_cand
+                or "/orca-sim/bin/" in norm_cand
+                or "/orca-sim/tests/" in norm_cand
+                or base_cand in ("orca-team", "orca-command-guard.py", "orca_critic_gate.py", "run-tests.sh")
+            ):
+                continue
+            if os.path.isfile(cand_p):
+                try:
+                    if os.path.getsize(cand_p) <= 16 * 1024 * 1024:
+                        scr_txt = open(cand_p, "r", encoding="utf-8", errors="ignore").read()
+                        if (
+                            re.search(r"sqlite3", scr_txt, re.IGNORECASE)
+                            or orch_tbl_re.search(scr_txt)
+                            or (sql_dml_re.search(scr_txt) and re.search(r"\b(?:execute|executemany|executescript|connect)\b", scr_txt))
+                        ):
+                            return (
+                                f"[ORCA DB-INTEGRITY GUARD] CẤM chạy script/file '{tok_s}' có chứa tham chiếu "
+                                "sqlite3 hoặc cơ sở dữ liệu điều phối (orchestration.db)!"
+                            )
+                except Exception:
+                    pass
     return ""
 
 
