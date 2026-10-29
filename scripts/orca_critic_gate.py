@@ -834,7 +834,7 @@ def validate_runner_allowlist(
                                 rel_s = s_val
                         first_seg = [p for p in rel_s.replace("\\", "/").lstrip("./").split("/") if p]
                         top_seg = first_seg[0].lower() if first_seg else "."
-                        if top_seg not in ("tests", "test", "spec", "e2e", "__tests__", ".", "src", "app", "api", "web"):
+                        if top_seg not in ("tests", "test", "spec", "e2e", "__tests__"):
                             return (
                                 False,
                                 f"[ORCA VERIFY RUNNER ALLOWLIST] Thư mục kiểm thử '{s_val}' không thuộc cây thư mục test chuẩn (tests/, test/, spec/, e2e/)!",
@@ -1252,6 +1252,11 @@ def load_pinned_policy_anchor(
                         )
             except Exception:
                 pass
+        if eff_wt and (eff_wt / ".orca" / "acceptance-manifest.json").is_file():
+            return (
+                None,
+                f"[ORCA POLICY-ANCHOR GUARD] File neo chính sách '{anchor_path}' (kèm seal/DB row) đã bị xoá trái phép sau khi ghim (phát hiện '.orca/acceptance-manifest.json')!",
+            )
         return None, ""
     try:
         st = os.lstat(str(anchor_path))

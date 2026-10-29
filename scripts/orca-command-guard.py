@@ -5023,6 +5023,18 @@ def _verify_qa_evidence_ledger_and_ancestry(
         return anchor_err
 
     if isinstance(policy_anchor, dict):
+        anchor_allowlist = {
+            str(f).strip().replace("\\", "/").lstrip("./")
+            for f in (policy_anchor.get("testAllowlist") or [])
+            if isinstance(f, str) and str(f).strip()
+        }
+        if test_allowlist != anchor_allowlist:
+            return (
+                f"[ORCA POLICY-ANCHOR GUARD] test_allowlist trong contracts.json ({sorted(test_allowlist)}) "
+                f"không khớp với testAllowlist đã ghim trong .policy_anchor.json ({sorted(anchor_allowlist)})! "
+                "CẤM tự thêm file test giả vào test_allowlist."
+            )
+        test_allowlist = anchor_allowlist
         anchor_cmds = policy_anchor.get("acceptanceCommands") or policy_anchor.get("canonicalCommands") or []
         canonical_cmds = [
             (str(ac.get("kind") or "test"), [str(x) for x in (ac.get("cmd") or [])])
@@ -5050,15 +5062,15 @@ def _verify_qa_evidence_ledger_and_ancestry(
                         f"[ORCA TEST-INTEGRITY GUARD] File kiểm thử/cấu hình gốc '{b_rel}' trong baselineTestFiles "
                         f"đã bị sửa đổi hoặc xoá sau khi pin ngoài test_allowlist!"
                     )
-            unapproved_new_tests = sorted(set(cur_baseline.keys()) - (set(baseline_files.keys()) | test_allowlist))
+            unapproved_new_tests = sorted(set(cur_baseline.keys()) - set(baseline_files.keys()))
             if unapproved_new_tests:
                 return (
                     f"[ORCA TEST-INTEGRITY GUARD] Phát hiện file kiểm thử mới thêm vào sau khi pin ngoài "
-                    f"baselineTestFiles / test_allowlist: {', '.join(unapproved_new_tests)}! "
+                    f"baselineTestFiles: {', '.join(unapproved_new_tests)}! "
                     "CẤM QA tự thêm file test giả để khớp tên [P1..Pn]."
                 )
         baseline_test_ids = policy_anchor.get("baselineTestIds")
-        if isinstance(baseline_test_ids, list) and baseline_test_ids and not test_allowlist:
+        if isinstance(baseline_test_ids, list) and baseline_test_ids:
             cur_test_ids = set(cg.extract_defined_test_ids(real_cwd))
             unapproved_ids = sorted(cur_test_ids - set(str(x) for x in baseline_test_ids))
             if unapproved_ids:
@@ -5070,9 +5082,23 @@ def _verify_qa_evidence_ledger_and_ancestry(
         if project_root and run_id:
             cons_check_p = os.path.join(project_root, ".orca", "runs", run_id, "consensus.json")
             draft_check_p = os.path.join(project_root, ".orca", "runs", run_id, "plan-draft.contracts.json")
-            if os.path.isfile(cons_check_p) and not os.path.isfile(draft_check_p):
+            run_pinned_in_db = os.path.isfile(cons_check_p)
+            if not run_pinned_in_db and db_path and os.path.isfile(db_path):
+                try:
+                    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0) as _conn_p:
+                        _r_pin = _conn_p.execute(
+                            "SELECT 1 FROM messages WHERE run_id = ? AND body LIKE '%CONSENSUS_REACHED%' "
+                            "UNION SELECT 1 FROM tasks WHERE run_id = ? LIMIT 1",
+                            (run_id, run_id),
+                        ).fetchone()
+                        if _r_pin:
+                            run_pinned_in_db = True
+                except Exception:
+                    pass
+            if run_pinned_in_db and (not os.path.isfile(cons_check_p) or not os.path.isfile(draft_check_p)):
                 return (
-                    f"[ORCA POLICY-ANCHOR GUARD] Thiếu cả '.policy_anchor.json' lẫn 'plan-draft.contracts.json' cho Run '{run_id}' đã duyệt consensus! "
+                    f"[ORCA POLICY-ANCHOR GUARD] Thiếu '.policy_anchor.json' và phát hiện xoá trái phép "
+                    f"'consensus.json' / 'plan-draft.contracts.json' của Run '{run_id}' đã được duyệt trong DB! "
                     "CẤM xoá file neo hợp đồng để đổi lệnh kiểm thử."
                 )
         canonical_cmds = cg.resolve_canonical_gate_commands(
@@ -5088,6 +5114,27 @@ def _verify_qa_evidence_ledger_and_ancestry(
                     f"không khớp với lệnh kiểm thử đã duyệt lúc đầu trong plan-draft.contracts.json (hash={sorted(draft_hashes)})! "
                     "CẤM xóa/sửa verify_cmd trong contracts.json để đổi sang script/runner khác."
                 )
+
+    if require_tdd:
+        for key, r_list in rows_by_key.items():
+            green_r = r_list[-1]
+            if str(green_r.get("kind") or "test").strip().lower() != "test":
+                continue
+            red_rows = [rr for rr in r_list[:-1] if int(rr.get("exit_code") if rr.get("exit_code") is not None else 1) != 0]
+            if red_rows:
+                green_sha = str(green_r.get("head_sha") or "").strip().lower()
+                green_dirty = bool(green_r.get("dirty"))
+                has_code_progression = any(
+                    bool(rr.get("dirty")) != green_dirty
+                    or str(rr.get("head_sha") or "").strip().lower() != green_sha
+                    for rr in red_rows
+                )
+                if not has_code_progression:
+                    return (
+                        f"[ORCA TDD-PROGRESSION GUARD] Chuỗi TDD RED→GREEN của '{key}' diễn ra trên CÙNG một commit sạch "
+                        f"(head_sha='{green_sha[:12]}', không có thay đổi code giữa pha RED và GREEN)! "
+                        "Bài kiểm thử phụ thuộc trạng thái ngoại lai ngoài git thay vì kiểm thử thay đổi code thực tế."
+                    )
 
     for g_k, g_t in canonical_cmds:
         ok_al, err_al = cg.validate_runner_allowlist(g_t, g_k, worktree_dir=real_cwd)
@@ -5197,7 +5244,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
         executed_ids = cg.extract_executed_test_ids(full_live_out)
         allowed_base_ids = (
             set(str(x) for x in (policy_anchor.get("baselineTestIds") or []))
-            if isinstance(policy_anchor, dict) and policy_anchor.get("baselineTestIds") and not test_allowlist
+            if isinstance(policy_anchor, dict) and policy_anchor.get("baselineTestIds")
             else None
         )
         missing_p: list[str] = []
