@@ -2836,16 +2836,20 @@ def _handle_critic_gate_violation(
 
 
 def _resolve_critic_run_dir(real_cwd: str, payload: dict, args: dict, run_id: str) -> tuple[str, str]:
-    """Return (project_root, run_dir) for a given run_id and cwd."""
+    """Return (project_root, run_dir) for a given run_id and cwd (never trusting `cd`/`--project` in cmd)."""
     candidates_root: list[str] = []
-    cmd_in = str((args or {}).get("command") or (args or {}).get("CommandLine") or "")
-    for m_cd in re.finditer(r"(?:\bcd|--project(?:-dir)?)\s+['\"]?([^\s'\";|&]+)", cmd_in):
-        cd_dir = os.path.expanduser(m_cd.group(1).strip())
-        if os.path.isdir(cd_dir):
-            rp_cd = os.path.realpath(cd_dir)
-            if rp_cd not in candidates_root:
-                candidates_root.append(rp_cd)
     if real_cwd:
+        try:
+            gt_p = subprocess.run(
+                ["git", "-C", real_cwd, "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if gt_p.returncode == 0 and (gt_p.stdout or "").strip():
+                gt_root = os.path.realpath((gt_p.stdout or "").strip())
+                if os.path.isdir(gt_root) and gt_root not in candidates_root:
+                    candidates_root.append(gt_root)
+        except Exception:
+            pass
         cur = real_cwd
         for _ in range(6):
             if os.path.isfile(os.path.join(cur, "orca-team.json")) or os.path.isdir(os.path.join(cur, ".orca", "runs")):
@@ -3086,6 +3090,17 @@ def _check_critic_two_way_debate_and_question_guards(
     ro_err = _check_critic_bash_readonly_guard(cmd, no_heredoc, cwd_slot)
     if ro_err:
         return _handle_critic_gate_violation(ro_err, "", cmd)
+
+    # C-FIX-35: Block direct SQLite mutations targeting orchestration.db via Bash
+    if re.search(r"orchestration\.db\b", cmd, re.IGNORECASE) and (
+        re.search(r"\b(?:INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|TRUNCATE)\b", cmd, re.IGNORECASE)
+        or re.search(r"\bsqlite3\.connect\s*\(", cmd)
+    ):
+        return _handle_critic_gate_violation(
+            "[ORCA DB-INTEGRITY GUARD] CẤM ghi trực tiếp hoặc sửa đổi cơ sở dữ liệu điều phối (orchestration.db) qua sqlite3/python! Mọi bản tin và trạng thái điều phối bắt buộc phải đi qua CLI chính thức của Orca.",
+            "",
+            cmd,
+        )
 
     if not re.search(r"\borca(?:-team)?\b", sanitized_orch):
         return ""
@@ -3600,6 +3615,16 @@ def _check_critic_two_way_debate_and_question_guards(
                 if is_plan_pin or (is_worker_start and not is_starting_critic_or_re):
                     cg_mod = _load_critic_gate_module()
                     proj_root_p, pin_run_dir = _resolve_critic_run_dir(real_cwd, payload, args, explicit_run_id)
+                    if proj_root_p:
+                        rp_proj = os.path.realpath(proj_root_p)
+                        for m_cd_hj in re.finditer(r"(?:\bcd|--project(?:-dir)?)\s+['\"]?([^\s'\";|&]+)", no_heredoc):
+                            cd_target = os.path.realpath(os.path.expanduser(m_cd_hj.group(1).strip()))
+                            if cd_target != rp_proj and not cd_target.startswith(rp_proj + os.sep):
+                                return _handle_critic_gate_violation(
+                                    f"[ORCA ROOT-HIJACK GUARD] CẤM dùng 'cd' hoặc '--project' chuyển sang thư mục ngoài project root ('{cd_target}') khi chạy 'plan pin' / 'worker-start'!",
+                                    explicit_run_id,
+                                    cmd,
+                                )
 
                     # Legacy override check (only if no critic dispatch exists in run and before cutoff)
                     legacy_env = os.environ.get("ORCA_CRITIC_GATE_LEGACY", "").strip() == "1"
@@ -3764,11 +3789,12 @@ def _check_critic_two_way_debate_and_question_guards(
 
                     challenge_created_ats: list[str] = []
                     for cid in ch_ids:
-                        m_row = conn.execute("SELECT from_handle, type, body, created_at FROM messages WHERE id = ? AND run_id = ? LIMIT 1", (cid, explicit_run_id)).fetchone()
+                        m_row = conn.execute("SELECT from_handle, to_handle, type, body, created_at FROM messages WHERE id = ? AND run_id = ? LIMIT 1", (cid, explicit_run_id)).fetchone()
                         if (
                             not m_row
                             or str(m_row["type"] or "").lower() != "question"
                             or str(m_row["from_handle"] or "") not in critic_handles_db
+                            or str(m_row["to_handle"] or "") in critic_handles_db
                             or "CRITIC_CHALLENGE" not in str(m_row["body"] or "")
                             or cid not in qt_by_challenge
                         ):
@@ -3794,10 +3820,7 @@ def _check_critic_two_way_debate_and_question_guards(
                         ).fetchone()
                         if (
                             not m_row
-                            or (
-                                str(m_row["from_handle"] or "").lower() not in ("leader", "coordinator", "orca")
-                                and not str(m_row["from_handle"] or "").startswith("run:")
-                            )
+                            or str(m_row["from_handle"] or "").lower() not in ("leader", "coordinator", "orca", f"run:{explicit_run_id}".lower())
                             or str(m_row["to_handle"] or "") not in critic_handles_db
                             or rid not in expected_ans_to_ch
                             or str(m_row["thread_id"] or "") != expected_ans_to_ch[rid]
@@ -5127,6 +5150,16 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 )
 
     if require_tdd:
+        def _is_non_doc_source_file(rel_p: str) -> bool:
+            p_clean = rel_p.strip().replace("\\", "/").lstrip("./")
+            if not p_clean or cg.is_test_file_path(p_clean):
+                return False
+            low = p_clean.lower()
+            base = os.path.basename(low)
+            if low.endswith((".md", ".txt", ".rst", ".adoc", ".log")) or base in ("license", "changelog", ".gitignore", ".gitattributes"):
+                return False
+            return True
+
         for key, r_list in rows_by_key.items():
             green_r = r_list[-1]
             if str(green_r.get("kind") or "test").strip().lower() != "test":
@@ -5135,15 +5168,35 @@ def _verify_qa_evidence_ledger_and_ancestry(
             if red_rows:
                 green_sha = str(green_r.get("head_sha") or "").strip().lower()
                 green_dirty = bool(green_r.get("dirty"))
-                has_code_progression = any(
-                    bool(rr.get("dirty")) != green_dirty
-                    or str(rr.get("head_sha") or "").strip().lower() != green_sha
-                    for rr in red_rows
-                )
+                has_code_progression = False
+                for rr in red_rows:
+                    r_sha = str(rr.get("head_sha") or "").strip().lower()
+                    r_dirty = bool(rr.get("dirty"))
+                    if r_dirty != green_dirty:
+                        has_code_progression = True
+                        break
+                    if r_sha != green_sha and re.fullmatch(r"[0-9a-f]{40}", r_sha) and re.fullmatch(r"[0-9a-f]{40}", green_sha):
+                        try:
+                            df_src = subprocess.run(
+                                ["git", "-C", real_cwd, "diff", "--name-only", r_sha, green_sha],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                            if df_src.returncode == 0:
+                                src_changed = [
+                                    ln.strip()
+                                    for ln in (df_src.stdout or "").splitlines()
+                                    if _is_non_doc_source_file(ln)
+                                ]
+                                if src_changed:
+                                    has_code_progression = True
+                                    break
+                        except Exception:
+                            has_code_progression = True
+                            break
                 if not has_code_progression:
                     return (
-                        f"[ORCA TDD-PROGRESSION GUARD] Chuỗi TDD RED→GREEN của '{key}' diễn ra trên CÙNG một commit sạch "
-                        f"(head_sha='{green_sha[:12]}', không có thay đổi code giữa pha RED và GREEN)! "
+                        f"[ORCA TDD-PROGRESSION GUARD] Chuỗi TDD RED→GREEN của '{key}' không có thay đổi mã nguồn thực tế "
+                        f"giữa pha RED và GREEN (head_sha='{green_sha[:12]}', chỉ có commit tài liệu/rác hoặc không đổi code)! "
                         "Bài kiểm thử phụ thuộc trạng thái ngoại lai ngoài git thay vì kiểm thử thay đổi code thực tế."
                     )
 

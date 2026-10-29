@@ -386,6 +386,9 @@ def validate_review(
             violations.append(f"[ORCA CRITIC QUOTA GUARD] Objection '{oid}' tham chiếu item '{oitem}' không thuộc Plan.")
         if osev not in VALID_SEVERITIES:
             violations.append(f"[ORCA CRITIC QUOTA GUARD] Objection '{oid}' có severity '{osev}' không hợp lệ.")
+        claim_txt = str(obj.get("claim") or "").strip()
+        if len(claim_txt) < 8:
+            violations.append(f"[ORCA CRITIC QUOTA GUARD] Objection '{oid}' có claim quá ngắn hoặc giả mạo ('{claim_txt}'); cần >=8 ký tự.")
         if osev == "blocker":
             blocker_count += 1
 
@@ -551,6 +554,11 @@ def validate_independence(
                 if h_hash != actual_md_hash or rev_h_hash != actual_md_hash:
                     violations.append(
                         f"[ORCA CRITIC INDEPENDENCE GUARD] Mã băm thực tế của hypothesis.md ('{actual_md_hash}') không khớp với hypothesis.json ('{h_hash}') hoặc review ('{rev_h_hash}')."
+                    )
+                missing_md_refs = [r for r in valid_hyp_refs if r not in hypothesis_md_text]
+                if missing_md_refs:
+                    violations.append(
+                        f"[ORCA CRITIC INDEPENDENCE GUARD] Nội dung hypothesis.md không chứa bằng chứng path:line đã khai trong hypothesis.json.refs ({', '.join(missing_md_refs[:3])})!"
                     )
 
     indep_sources = review.get("independentSources")

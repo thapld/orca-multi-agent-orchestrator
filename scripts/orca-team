@@ -5801,6 +5801,7 @@ def cmd_plan(args: list, caller_dir: Path = None):
             m for m in msgs
             if str(m["id"] or "") in qt_by_challenge
             and str(m["from_handle"] or "") in critic_handles
+            and str(m["to_handle"] or "") not in critic_handles
             and str(m["type"] or "").lower() == "question"
             and "CRITIC_CHALLENGE" in str(m["body"] or "")
         ]
@@ -5811,10 +5812,7 @@ def cmd_plan(args: list, caller_dir: Path = None):
         replies = [
             m for m in msgs
             if str(m["id"] or "") in expected_answer_to_challenge
-            and (
-                str(m["from_handle"] or "").lower() in ("leader", "coordinator", "orca")
-                or str(m["from_handle"] or "").startswith("run:")
-            )
+            and str(m["from_handle"] or "").lower() in ("leader", "coordinator", "orca", f"run:{resolved_run}".lower())
             and str(m["to_handle"] or "") in critic_handles
             and str(m["thread_id"] or "") == expected_answer_to_challenge[str(m["id"] or "")]
             and len(str(m["body"] or "").strip()) >= 60
