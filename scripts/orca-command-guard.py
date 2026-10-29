@@ -4664,6 +4664,13 @@ def _verify_qa_evidence_ledger_and_ancestry(
                     dv = draft_c_obj.get("verify_cmd")
                     if isinstance(dv, list) and dv:
                         pinned_test_cmds_from_draft.append(("test", [str(x) for x in dv]))
+                    for d_it in draft_c_obj.get("items") or []:
+                        if isinstance(d_it, dict):
+                            dv_obj = d_it.get("verify")
+                            if isinstance(dv_obj, dict) and isinstance(dv_obj.get("cmd"), list) and dv_obj.get("cmd"):
+                                pinned_test_cmds_from_draft.append(("test", [str(x) for x in dv_obj["cmd"]]))
+                            elif isinstance(d_it.get("verify_cmd"), list) and d_it.get("verify_cmd"):
+                                pinned_test_cmds_from_draft.append(("test", [str(x) for x in d_it["verify_cmd"]]))
             except Exception:
                 pass
         contracts_p = os.path.join(project_root, ".orca", "runs", run_id, "contracts.json")
@@ -5011,7 +5018,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 f"[ORCA CONTRACT-HASH GUARD] Evidence Ledger thiếu cmd_hash bắt buộc trong contracts.json ({', '.join(sorted(missing_hashes))})!"
             )
 
-    policy_anchor, anchor_err = cg.load_pinned_policy_anchor(ev_base_dir, run_id or "default")
+    policy_anchor, anchor_err = cg.load_pinned_policy_anchor(ev_base_dir, run_id or "default", worktree_dir=real_cwd)
     if anchor_err:
         return anchor_err
 
@@ -5038,12 +5045,36 @@ def _verify_qa_evidence_ledger_and_ancestry(
         if isinstance(baseline_files, dict) and baseline_files:
             cur_baseline = cg.compute_baseline_test_files(real_cwd)
             for b_rel, b_sha in baseline_files.items():
-                if b_rel not in test_allowlist and cur_baseline.get(b_rel) and cur_baseline.get(b_rel) != b_sha:
+                if b_rel not in test_allowlist and cur_baseline.get(b_rel) != b_sha:
                     return (
                         f"[ORCA TEST-INTEGRITY GUARD] File kiểm thử/cấu hình gốc '{b_rel}' trong baselineTestFiles "
-                        f"đã bị sửa đổi sau khi pin ngoài test_allowlist!"
+                        f"đã bị sửa đổi hoặc xoá sau khi pin ngoài test_allowlist!"
                     )
+            unapproved_new_tests = sorted(set(cur_baseline.keys()) - (set(baseline_files.keys()) | test_allowlist))
+            if unapproved_new_tests:
+                return (
+                    f"[ORCA TEST-INTEGRITY GUARD] Phát hiện file kiểm thử mới thêm vào sau khi pin ngoài "
+                    f"baselineTestFiles / test_allowlist: {', '.join(unapproved_new_tests)}! "
+                    "CẤM QA tự thêm file test giả để khớp tên [P1..Pn]."
+                )
+        baseline_test_ids = policy_anchor.get("baselineTestIds")
+        if isinstance(baseline_test_ids, list) and baseline_test_ids and not test_allowlist:
+            cur_test_ids = set(cg.extract_defined_test_ids(real_cwd))
+            unapproved_ids = sorted(cur_test_ids - set(str(x) for x in baseline_test_ids))
+            if unapproved_ids:
+                return (
+                    f"[ORCA TEST-INTEGRITY GUARD] Phát hiện test ID mới thêm vào sau khi pin ngoài baselineTestIds: "
+                    f"{', '.join(unapproved_ids[:6])}! CẤM bơm thêm hàm test giả để vượt cổng độ phủ."
+                )
     else:
+        if project_root and run_id:
+            cons_check_p = os.path.join(project_root, ".orca", "runs", run_id, "consensus.json")
+            draft_check_p = os.path.join(project_root, ".orca", "runs", run_id, "plan-draft.contracts.json")
+            if os.path.isfile(cons_check_p) and not os.path.isfile(draft_check_p):
+                return (
+                    f"[ORCA POLICY-ANCHOR GUARD] Thiếu cả '.policy_anchor.json' lẫn 'plan-draft.contracts.json' cho Run '{run_id}' đã duyệt consensus! "
+                    "CẤM xoá file neo hợp đồng để đổi lệnh kiểm thử."
+                )
         canonical_cmds = cg.resolve_canonical_gate_commands(
             real_cwd, project_root or real_cwd, contracts_obj=c_obj, cfg_obj=cfg_obj
         )
@@ -5051,7 +5082,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
         if pinned_test_cmds_from_draft:
             draft_hashes = {cg.canonical_cmd_hash(toks) for _, toks in pinned_test_cmds_from_draft}
             cur_hashes = {cg.canonical_cmd_hash(toks) for k, toks in canonical_cmds if k == "test"}
-            if draft_hashes and cur_hashes != draft_hashes:
+            if draft_hashes and (cur_hashes != draft_hashes or len(draft_hashes) > 1):
                 return (
                     f"[ORCA POLICY-ANCHOR GUARD] Lệnh kiểm thử trong contracts.json / orca-team.json (hash={sorted(cur_hashes)}) "
                     f"không khớp với lệnh kiểm thử đã duyệt lúc đầu trong plan-draft.contracts.json (hash={sorted(draft_hashes)})! "
@@ -5160,14 +5191,28 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 f"Thực thi Fail-Closed."
             )
 
-    # C-FIX-15: Verify 100% [P1..Pn] coverage by matching each item's test_pattern in live test output
+    # C-FIX-15 & C-FIX-33: Verify 100% [P1..Pn] coverage by binding each item's test_pattern to executed test IDs
     if expected_plan_items:
         full_live_out = "\n".join(combined_test_outputs)
+        executed_ids = cg.extract_executed_test_ids(full_live_out)
+        allowed_base_ids = (
+            set(str(x) for x in (policy_anchor.get("baselineTestIds") or []))
+            if isinstance(policy_anchor, dict) and policy_anchor.get("baselineTestIds") and not test_allowlist
+            else None
+        )
         missing_p: list[str] = []
         for pk in sorted(expected_plan_items, key=lambda x: int(x[1:]) if x[1:].isdigit() else 999):
             pat = item_test_patterns.get(pk) or rf"(?i)\btest[_\-]?{pk.lower()}\b"
             try:
-                if not re.search(pat, full_live_out):
+                if executed_ids:
+                    matched_ids = [
+                        tid
+                        for tid in executed_ids
+                        if re.search(pat, tid) and (allowed_base_ids is None or tid in allowed_base_ids)
+                    ]
+                    if not matched_ids:
+                        missing_p.append(pk)
+                elif not re.search(pat, full_live_out):
                     missing_p.append(pk)
             except re.error:
                 if pat not in full_live_out:

@@ -15,7 +15,9 @@ import os
 import re
 import secrets
 import shlex
+import sqlite3
 import stat
+import subprocess
 import sys
 import unicodedata
 from pathlib import Path
@@ -817,6 +819,26 @@ def validate_runner_allowlist(
         # 2. python -m unittest|pytest
         if re.fullmatch(r"python(?:3(?:\.\d+)?)?", exe):
             if len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] in ("unittest", "pytest"):
+                for u_i, u_tok in enumerate(tokens[3:], start=3):
+                    s_val = ""
+                    if u_tok in ("-s", "--start-directory", "--test-dir") and u_i + 1 < len(tokens):
+                        s_val = tokens[u_i + 1].strip().strip("'\"")
+                    elif u_tok.startswith(("--start-directory=", "--test-dir=")):
+                        s_val = u_tok.split("=", 1)[1].strip().strip("'\"")
+                    if s_val:
+                        rel_s = s_val
+                        if os.path.isabs(s_val) and wt_real:
+                            try:
+                                rel_s = os.path.relpath(os.path.realpath(s_val), wt_real)
+                            except Exception:
+                                rel_s = s_val
+                        first_seg = [p for p in rel_s.replace("\\", "/").lstrip("./").split("/") if p]
+                        top_seg = first_seg[0].lower() if first_seg else "."
+                        if top_seg not in ("tests", "test", "spec", "e2e", "__tests__", ".", "src", "app", "api", "web"):
+                            return (
+                                False,
+                                f"[ORCA VERIFY RUNNER ALLOWLIST] Thư mục kiểm thử '{s_val}' không thuộc cây thư mục test chuẩn (tests/, test/, spec/, e2e/)!",
+                            )
                 return True, ""
             return (
                 False,
@@ -996,6 +1018,95 @@ def compute_baseline_test_files(repo_dir: Path | str | None) -> dict[str, str]:
     return out
 
 
+def extract_defined_test_ids(repo_dir: Path | str | None) -> list[str]:
+    """
+    C-FIX-33: Extract concrete defined test function/method IDs from all test files in `repo_dir`
+    (`baselineTestIds`), e.g. `test_p1`, `TestLogin`, `it('...')`.
+    """
+    if not repo_dir:
+        return []
+    root = Path(repo_dir).resolve()
+    if not root.is_dir():
+        return []
+    _, matched_files = compute_test_tree_hash(root)
+    ids: set[str] = set()
+    for rel_p in matched_files:
+        fp = root / rel_p
+        try:
+            txt = fp.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for m in re.finditer(r"^\s*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)\s*\(", txt, re.MULTILINE):
+            ids.add(m.group(1))
+        for m in re.finditer(r"\b(?:it|test)\s*\(\s*['\"`]([^'\"`]+)['\"`]", txt):
+            ids.add(m.group(1).strip())
+        for m in re.finditer(r"^\s*func\s+(Test[A-Za-z0-9_]+)\s*\(", txt, re.MULTILINE):
+            ids.add(m.group(1))
+    return sorted(ids)
+
+
+def extract_executed_test_ids(output: str) -> list[str]:
+    """
+    C-FIX-33: Parse concrete executed test IDs from runner stdout/stderr (unittest -v, pytest -v, jest, go test).
+    """
+    if not output:
+        return []
+    found: set[str] = set()
+    for ln in output.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        # unittest -v: `test_p1 (test_calc2.T.test_p1) ... ok` or `test_p1 ... ok`
+        m_u = re.match(r"^(test_[A-Za-z0-9_]+)\b.*?\.\.\.\s*(?:ok|PASS)\s*$", s, re.IGNORECASE)
+        if m_u:
+            found.add(m_u.group(1))
+            continue
+        # pytest -v: `tests/test_x.py::T::test_p1 PASSED`
+        m_p = re.search(r"::(test_[A-Za-z0-9_]+)\s+PASSED\b", s)
+        if m_p:
+            found.add(m_p.group(1))
+            continue
+        # go test -v: `--- PASS: TestP1`
+        m_g = re.match(r"^---\s*PASS:\s*(Test[A-Za-z0-9_]+)\b", s)
+        if m_g:
+            found.add(m_g.group(1))
+            continue
+    return sorted(found)
+
+
+def _resolve_default_worktree_for_anchor(worktree_dir: Path | str | None, run_id: str) -> Path | None:
+    if worktree_dir:
+        p = Path(worktree_dir).resolve()
+        if p.is_dir():
+            return p
+    db_env = os.environ.get("ORCA_ORCHESTRATION_DB", "").strip()
+    if db_env and Path(db_env).is_file():
+        proj_cand = Path(db_env).resolve().parent / "project"
+        qa_cand = proj_cand / "qa-worker"
+        if qa_cand.is_dir():
+            return qa_cand
+        if proj_cand.is_dir():
+            return proj_cand
+    return None
+
+
+def _get_git_root_commit_sha(repo_dir: Path | str | None) -> str:
+    if not repo_dir:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-list", "--max-parents=0", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0 and (proc.stdout or "").strip():
+            return (proc.stdout or "").strip().splitlines()[0].strip()
+    except Exception:
+        pass
+    return ""
+
+
 def write_pinned_policy_anchor(
     ev_base_dir: Path | str,
     run_id: str,
@@ -1007,14 +1118,16 @@ def write_pinned_policy_anchor(
     run_dir: Path | str | None = None,
 ) -> tuple[Path | None, str]:
     """
-    C-FIX-13 & C-FIX-27: Write 0600 HMAC-signed policy anchor outside the worktree at
-    `<ev_base_dir>/<run_id>/.policy_anchor.json` AND write `.orca/acceptance-manifest.json`
-    (`acceptanceCommands`, `baselineTestFiles`, `manifestSha256`) so agent edits to
-    `contracts.json` or `orca-team.json` cannot alter the canonical test command or test patterns.
+    C-FIX-13, C-FIX-27 & C-FIX-33: Write 0600 HMAC-signed policy anchor outside the worktree at
+    `<ev_base_dir>/<run_id>/.policy_anchor.json`, `<ev_base_dir>/.policy_anchor_seal.<run_id>`,
+    SQLite DB `orca_policy_anchors`, AND `.orca/acceptance-manifest.json`
+    (`acceptanceCommands`, `baselineTestFiles`, `baselineTestIds`, `manifestSha256`) so agent edits
+    or deletions of `.policy_anchor.json` / `contracts.json` are detected fail-closed.
     """
     secret, err = get_or_create_hmac_secret(ev_base_dir, create_if_missing=True)
     if err or not secret:
         return None, err or "Cannot create HMAC secret"
+    eff_wt = _resolve_default_worktree_for_anchor(worktree_dir, run_id)
     run_ev_dir = Path(ev_base_dir) / (run_id or "default")
     run_ev_dir.mkdir(parents=True, exist_ok=True)
     anchor_path = run_ev_dir / ".policy_anchor.json"
@@ -1026,7 +1139,9 @@ def write_pinned_policy_anchor(
         }
         for k, toks in canonical_cmds
     ]
-    baseline_files = compute_baseline_test_files(worktree_dir)
+    baseline_files = compute_baseline_test_files(eff_wt)
+    baseline_test_ids = extract_defined_test_ids(eff_wt)
+    repo_root_sha = _get_git_root_commit_sha(eff_wt)
     manifest_core = {
         "runId": run_id,
         "planHash": plan_hash_val,
@@ -1034,6 +1149,7 @@ def write_pinned_policy_anchor(
         "itemTestPatterns": dict(sorted((item_test_patterns or {}).items())),
         "testAllowlist": sorted(set(test_allowlist or [])),
         "baselineTestFiles": baseline_files,
+        "baselineTestIds": baseline_test_ids,
     }
     manifest_sha256 = "sha256:" + hashlib.sha256(
         json.dumps(manifest_core, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1047,17 +1163,48 @@ def write_pinned_policy_anchor(
         "itemTestPatterns": dict(sorted((item_test_patterns or {}).items())),
         "testAllowlist": sorted(set(test_allowlist or [])),
         "baselineTestFiles": baseline_files,
+        "baselineTestIds": baseline_test_ids,
+        "repoRootSha": repo_root_sha,
         "manifestSha256": manifest_sha256,
     }
     anchor_obj["anchor_hmac"] = compute_policy_anchor_hmac(anchor_obj, secret)
+    manifest_text = json.dumps(anchor_obj, ensure_ascii=False, indent=2) + "\n"
     fd = os.open(str(anchor_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as af:
-        af.write(json.dumps(anchor_obj, ensure_ascii=False, indent=2) + "\n")
+        af.write(manifest_text)
     os.chmod(str(anchor_path), 0o600)
 
+    # Write seal file in parent `ev_base_dir` so unlinking `<run_id>/.policy_anchor.json` (F02) is detected fail-closed
+    try:
+        seal_path = Path(ev_base_dir) / f".policy_anchor_seal.{run_id or 'default'}"
+        fd_s = os.open(str(seal_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd_s, "w", encoding="utf-8") as sf:
+            sf.write(manifest_text)
+        os.chmod(str(seal_path), 0o600)
+    except Exception:
+        pass
+
+    # Persist anchor in SQLite DB (`ORCA_ORCHESTRATION_DB`) outside `ev_base_dir` and outside worktree
+    db_env = os.environ.get("ORCA_ORCHESTRATION_DB", "").strip()
+    if db_env and Path(db_env).is_file():
+        try:
+            with sqlite3.connect(db_env, timeout=5.0) as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS orca_policy_anchors ("
+                    "run_id TEXT, repo_root_sha TEXT, ev_dir TEXT, anchor_json TEXT, manifest_sha256 TEXT, "
+                    "PRIMARY KEY (run_id, repo_root_sha))"
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO orca_policy_anchors (run_id, repo_root_sha, ev_dir, anchor_json, manifest_sha256) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (run_id or "default", repo_root_sha or "default", str(Path(ev_base_dir).resolve()), manifest_text, manifest_sha256),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
     # Also write `.orca/acceptance-manifest.json` in worktree_dir and run_dir if provided
-    manifest_text = json.dumps(anchor_obj, ensure_ascii=False, indent=2) + "\n"
-    for target_base in (worktree_dir, run_dir):
+    for target_base in (eff_wt, run_dir):
         if not target_base:
             continue
         try:
@@ -1071,13 +1218,40 @@ def write_pinned_policy_anchor(
     return anchor_path, manifest_sha256
 
 
-def load_pinned_policy_anchor(ev_base_dir: Path | str, run_id: str) -> tuple[dict[str, Any] | None, str]:
+def load_pinned_policy_anchor(
+    ev_base_dir: Path | str,
+    run_id: str,
+    worktree_dir: Path | str | None = None,
+) -> tuple[dict[str, Any] | None, str]:
     """
-    C-FIX-27: Load and verify `<ev_base_dir>/<run_id>/.policy_anchor.json` if present.
-    Returns (anchor_dict, error_str). If file does not exist, returns (None, "").
+    C-FIX-27 & C-FIX-33: Load and verify `<ev_base_dir>/<run_id>/.policy_anchor.json`.
+    Fails closed if the anchor file was deleted after pinning (detected via parent seal or SQLite DB `orca_policy_anchors`).
     """
+    eff_wt = _resolve_default_worktree_for_anchor(worktree_dir, run_id)
+    repo_root_sha = _get_git_root_commit_sha(eff_wt)
     anchor_path = Path(ev_base_dir) / (run_id or "default") / ".policy_anchor.json"
+    seal_path = Path(ev_base_dir) / f".policy_anchor_seal.{run_id or 'default'}"
     if not anchor_path.exists():
+        if seal_path.exists():
+            return (
+                None,
+                f"[ORCA POLICY-ANCHOR GUARD] File neo chính sách '{anchor_path}' đã bị xoá trái phép sau khi ghim (phát hiện seal '{seal_path.name}')!",
+            )
+        db_env = os.environ.get("ORCA_ORCHESTRATION_DB", "").strip()
+        if db_env and Path(db_env).is_file() and repo_root_sha:
+            try:
+                with sqlite3.connect(f"file:{db_env}?mode=ro", uri=True, timeout=2.0) as conn:
+                    row = conn.execute(
+                        "SELECT manifest_sha256 FROM orca_policy_anchors WHERE run_id = ? AND repo_root_sha = ? LIMIT 1",
+                        (run_id or "default", repo_root_sha),
+                    ).fetchone()
+                    if row:
+                        return (
+                            None,
+                            f"[ORCA POLICY-ANCHOR GUARD] File neo chính sách '{anchor_path}' đã bị xoá trái phép sau khi ghim (phát hiện bản ghi neo trong DB manifest={row[0]})!",
+                        )
+            except Exception:
+                pass
         return None, ""
     try:
         st = os.lstat(str(anchor_path))
