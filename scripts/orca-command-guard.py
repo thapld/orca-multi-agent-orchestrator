@@ -2838,6 +2838,13 @@ def _handle_critic_gate_violation(
 def _resolve_critic_run_dir(real_cwd: str, payload: dict, args: dict, run_id: str) -> tuple[str, str]:
     """Return (project_root, run_dir) for a given run_id and cwd."""
     candidates_root: list[str] = []
+    cmd_in = str((args or {}).get("command") or (args or {}).get("CommandLine") or "")
+    for m_cd in re.finditer(r"(?:\bcd|--project(?:-dir)?)\s+['\"]?([^\s'\";|&]+)", cmd_in):
+        cd_dir = os.path.expanduser(m_cd.group(1).strip())
+        if os.path.isdir(cd_dir):
+            rp_cd = os.path.realpath(cd_dir)
+            if rp_cd not in candidates_root:
+                candidates_root.append(rp_cd)
     if real_cwd:
         cur = real_cwd
         for _ in range(6):

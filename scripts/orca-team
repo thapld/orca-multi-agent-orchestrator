@@ -5851,7 +5851,10 @@ def cmd_plan(args: list, caller_dir: Path = None):
             )
             sys.exit(3)
 
-        final_m = finals[-1]
+        final_m = next(
+            (m for m in reversed(finals) if isinstance(cg.extract_review_json_from_body(str(m["body"] or "")), dict)),
+            finals[-1],
+        )
         final_ts = str(final_m["created_at"] or "")
         final_body = str(final_m["body"] or "")
 
