@@ -3070,7 +3070,7 @@ def _check_critic_bash_readonly_guard(cmd: str, no_heredoc: str, cwd_slot: str) 
     return ""
 
 
-TRUSTED_OFFICIAL_FILENAMES = {
+OFFICIAL_ORCA_SCRIPTS = {
     "orca-team",
     "orca-command-guard.py",
     "orca_critic_gate.py",
@@ -3078,8 +3078,9 @@ TRUSTED_OFFICIAL_FILENAMES = {
     "orca-project-init",
     "orca-hotfix",
     "orca-review",
-    "orca_sim.py",
-    "run-tests.sh",
+}
+
+OFFICIAL_SIM_TEST_FILES = {
     "test_guard_bypass.py",
     "test_guard_adversarial.py",
     "test_critic_gate_unit.py",
@@ -3094,6 +3095,7 @@ TRUSTED_OFFICIAL_FILENAMES = {
     "probe_db_guard_995711b.py",
     "probe_db_guard_edfe31b.py",
     "probe_db_guard_34837ac.py",
+    "probe_cfix39.py",
 }
 
 
@@ -3107,17 +3109,37 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
         if st.st_uid != os.getuid():
             return False
         base = os.path.basename(norm)
-        if base not in TRUSTED_OFFICIAL_FILENAMES:
-            return False
-        trusted_dirs = (
-            os.path.realpath(os.path.expanduser("~/.orca/orca-multi-agent-orchestrator")) + os.sep,
-            os.path.realpath("/Users/macbook/work/tools/orca-multi-agent-orchestrator") + os.sep,
-            os.path.realpath("/Users/macbook/work/tools/orca-sim/bin") + os.sep,
-            os.path.realpath("/Users/macbook/work/tools/orca-sim/tests") + os.sep,
+
+        # C-FIX-40: Strict path validation. Never trust scripts merely by basename or in arbitrary subdirs.
+        # 1. Official Orchestrator repo CLI scripts must strictly reside at <repo_root>/scripts/<script_name>
+        repo_roots = (
+            os.path.realpath(os.path.expanduser("~/.orca/orca-multi-agent-orchestrator")),
+            os.path.realpath("/Users/macbook/work/tools/orca-multi-agent-orchestrator"),
         )
-        if any(norm.startswith(td) for td in trusted_dirs):
+        for rr in repo_roots:
+            if base in OFFICIAL_ORCA_SCRIPTS and norm == os.path.join(rr, "scripts", base):
+                try:
+                    chk = subprocess.run(
+                        ["git", "-C", rr, "ls-files", "--error-unmatch", os.path.join("scripts", base)],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                    )
+                    if chk.returncode == 0:
+                        return True
+                except Exception:
+                    pass
+
+        # 2. Simulation Harness files must strictly reside in their dedicated canonical locations
+        sim_root = os.path.realpath("/Users/macbook/work/tools/orca-sim")
+        if norm == os.path.join(sim_root, "run-tests.sh"):
             return True
-        return norm == os.path.realpath("/Users/macbook/work/tools/orca-sim/run-tests.sh")
+        if norm == os.path.join(sim_root, "bin", "orca_sim.py"):
+            return True
+        if base in OFFICIAL_SIM_TEST_FILES and norm == os.path.join(sim_root, "tests", base):
+            return True
+
+        return False
     except Exception:
         return False
 
@@ -3147,8 +3169,23 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         except Exception:
             pass
 
-    # C-FIX-39: Detect hex encoded tokens in cmd decoding to orchestration DB or critical tables
-    for m_hex in re.finditer(r"\b([0-9a-fA-F]{16,})\b", cmd):
+    # C-FIX-40: Fold string concatenations in cmd and no_heredoc to defeat split-string obfuscation
+    folded_cmd = re.sub(r"['\"]\s*\+\s*['\"]", "", no_heredoc)
+    folded_raw = re.sub(r"['\"]\s*\+\s*['\"]", "", cmd)
+
+    # C-FIX-40: Decode any fromhex(...) calls with concatenated or segmented hex expressions
+    for m_fh in re.finditer(r"fromhex\s*\(\s*([^)]+)\)", no_heredoc):
+        raw_fh = re.sub(r"['\"\s+]", "", m_fh.group(1))
+        if len(raw_fh) >= 4 and len(raw_fh) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", raw_fh):
+            try:
+                dec_fh = bytes.fromhex(raw_fh).decode(errors="ignore")
+                if orch_tbl_re.search(dec_fh) or re.search(r"sqlite3?|CRITIC_CHALLENGE|CRITIC_VERDICT", dec_fh, re.IGNORECASE):
+                    return "[ORCA DB-INTEGRITY GUARD] CẤM truyền chuỗi hex mã hóa đường dẫn cơ sở dữ liệu điều phối trong lệnh Bash!"
+            except Exception:
+                pass
+
+    # C-FIX-39..C-FIX-40: Detect hex encoded tokens in cmd / folded_raw decoding to orchestration DB or critical tables
+    for m_hex in re.finditer(r"\b([0-9a-fA-F]{16,})\b", folded_raw):
         hex_cand = m_hex.group(1)
         if len(hex_cand) % 2 == 0:
             try:
@@ -3158,7 +3195,7 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             except Exception:
                 pass
 
-    no_quotes = re.sub(r"['\"]", "", no_heredoc)
+    no_quotes = re.sub(r"['\"]", "", folded_cmd)
     if re.search(r"\bsqlite3?\b|\b\.read\s+[\w.\-~/]+", no_quotes, re.IGNORECASE):
         return (
             "[ORCA DB-INTEGRITY GUARD] CẤM gọi trực tiếp sqlite3 CLI, lệnh '.read' hoặc thư viện sqlite3 qua Bash "
@@ -3180,9 +3217,14 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             "[ORCA DB-INTEGRITY GUARD] CẤM truyền trực tiếp đường dẫn orchestration.db / ORCA_ORCHESTRATION_DB "
             "vào trình thông dịch script ngoài CLI chính thức của Orca!"
         )
-    # C-FIX-39: Scan inline python -c commands for dynamic imports / DB DML
+    # C-FIX-40: Scan inline python -c commands for dynamic imports, DB connection, or DML mutations
     if re.search(r"\bpython3?\s+-c\b", no_heredoc):
-        if re.search(r"__import__\s*\(\s*['\"][^'\"]*sql|getattr\s*\([^)]*['\"]con|executemany|['\"]m['\"]\s*\+\s*['\"]essages['\"]|['\"]question_['\"]\s*\+\s*['\"]thr", no_heredoc):
+        if (
+            re.search(r"sqlite3?|orchestration\.db", folded_cmd, re.IGNORECASE)
+            or re.search(r"__import__\s*\(\s*['\"][^'\"]*sq|getattr\s*\([^)]*['\"]co", folded_cmd, re.IGNORECASE)
+            or (re.search(r"\bexecute(?:many|script)?\b", folded_cmd) and sql_dml_re.search(folded_cmd))
+            or orch_tbl_re.search(folded_cmd)
+        ):
             return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
 
     if re.search(r"\b(?:python3?|node|ruby|perl|php|sh|bash|zsh)\b", no_heredoc):
@@ -5358,26 +5400,55 @@ def _verify_qa_evidence_ledger_and_ancestry(
                         if ast.dump(old_ast, include_attributes=False) == ast.dump(new_ast, include_attributes=False):
                             return False
 
-                        # C-FIX-39: Functional progression requires changes to logic, functions, classes, or control flow
-                        # Ignore top-level dummy variable/constant assignments (e.g. UNUSED = 123)
-                        def _filter_top_dummy_assigns(tree: ast.AST) -> list[ast.stmt]:
-                            filtered = []
-                            for stmt in getattr(tree, "body", []):
-                                if (
-                                    isinstance(stmt, ast.Assign)
-                                    and len(stmt.targets) == 1
-                                    and isinstance(stmt.targets[0], ast.Name)
-                                    and isinstance(stmt.value, (ast.Constant, ast.Str, ast.Num))
-                                ):
-                                    continue
-                                filtered.append(stmt)
-                            return filtered
+                        # C-FIX-40: Functional progression requires changes to logic, functions, classes, or control flow
+                        # Filter out docstrings, bare string/constant expressions, and unused variable assignments in all scopes
+                        def _normalize_functional_ast(tree: ast.AST) -> ast.AST:
+                            class _FunctionalCleaner(ast.NodeTransformer):
+                                def _clean_stmts(self, stmts, scope_node):
+                                    loaded_names = {
+                                        n.id for n in ast.walk(scope_node)
+                                        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                                    }
+                                    cleaned = []
+                                    for stmt in stmts:
+                                        # Strip docstrings & bare constant expressions
+                                        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, (ast.Constant, ast.Str, ast.Num)):
+                                            continue
+                                        # Strip unused variable assignments
+                                        if isinstance(stmt, ast.Assign):
+                                            targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+                                            if targets and all(t not in loaded_names for t in targets):
+                                                continue
+                                        cleaned.append(stmt)
+                                    return cleaned
 
-                        old_func = _filter_top_dummy_assigns(old_ast)
-                        new_func = _filter_top_dummy_assigns(new_ast)
-                        m_old = ast.Module(body=old_func, type_ignores=[])
-                        m_new = ast.Module(body=new_func, type_ignores=[])
-                        if ast.dump(m_old, include_attributes=False) == ast.dump(m_new, include_attributes=False):
+                                def visit_Module(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    return node
+
+                                def visit_FunctionDef(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    return node
+
+                                def visit_AsyncFunctionDef(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    return node
+
+                                def visit_ClassDef(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    return node
+
+                            cleaned_tree = _FunctionalCleaner().visit(tree)
+                            ast.fix_missing_locations(cleaned_tree)
+                            return cleaned_tree
+
+                        clean_old = _normalize_functional_ast(old_ast)
+                        clean_new = _normalize_functional_ast(new_ast)
+                        if ast.dump(clean_old, include_attributes=False) == ast.dump(clean_new, include_attributes=False):
                             return False
                     except Exception:
                         pass
