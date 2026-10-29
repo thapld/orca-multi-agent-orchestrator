@@ -3284,6 +3284,40 @@ def _detect_caller_slot_safe(payload: dict, args: dict, cmd: str = "") -> tuple[
             )
             if m_from:
                 cwd_slot = _extract_canonical_worker_slot(m_from.group(1))
+            if not cwd_slot and re.search(r"(?:^|[;&|()\n])\s*(?:\S*/)?orca\s+orchestration\s+send\b", no_hd, re.IGNORECASE):
+                disp_q = _extract_cli_flag_value(no_hd, ("dispatch-id", "dispatch"))
+                task_q = _extract_cli_flag_value(no_hd, ("task-id", "task"))
+                db_p = _find_orca_orchestration_db_path()
+                if (disp_q or task_q) and db_p and os.path.isfile(db_p):
+                    try:
+                        import sqlite3
+
+                        conn_s = sqlite3.connect(f"file:{db_p}?mode=ro", uri=True, timeout=1.5)
+                        conn_s.row_factory = sqlite3.Row
+                        row_s = None
+                        if disp_q:
+                            row_s = conn_s.execute(
+                                "SELECT dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id "
+                                "FROM dispatch_contexts dc LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                                "WHERE dc.id = ? LIMIT 1",
+                                (disp_q,),
+                            ).fetchone()
+                        if not row_s and task_q:
+                            row_s = conn_s.execute(
+                                "SELECT dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id "
+                                "FROM dispatch_contexts dc LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                                "WHERE dc.task_id = ? ORDER BY dc.created_at DESC LIMIT 1",
+                                (task_q,),
+                            ).fetchone()
+                        conn_s.close()
+                        if row_s:
+                            for cand_h in (row_s["assignee_handle"], row_s["agent_terminal_handle"], row_s["worktree_id"]):
+                                s_cand = _extract_canonical_worker_slot(str(cand_h or ""))
+                                if s_cand:
+                                    cwd_slot = s_cand
+                                    break
+                    except Exception:
+                        pass
     except Exception:
         pass
     return raw_cwd_in, real_cwd, cwd_slot
@@ -3619,7 +3653,7 @@ def _check_qa_reject_and_ping_pong_guards(
                 "[ORCA STRUCTURED BUG REPORT GUARD] Khối JSON trong QA_REJECT bị lỗi cú pháp (malformed JSON)! "
                 "Hãy truyền JSON hợp lệ với đủ 8 trường: plan_item, file_path, line, error_code, repro_cmd, expected, actual, evidence."
             )
-    elif os.environ.get("ORCA_REQUIRE_STRUCTURED_BUG", "").strip() == "1":
+    elif os.environ.get("ORCA_REQUIRE_STRUCTURED_BUG", "1").strip() != "0":
         return (
             "[ORCA STRUCTURED BUG REPORT GUARD] QA_REJECT bắt buộc phải đính kèm khối JSON cấu trúc chuẩn "
             "({\"plan_item\":...,\"file_path\":...,\"line\":...,\"error_code\":...,\"repro_cmd\":...,\"expected\":...,\"actual\":...,\"evidence\":...})!"
@@ -3636,16 +3670,27 @@ def _verify_qa_evidence_ledger_and_ancestry(
 ) -> str:
     """
     Enforce FIX-02 (Machine-recorded Evidence Ledger), FIX-04 (Git Merge Ancestry & Scope-Drift),
-    FIX-07 (Contracts & TDD Red->Green), and FIX-09 (Gate Ledger rows).
+    FIX-07 (Contracts & TDD Red->Green), and FIX-09 (Gate Ledger rows) under strict Zero-Trust:
+    - Rejects any worktree-local evidence.jsonl (A01) and only accepts 0600 recorder files in ~/.orca/evidence (or ORCA_EVIDENCE_DIR).
+    - Requires real_cwd to match dispatch worktree (A10) and be a valid Git repository with clean status (A03).
+    - Fails closed if any DB-registered upstream branch was deleted or unmerged (A04, T08).
+    - Requires strict dispatch/task/run match (A06), non-empty head_sha == HEAD (A02, T10), tests_total > 0 (A08, A11),
+      non-noop command, 100% [P1..Pn] plan item coverage (A05), TDD Red->Green (T11), and contracts.json acceptance re-run.
     """
+    import hashlib
+    import subprocess
+
     disp_id = _extract_cli_flag_value(no_heredoc, ("dispatch-id", "dispatch"))
     task_id = _extract_cli_flag_value(no_heredoc, ("task-id", "task"))
     run_id = _extract_cli_flag_value(no_heredoc, ("run", "run-id"))
     from_handle = _extract_cli_flag_value(no_heredoc, ("from",)) or cwd_slot
 
-    # Resolve run_id, disp_id, project_root, and upstream dev/ui branches from SQLite
     project_root = os.path.dirname(real_cwd) if cwd_slot and real_cwd.endswith(cwd_slot) else real_cwd
     upstream_branches: list[str] = []
+    db_upstream_branches: set[str] = set()
+    expected_plan_items: set[str] = set()
+    db_worktree_path = ""
+
     db_path = _find_orca_orchestration_db_path()
     if db_path and os.path.isfile(db_path):
         try:
@@ -3653,12 +3698,23 @@ def _verify_qa_evidence_ledger_and_ancestry(
 
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
             conn.row_factory = sqlite3.Row
-            if not run_id and disp_id:
-                row = conn.execute("SELECT run_id, task_id FROM dispatch_contexts WHERE id = ? LIMIT 1", (disp_id,)).fetchone()
+            if disp_id:
+                row = conn.execute(
+                    "SELECT dc.run_id, dc.task_id, wd.worktree_id "
+                    "FROM dispatch_contexts dc LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                    "WHERE dc.id = ? LIMIT 1",
+                    (disp_id,),
+                ).fetchone()
                 if row:
-                    run_id = str(row["run_id"] or "")
+                    if not run_id:
+                        run_id = str(row["run_id"] or "")
                     if not task_id:
                         task_id = str(row["task_id"] or "")
+                    wt_raw = str(row["worktree_id"] or "").strip()
+                    if wt_raw.startswith("path:"):
+                        wt_raw = wt_raw[5:].strip()
+                    if wt_raw:
+                        db_worktree_path = wt_raw
             if not run_id and task_id:
                 row = conn.execute("SELECT run_id FROM tasks WHERE id = ? LIMIT 1", (task_id,)).fetchone()
                 if row:
@@ -3679,20 +3735,47 @@ def _verify_qa_evidence_ledger_and_ancestry(
                     wt_id = str(wr["worktree_id"] or "")
                     if wt_id.startswith("path:"):
                         wt_id = wt_id[5:]
+                    if not disp_id and wt_id and os.path.realpath(wt_id) == os.path.realpath(real_cwd):
+                        disp_id = str(wr["did"] or "")
+                        db_worktree_path = wt_id
                     slot_n = _extract_canonical_worker_slot(os.path.basename(wt_id.rstrip("/"))) or _extract_canonical_worker_slot(str(wr["agent_terminal_handle"] or ""))
                     if slot_n and (slot_n.startswith("dev-worker") or slot_n.startswith("ui-worker")):
+                        db_upstream_branches.add(slot_n)
                         if slot_n not in upstream_branches:
                             upstream_branches.append(slot_n)
+                t_rows = conn.execute("SELECT task_title, spec FROM tasks WHERE run_id = ?", (run_id,)).fetchall()
+                for tr in t_rows:
+                    for pk in re.findall(r"\[(P\d+)\]", f"{tr['task_title'] or ''} {tr['spec'] or ''}"):
+                        expected_plan_items.add(pk)
             conn.close()
         except Exception:
             pass
 
-    # Determine current git HEAD SHA & check git status / merge ancestry (FIX-04) when real_cwd is a git repo
+    if db_worktree_path:
+        project_root = os.path.dirname(db_worktree_path.rstrip("/"))
+        if os.path.realpath(real_cwd) != os.path.realpath(db_worktree_path):
+            return (
+                f"[ORCA WORKTREE-MISMATCH GUARD] Lệnh báo cáo của '{disp_id or cwd_slot}' được thực thi từ thư mục '{real_cwd}', "
+                f"không khớp với worktree được cấp phát '{db_worktree_path}'! "
+                f"Thực thi Fail-Closed: CẤM chạy lệnh gửi báo cáo từ thư mục ngoài worktree của slot!"
+            )
+
+    # Reject any self-written evidence.jsonl inside the worktree (A01)
+    for forbidden_local_ev in (
+        os.path.join(real_cwd, "evidence.jsonl"),
+        os.path.join(real_cwd, ".orca", "evidence.jsonl"),
+    ):
+        if os.path.isfile(forbidden_local_ev):
+            return (
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Phát hiện file ledger tự ghi trong worktree ('{forbidden_local_ev}')! "
+                "Theo quy tắc Zero-Trust P0, Guard CẤM đọc ledger nằm trong worktree mà agent có quyền tự tạo. "
+                "Hãy xóa file này và chạy kiểm thử qua 'orca-team verify --run <RUN> --dispatch-id <DID> --task-id <TID> -- <cmd>'!"
+            )
+
+    # Item 6: Fail-closed when real_cwd is not a valid Git repository with a HEAD commit (A03)
     current_head_sha = os.environ.get("ORCA_HEAD_SHA", "").strip()
     is_git_repo = False
     try:
-        import subprocess
-
         rev_p = subprocess.run(
             ["git", "-C", real_cwd, "rev-parse", "--verify", "HEAD"],
             capture_output=True,
@@ -3706,103 +3789,134 @@ def _verify_qa_evidence_ledger_and_ancestry(
     except Exception:
         pass
 
-    if is_git_repo:
-        try:
-            import subprocess
+    if not is_git_repo or not current_head_sha:
+        return (
+            f"[ORCA GIT-REPO GUARD] Thư mục worktree '{real_cwd}' không phải là Git repository hợp lệ (hoặc chưa có commit HEAD)! "
+            "Thực thi Fail-Closed: CẤM gửi báo cáo QA_VERDICT: PASS từ thư mục ngoài Git!"
+        )
 
-            # Check git status --porcelain (ignore untracked .orca/ and temporary test report / ledger files)
-            st_p = subprocess.run(
-                ["git", "-C", real_cwd, "status", "--porcelain"],
+    # Check git status --porcelain & merge ancestry (FIX-04, A04, T08)
+    try:
+        st_p = subprocess.run(
+            ["git", "-C", real_cwd, "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if st_p.returncode == 0 and (st_p.stdout or "").strip():
+            dirty_lines = []
+            for ln in (st_p.stdout or "").splitlines():
+                if len(ln) < 4:
+                    continue
+                rel_f = ln[3:].strip().strip('"')
+                if rel_f.startswith(".orca"):
+                    continue
+                dirty_lines.append(rel_f)
+            if dirty_lines:
+                return (
+                    f"[ORCA GIT-CLEAN GUARD] Worktree '{cwd_slot or 'qa-worker'}' đang có file chưa commit hoặc bẩn ({', '.join(dirty_lines[:5])})! "
+                    f"Cách sửa bắt buộc: Commit hoặc dọn sạch các file thay đổi ('git status --porcelain' phải rỗng) trước khi gửi QA_VERDICT: PASS!"
+                )
+
+        if not upstream_branches:
+            br_p = subprocess.run(
+                ["git", "-C", real_cwd, "for-each-ref", "--format=%(refname:short)", "refs/heads/dev-worker*", "refs/heads/ui-worker*"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            if st_p.returncode == 0 and (st_p.stdout or "").strip():
-                dirty_lines = []
-                for ln in (st_p.stdout or "").splitlines():
-                    if len(ln) < 4:
-                        continue
-                    rel_f = ln[3:].strip().strip('"')
-                    if rel_f.startswith(".orca") or rel_f.endswith(("evidence.jsonl", "test-report.json", "junit.xml")):
-                        continue
-                    dirty_lines.append(rel_f)
-                if dirty_lines:
+            if br_p.returncode == 0:
+                upstream_branches = [b.strip() for b in (br_p.stdout or "").splitlines() if b.strip()]
+
+        for br in upstream_branches:
+            if br == cwd_slot:
+                continue
+            v_ref = subprocess.run(
+                ["git", "-C", real_cwd, "rev-parse", "--verify", "--quiet", br],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if v_ref.returncode != 0:
+                if br in db_upstream_branches:
                     return (
-                        f"[ORCA GIT-CLEAN GUARD] Worktree '{cwd_slot or 'qa-worker'}' đang có file chưa commit hoặc bẩn ({', '.join(dirty_lines[:5])})! "
-                        f"Cách sửa bắt buộc: Commit hoặc dọn sạch các file thay đổi ('git status --porcelain' phải rỗng) trước khi gửi QA_VERDICT: PASS!"
+                        f"[ORCA MERGE-ANCESTRY GUARD] Nhánh upstream '{br}' của Run '{run_id or 'active'}' "
+                        f"(đã ghi nhận trong DB điều phối) không tồn tại hoặc đã bị xóa khỏi Git repo! "
+                        f"Thực thi Fail-Closed: CẤM xóa nhánh dev/ui để bỏ qua kiểm tra merge ancestry!"
                     )
-
-            # Discover any additional dev-worker* / ui-worker* git branches in the repo if upstream_branches is empty
-            if not upstream_branches:
-                br_p = subprocess.run(
-                    ["git", "-C", real_cwd, "for-each-ref", "--format=%(refname:short)", "refs/heads/dev-worker*", "refs/heads/ui-worker*"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                continue
+            anc_p = subprocess.run(
+                ["git", "-C", real_cwd, "merge-base", "--is-ancestor", br, "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if anc_p.returncode != 0:
+                return (
+                    f"[ORCA MERGE-ANCESTRY GUARD] Nhánh upstream '{br}' của Run '{run_id or 'active'}' CHƯA được merge vào HEAD của '{cwd_slot or 'qa-worker'}' "
+                    f"('git merge-base --is-ancestor {br} HEAD' thất bại)! "
+                    f"CẤM gửi báo cáo PASS khi chưa tích hợp đầy đủ code từ mọi nhánh dev/ui. "
+                    f"Cách sửa bắt buộc: Chạy 'orca-team merge-upstream --role qa --run {run_id or '<RUN_ID>'}' rồi chạy lại test qua 'orca-team verify'!"
                 )
-                if br_p.returncode == 0:
-                    upstream_branches = [b.strip() for b in (br_p.stdout or "").splitlines() if b.strip()]
+    except Exception as exc:
+        return f"[ORCA GIT-ANCESTRY ERROR] Không thể xác minh trạng thái Git/ancestry ({exc}). Thực thi Fail-Closed!"
 
-            for br in upstream_branches:
-                if br == cwd_slot:
-                    continue
-                v_ref = subprocess.run(
-                    ["git", "-C", real_cwd, "rev-parse", "--verify", "--quiet", br],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if v_ref.returncode != 0:
-                    continue
-                anc_p = subprocess.run(
-                    ["git", "-C", real_cwd, "merge-base", "--is-ancestor", br, "HEAD"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if anc_p.returncode != 0:
-                    return (
-                        f"[ORCA MERGE-ANCESTRY GUARD] Nhánh upstream '{br}' của Run '{run_id or 'active'}' CHƯA được merge vào HEAD của '{cwd_slot or 'qa-worker'}' "
-                        f"('git merge-base --is-ancestor {br} HEAD' thất bại)! "
-                        f"CẤM gửi báo cáo PASS khi chưa tích hợp đầy đủ code từ mọi nhánh dev/ui. "
-                        f"Cách sửa bắt buộc: Chạy 'orca-team merge-upstream --role qa --run {run_id or '<RUN_ID>'}' rồi chạy lại test qua 'orca-team verify'!"
-                    )
-        except Exception:
-            pass
-
-    # Collect Evidence Ledger rows (FIX-02, FIX-07, FIX-09)
-    # Priority 1: Explicit per-test/per-dispatch ledger (ORCA_EVIDENCE_DIR, <real_cwd>/evidence.jsonl, ~/.orca/evidence/<run>/<disp>.jsonl)
-    # Priority 2: Run-level ledger (<project_root>/.orca/runs/<run>/evidence.jsonl)
-    explicit_ledger_files: list[str] = []
-    env_ev_dir = os.environ.get("ORCA_EVIDENCE_DIR", "").strip()
-    if env_ev_dir:
-        if os.path.isfile(env_ev_dir):
-            explicit_ledger_files.append(env_ev_dir)
-        elif os.path.isdir(env_ev_dir):
-            for cand in (
-                os.path.join(env_ev_dir, run_id or "", f"{disp_id}.jsonl") if disp_id else "",
-                os.path.join(env_ev_dir, f"{disp_id}.jsonl") if disp_id else "",
-                os.path.join(env_ev_dir, run_id or "", "evidence.jsonl") if run_id else "",
-                os.path.join(env_ev_dir, "evidence.jsonl"),
-            ):
-                if cand and os.path.isfile(cand) and cand not in explicit_ledger_files:
-                    explicit_ledger_files.append(cand)
-    for local_cand in (
-        os.path.join(real_cwd, "evidence.jsonl"),
-        os.path.join(real_cwd, ".orca", "evidence.jsonl"),
-        os.path.join(os.path.expanduser("~"), ".orca", "evidence", run_id or "default", f"{disp_id}.jsonl") if disp_id else "",
-        os.path.join(os.path.expanduser("~"), ".orca", "evidence", run_id or "default", "evidence.jsonl") if run_id else "",
-    ):
-        if local_cand and os.path.isfile(local_cand) and local_cand not in explicit_ledger_files:
-            explicit_ledger_files.append(local_cand)
-
-    fallback_ledger_files: list[str] = []
+    # Load expected [P1..Pn] and acceptance contracts from master-plan.md & contracts.json (Item 2 & 3)
+    contract_acceptance_cmds: list[str] = []
+    contract_cmd_hashes: set[str] = set()
     if run_id and project_root:
-        run_ev = os.path.join(project_root, ".orca", "runs", run_id, "evidence.jsonl")
-        if os.path.isfile(run_ev) and run_ev not in explicit_ledger_files:
-            fallback_ledger_files.append(run_ev)
+        plan_md_p = os.path.join(project_root, ".orca", "runs", run_id, "master-plan.md")
+        if os.path.isfile(plan_md_p):
+            try:
+                plan_txt = open(plan_md_p, "r", encoding="utf-8", errors="ignore").read()
+                for pk in re.findall(r"\[(P\d+)\]", plan_txt):
+                    expected_plan_items.add(pk)
+            except Exception:
+                pass
+        contracts_p = os.path.join(project_root, ".orca", "runs", run_id, "contracts.json")
+        if os.path.isfile(contracts_p):
+            try:
+                c_obj = json.loads(open(contracts_p, "r", encoding="utf-8", errors="ignore").read())
+                if isinstance(c_obj, dict):
+                    for pk in c_obj.get("plan_items") or []:
+                        if isinstance(pk, str) and re.match(r"^P\d+$", pk.strip()):
+                            expected_plan_items.add(pk.strip())
+                    for item in c_obj.get("items") or []:
+                        if isinstance(item, dict):
+                            ipk = str(item.get("id") or "").strip()
+                            if re.match(r"^P\d+$", ipk):
+                                expected_plan_items.add(ipk)
+                            icmd = str(item.get("cmd") or item.get("acceptance_cmd") or "").strip()
+                            if icmd:
+                                contract_acceptance_cmds.append(icmd)
+                                contract_cmd_hashes.add(hashlib.sha256(icmd.encode("utf-8")).hexdigest()[:16])
+                            ihash = str(item.get("cmd_hash") or "").strip()
+                            if ihash:
+                                contract_cmd_hashes.add(ihash)
+                    for ac in c_obj.get("acceptance_cmds") or []:
+                        if isinstance(ac, str) and ac.strip():
+                            contract_acceptance_cmds.append(ac.strip())
+                            contract_cmd_hashes.add(hashlib.sha256(ac.strip().encode("utf-8")).hexdigest()[:16])
+                    for ch in c_obj.get("required_cmd_hashes") or []:
+                        if isinstance(ch, str) and ch.strip():
+                            contract_cmd_hashes.add(ch.strip())
+            except Exception:
+                pass
 
-    target_files = explicit_ledger_files if (explicit_ledger_files or env_ev_dir) else fallback_ledger_files
+    # Item 1: Only read ledger files from ~/.orca/evidence (or ORCA_EVIDENCE_DIR) — never from worktree or project/.orca
+    target_files: list[str] = []
+    env_ev_dir = os.environ.get("ORCA_EVIDENCE_DIR", "").strip()
+    ev_root = env_ev_dir if env_ev_dir else os.path.join(os.path.expanduser("~"), ".orca", "evidence")
+    if os.path.isfile(ev_root):
+        target_files.append(ev_root)
+    elif os.path.isdir(ev_root):
+        for cand in (
+            os.path.join(ev_root, run_id or "default", f"{disp_id}.jsonl") if disp_id else "",
+            os.path.join(ev_root, f"{disp_id}.jsonl") if disp_id else "",
+        ):
+            if cand and os.path.isfile(cand) and cand not in target_files:
+                target_files.append(cand)
+
     ledger_rows: list[dict] = []
     for lf_p in target_files:
         try:
@@ -3821,19 +3935,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
         except Exception:
             continue
 
-    # Filter rows relevant to QA / gate / current dispatch
-    qa_rows: list[dict] = []
-    for r in ledger_rows:
-        r_disp = str(r.get("dispatch") or r.get("dispatch_id") or "").strip()
-        r_src = str(r.get("source") or "").strip().lower()
-        if r.get("_file") in explicit_ledger_files:
-            if not r_disp or r_disp in (disp_id, from_handle, cwd_slot, "d_qa", "qa-worker") or r_src in ("recorder", "gate", "verify"):
-                qa_rows.append(r)
-        else:
-            if r_disp in (disp_id, from_handle, cwd_slot, "d_qa", "qa-worker") or r_src in ("recorder", "gate", "verify"):
-                qa_rows.append(r)
-
-    if not qa_rows:
+    if not ledger_rows:
         return (
             "[ORCA QA EVIDENCE LEDGER GUARD] Không tìm thấy bằng chứng thực thi test trong Evidence Ledger "
             f"('~/.orca/evidence/{run_id or '<run>'}/{disp_id or '<dispatch>'}.jsonl')! "
@@ -3842,17 +3944,61 @@ def _verify_qa_evidence_ledger_and_ancestry(
             "để máy ghi nhận exit_code=0 và head_sha vào ledger trước khi gửi QA_VERDICT: PASS!"
         )
 
-    # Evaluate chronological sequence per command/key for latest exit status, head_sha, dirty, and TDD red->green
+    # Item 6 / A06: Strict dispatch_id, task_id, and run_id matching (reject foreign dispatches)
+    qa_rows: list[dict] = []
+    for r in ledger_rows:
+        r_disp = str(r.get("dispatch_id") or r.get("dispatch") or "").strip()
+        r_task = str(r.get("task_id") or r.get("task") or "").strip()
+        r_run = str(r.get("run_id") or r.get("run") or "").strip()
+        r_src = str(r.get("source") or "").strip().lower()
+        if disp_id and r_disp != disp_id:
+            return (
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Phát hiện dòng bằng chứng của dispatch khác ('{r_disp}' != '{disp_id}') trong ledger! "
+                "CẤM tái sử dụng bằng chứng của worker/dispatch khác cho QA."
+            )
+        if task_id and r_task and r_task != task_id:
+            return (
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Phát hiện dòng bằng chứng của task khác ('{r_task}' != '{task_id}') trong ledger! "
+                "CẤM tái sử dụng bằng chứng của task khác cho QA."
+            )
+        if run_id and r_run and r_run != run_id:
+            return (
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Phát hiện dòng bằng chứng của Run khác ('{r_run}' != '{run_id}') trong ledger!"
+            )
+        if r_src not in ("recorder", "verify", "gate"):
+            return (
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Dòng bằng chứng có nguồn không hợp lệ (source='{r_src}')!"
+            )
+        qa_rows.append(r)
+
+    # Evaluate chronological sequence per command/key for latest exit status, head_sha, dirty, tests_total, and TDD red->green
     latest_by_key: dict[str, dict] = {}
     history_by_key: dict[str, list[int]] = {}
+    noop_bins = {"true", "false", ":", "echo", "printf", "cat", "ls", "pwd", "sleep", "whoami", "date", "env", "export", "head", "tail", "wc", "touch"}
     for r in qa_rows:
         cmd_v = r.get("cmd")
-        cmd_str = " ".join(str(x) for x in cmd_v) if isinstance(cmd_v, list) else str(cmd_v or "")
+        if isinstance(cmd_v, list):
+            cmd_tokens_r = [str(x) for x in cmd_v if str(x).strip()]
+            cmd_str = " ".join(cmd_tokens_r)
+        else:
+            cmd_str = str(cmd_v or "").strip()
+            cmd_tokens_r = cmd_str.split()
+        if not cmd_tokens_r:
+            return "[ORCA QA EVIDENCE LEDGER GUARD] Dòng bằng chứng trong ledger có trường 'cmd' rỗng!"
+        exe_b = os.path.basename(cmd_tokens_r[0]).lower()
+        if exe_b in noop_bins or any(op in cmd_str for op in ("||", ";", "|", "$(", "`")):
+            return (
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Lệnh ghi trong ledger ('{cmd_str}') là lệnh no-op hoặc dùng toán tử shell che giấu lỗi! "
+                "Chỉ chấp nhận lệnh trình chạy test thực tế."
+            )
         key = str(r.get("cmd_hash") or cmd_str or r.get("kind") or "default")
         raw_exit = r.get("exit_code") if r.get("exit_code") is not None else r.get("exit")
         exit_code = int(raw_exit) if isinstance(raw_exit, (int, float)) and not isinstance(raw_exit, bool) else 1
         history_by_key.setdefault(key, []).append(exit_code)
         latest_by_key[key] = r
+
+    covered_plan_items: set[str] = set()
+    verified_cmd_hashes: set[str] = set()
 
     for key, last_r in latest_by_key.items():
         raw_exit = last_r.get("exit_code") if last_r.get("exit_code") is not None else last_r.get("exit")
@@ -3864,36 +4010,54 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 f"(exit_code={exit_code}, failed={failed_n}, cmd={last_r.get('cmd')})! "
                 f"CẤM gửi báo cáo QA_VERDICT: PASS khi lệnh kiểm thử trong ledger có exit_code != 0."
             )
-        if last_r.get("dirty") is True:
+        if last_r.get("dirty") is not False:
             return (
-                "[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger ghi nhận worktree đang bẩn (dirty=true) lúc chạy test! "
+                "[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger ghi nhận worktree đang bẩn (dirty!=false) lúc chạy test! "
                 "Hãy commit sạch mọi thay đổi rồi chạy lại 'orca-team verify' trước khi báo PASS."
             )
-        if last_r.get("tests_total") is not None and int(last_r.get("tests_total")) <= 0:
+        raw_total = last_r.get("tests_total")
+        if raw_total is None or not isinstance(raw_total, (int, float)) or isinstance(raw_total, bool) or int(raw_total) <= 0:
             return (
-                "[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger ghi nhận tests_total=0 (không có test nào chạy)! "
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger thiếu 'tests_total' hoặc 'tests_total={raw_total}' (<= 0, không có test nào chạy)! "
                 "CẤM báo cáo PASS khi chưa có test thực tế nào được thực thi."
             )
         row_sha = str(last_r.get("head_sha") or "").strip()
-        if row_sha:
-            is_stale_marker = row_sha.lower().startswith(("old", "stale", "outdated", "000000"))
-            sha_mismatch = bool(
-                current_head_sha
-                and not current_head_sha.startswith(row_sha)
-                and not row_sha.startswith(current_head_sha)
+        if not row_sha:
+            return (
+                "[ORCA QA EVIDENCE LEDGER GUARD] Dòng bằng chứng trong Evidence Ledger thiếu 'head_sha' (rỗng)! "
+                "Thực thi Fail-Closed: Bắt buộc phải có commit SHA thật khớp với HEAD hiện tại."
             )
-            if is_stale_marker or sha_mismatch:
-                return (
-                    f"[ORCA QA EVIDENCE LEDGER GUARD] Bằng chứng trong Evidence Ledger có commit 'head_sha={row_sha}' "
-                    f"CŨ / KHÁC với HEAD hiện tại ('{current_head_sha or 'HEAD'}')! "
-                    f"Mọi lần sửa code hoặc commit mới đều làm vô hiệu hóa kết quả test cũ. "
-                    f"Cách sửa bắt buộc: Chạy lại 'orca-team verify' trên commit HEAD hiện tại trước khi báo PASS!"
-                )
+        is_stale_marker = row_sha.lower().startswith(("old", "stale", "outdated", "000000"))
+        sha_mismatch = bool(
+            not current_head_sha.startswith(row_sha)
+            and not row_sha.startswith(current_head_sha)
+        )
+        if is_stale_marker or sha_mismatch:
+            return (
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Bằng chứng trong Evidence Ledger có commit 'head_sha={row_sha}' "
+                f"CŨ / KHÁC với HEAD hiện tại ('{current_head_sha}')! "
+                f"Mọi lần sửa code hoặc commit mới đều làm vô hiệu hóa kết quả test cũ. "
+                f"Cách sửa bắt buộc: Chạy lại 'orca-team verify' trên commit HEAD hiện tại trước khi báo PASS!"
+            )
+        for pi in last_r.get("plan_items") or []:
+            if isinstance(pi, str) and pi.strip():
+                for m_p in re.findall(r"P\d+", pi.strip()):
+                    covered_plan_items.add(m_p)
+        if last_r.get("cmd_hash"):
+            verified_cmd_hashes.add(str(last_r.get("cmd_hash")))
 
-    # Check TDD Red -> Green requirement when requested by contract / env / row flag (FIX-07)
-    require_tdd = os.environ.get("ORCA_REQUIRE_TDD", "").strip() == "1" or any(
-        bool(r.get("require_tdd")) for r in qa_rows
-    )
+    # Item 3: Verify 100% [P1..Pn] Plan Item Coverage (A05)
+    if expected_plan_items:
+        missing_p = sorted(expected_plan_items - covered_plan_items, key=lambda x: int(x[1:]) if x[1:].isdigit() else 999)
+        if missing_p:
+            return (
+                f"[ORCA PLAN-COVERAGE GUARD] Evidence Ledger chưa phủ đủ 100% hạng mục Plan của Run '{run_id}' "
+                f"(thiếu bằng chứng cho: {', '.join(missing_p)})! "
+                f"Cách sửa bắt buộc: Chạy 'orca-team verify --run {run_id} --dispatch-id {disp_id or '<DID>'} --plan-items {','.join(sorted(expected_plan_items))} -- <lệnh test>'!"
+            )
+
+    # Item 8: TDD Red -> Green required by default (unless ORCA_REQUIRE_TDD=0)
+    require_tdd = os.environ.get("ORCA_REQUIRE_TDD", "1").strip() != "0"
     if require_tdd:
         for key, seq in history_by_key.items():
             if not (len(seq) >= 2 and any(x != 0 for x in seq[:-1]) and seq[-1] == 0):
@@ -3901,6 +4065,77 @@ def _verify_qa_evidence_ledger_and_ancestry(
                     f"[ORCA TDD GUARD] Hạng mục/lệnh '{key}' chưa có đủ chuỗi bằng chứng TDD Red→Green "
                     f"(cần ít nhất 1 dòng exit_code!=0 trước và 1 dòng exit_code=0 sau cùng cmd_hash trong ledger)!"
                 )
+
+    # Item 2 & 3: Verify contracts.json cmd_hash & re-run acceptance/test commands at PASS time (anti-same-UID forgery)
+    if contract_cmd_hashes:
+        missing_hashes = contract_cmd_hashes - verified_cmd_hashes
+        if missing_hashes:
+            return (
+                f"[ORCA CONTRACT-HASH GUARD] Evidence Ledger thiếu cmd_hash bắt buộc trong contracts.json ({', '.join(sorted(missing_hashes))})!"
+            )
+
+    cmds_to_rerun: list[list[str]] = []
+    seen_rerun: set[str] = set()
+    for acc_cmd in contract_acceptance_cmds:
+        toks = acc_cmd.split()
+        if toks:
+            s_key = " ".join(toks)
+            if s_key not in seen_rerun:
+                seen_rerun.add(s_key)
+                cmds_to_rerun.append(toks)
+    for last_r in latest_by_key.values():
+        cmd_v = last_r.get("cmd")
+        toks = [str(x) for x in cmd_v if str(x).strip()] if isinstance(cmd_v, list) else str(cmd_v or "").split()
+        if toks:
+            s_key = " ".join(toks)
+            if s_key not in seen_rerun:
+                seen_rerun.add(s_key)
+                cmds_to_rerun.append(toks)
+
+    for acc_tokens in cmds_to_rerun:
+        acc_cmd_str = " ".join(acc_tokens)
+        try:
+            acc_p = subprocess.run(
+                acc_tokens,
+                cwd=real_cwd,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if acc_p.returncode != 0:
+                return (
+                    f"[ORCA ACCEPTANCE RERUN GUARD] Guard tự chạy lại lệnh kiểm thử '{acc_cmd_str}' "
+                    f"tại thời điểm PASS và nhận kết quả THẤT BẠI (exit_code={acc_p.returncode})! "
+                    f"CẤM giả mạo ledger khi test thực tế vẫn đang fail."
+                )
+            combined_live = (acc_p.stdout or "") + "\n" + (acc_p.stderr or "")
+            live_passed = 0
+            live_failed = 0
+            for m_p in re.finditer(r"\b(\d+)\s+(?:passed|passing)\b", combined_live, re.IGNORECASE):
+                live_passed = max(live_passed, int(m_p.group(1)))
+            for m_f in re.finditer(r"\b(\d+)\s+(?:failed|failing|failures?|errors?)\b", combined_live, re.IGNORECASE):
+                live_failed = max(live_failed, int(m_f.group(1)))
+            m_ok = re.search(r"\bRan\s+(\d+)\s+tests?\b[\s\S]{0,200}?\bOK\b", combined_live)
+            if m_ok:
+                live_passed = max(live_passed, int(m_ok.group(1)))
+            go_ok = len(re.findall(r"(?m)^(?:ok|---\s*PASS:)\s+\S+", combined_live))
+            if go_ok:
+                live_passed = max(live_passed, go_ok)
+            tap_ok = len(re.findall(r"(?m)^ok\s+\d+\b", combined_live))
+            if tap_ok:
+                live_passed = max(live_passed, tap_ok)
+            if live_failed > 0 or live_passed <= 0:
+                return (
+                    f"[ORCA ACCEPTANCE RERUN GUARD] Guard tự chạy lại lệnh '{acc_cmd_str}' tại thời điểm PASS "
+                    f"nhưng không ghi nhận được test nào PASS (live_passed={live_passed}, live_failed={live_failed})! "
+                    f"Thực thi Zero-Trust chống giả mạo cùng-UID: lệnh kiểm thử phải thực sự chạy và in kết quả > 0 test passed."
+                )
+        except Exception as exc:
+            return (
+                f"[ORCA ACCEPTANCE RERUN GUARD] Không thể thực thi lệnh kiểm thử '{acc_cmd_str}' tại thời điểm PASS ({exc})! "
+                f"Thực thi Fail-Closed chống giả mạo ledger."
+            )
 
     return ""
 
@@ -3975,9 +4210,9 @@ def _check_qa_and_ui_verification_guards(
             if rej_err:
                 return rej_err
 
-        # Detect indirect variable/subshell flags on `orca orchestration send` (e.g. `--type "$T"`, `--body "$(cat ...)"`)
+        # Detect indirect variable/subshell flags on `orca orchestration send` (e.g. `--type "$T"`, `--body "$(cat ...)"`, `--body "$(jq ...)"`)
         has_indirect_type_or_body = bool(
-            re.search(r"--(?:type|outcome)(?:\s+|=)['\"]?\$(?:\w+|\{|\()", no_heredoc)
+            re.search(r"--(?:type|outcome|body|subject)(?:\s+|=)['\"]?(?:\$(?:\w+|\{|\()|[^'\"]*\$\()", no_heredoc)
             or unresolved_cats
         )
 

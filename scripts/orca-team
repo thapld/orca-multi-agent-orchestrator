@@ -2662,6 +2662,26 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
         print("❌ Thiếu lệnh cần chạy cho 'orca-team verify -- <cmd...>'.", file=sys.stderr)
         sys.exit(2)
 
+    # Item 5: Reject shell chaining/redirection tokens and trivial no-op binaries (never run with shell=True)
+    forbidden_ops = {"||", "&&", ";", "|", ">", ">>", "<", "&", "2>&1", "1>&2"}
+    for tok_c in cmd_tokens:
+        if tok_c in forbidden_ops or any(op in tok_c for op in ("||", "&&", ";", "|", "$(", "`")):
+            print(
+                f"❌ [ORCA VERIFY GUARD] CẤM dùng toán tử nối chuỗi/chuyển hướng shell ('{tok_c}') trong 'orca-team verify'! "
+                "Lệnh kiểm thử phải được thực thi trực tiếp (shell=False) không qua ống dẫn che giấu mã lỗi.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    exe_base = os.path.basename(cmd_tokens[0].strip()).lower()
+    noop_bins = {"true", "false", ":", "echo", "printf", "cat", "ls", "pwd", "sleep", "whoami", "date", "env", "export", "head", "tail", "wc", "touch"}
+    if exe_base in noop_bins:
+        print(
+            f"❌ [ORCA VERIFY GUARD] CẤM dùng lệnh no-op / không phải trình chạy test ('{cmd_tokens[0]}') trong 'orca-team verify'!",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     info = resolve_run_upstream_branches(work_dir, run_id=run_id, dispatch_id=dispatch_id, task_id=task_id)
     eff_run = info.get("runId") or run_id or "default"
     eff_did = dispatch_id or "default"
@@ -2680,14 +2700,17 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
             kind = "test"
 
     t0 = time.time()
-    use_shell = len(cmd_tokens) == 1 or any(op in cmd_str for op in ("&&", "||", "|", ";", ">", "<"))
-    proc = subprocess.run(
-        cmd_str if use_shell else cmd_tokens,
-        cwd=str(work_dir),
-        shell=use_shell,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            cmd_tokens,
+            cwd=str(work_dir),
+            shell=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        print(f"❌ Không tìm thấy tệp thực thi '{cmd_tokens[0]}'.", file=sys.stderr)
+        sys.exit(127)
     dur_ms = int((time.time() - t0) * 1000)
     combined_out = (proc.stdout or "") + (proc.stderr or "")
     if proc.stdout:
@@ -2698,30 +2721,64 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
     head_sha = ""
     dirty = False
     try:
-        hp = subprocess.run(["git", "-C", str(work_dir), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2)
+        hp = subprocess.run(["git", "-C", str(work_dir), "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, timeout=2)
         if hp.returncode == 0:
             head_sha = (hp.stdout or "").strip()
         sp = subprocess.run(["git", "-C", str(work_dir), "status", "--porcelain"], capture_output=True, text=True, timeout=2)
         if sp.returncode == 0:
-            dirty = bool((sp.stdout or "").strip())
+            dirty_lines = [
+                ln for ln in (sp.stdout or "").splitlines()
+                if len(ln) >= 4 and not ln[3:].strip().strip('"').startswith(".orca")
+            ]
+            dirty = bool(dirty_lines)
     except Exception:
         pass
 
-    failed_cnt = 0 if proc.returncode == 0 else 1
-    m_fail = re.search(r"(\d+)\s+failed", combined_out, re.IGNORECASE)
-    if m_fail:
-        try:
-            failed_cnt = int(m_fail.group(1))
-        except ValueError:
-            pass
+    failed_cnt = 0
+    for pat_f in (
+        r"(\d+)\s+failed\b",
+        r"(\d+)\s+failing\b",
+        r"failures\s*=\s*(\d+)",
+        r"ℹ\s+fail\s+(\d+)",
+    ):
+        m_fail = re.search(pat_f, combined_out, re.IGNORECASE)
+        if m_fail:
+            try:
+                failed_cnt = max(failed_cnt, int(m_fail.group(1)))
+            except ValueError:
+                pass
+    if proc.returncode != 0 and failed_cnt == 0:
+        failed_cnt = 1
+
     passed_cnt = 0
-    m_pass = re.search(r"(\d+)\s+passed", combined_out, re.IGNORECASE)
-    if m_pass:
-        try:
-            passed_cnt = int(m_pass.group(1))
-        except ValueError:
-            pass
-    total_cnt = (passed_cnt + failed_cnt) if (passed_cnt + failed_cnt) > 0 else (1 if proc.returncode == 0 else failed_cnt)
+    for pat_p in (
+        r"(\d+)\s+passed\b",
+        r"(\d+)\s+passing\b",
+        r"Ran\s+(\d+)\s+tests?\b",
+        r"ℹ\s+pass\s+(\d+)",
+        r"tests\s*=\s*['\"]?(\d+)",
+    ):
+        m_pass = re.search(pat_p, combined_out, re.IGNORECASE)
+        if m_pass:
+            try:
+                passed_cnt = max(passed_cnt, int(m_pass.group(1)))
+            except ValueError:
+                pass
+    if passed_cnt == 0:
+        go_ok = re.findall(r"(?:^|\n)ok\s+\S+", combined_out)
+        tap_ok = re.findall(r"(?:^|\n)ok\s+\d+\b", combined_out)
+        if go_ok or tap_ok:
+            passed_cnt = max(len(go_ok), len(tap_ok))
+
+    # Item 4: Never fabricate tests_total=1 when no real test output was parsed
+    total_cnt = passed_cnt + failed_cnt
+    eff_exit = int(proc.returncode)
+    if kind == "test" and eff_exit == 0 and total_cnt <= 0:
+        print(
+            "❌ [ORCA VERIFY GUARD] Lệnh kết thúc với exit 0 nhưng không phát hiện bất kỳ test case nào thực thi (tests_total=0)!",
+            file=sys.stderr,
+        )
+        eff_exit = 2
 
     row = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2731,13 +2788,14 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
         "task_id": task_id,
         "plan_items": plan_items,
         "kind": kind,
-        "cmd": cmd_str,
+        "cmd": list(cmd_tokens),
+        "cmd_str": cmd_str,
         "cmd_hash": hashlib.sha256(cmd_str.encode("utf-8")).hexdigest()[:16],
         "cwd": str(work_dir),
         "head_sha": head_sha,
         "dirty": dirty,
-        "exit_code": int(proc.returncode),
-        "exit": int(proc.returncode),
+        "exit_code": eff_exit,
+        "exit": eff_exit,
         "tests_total": total_cnt,
         "tests_failed": failed_cnt,
         "failed": failed_cnt,
@@ -2752,18 +2810,15 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
     ev_base = Path(os.environ.get("ORCA_EVIDENCE_DIR", "").strip() or str(Path.home() / ".orca" / "evidence"))
     ev_dir = ev_base / eff_run
     ev_dir.mkdir(parents=True, exist_ok=True)
-    with open(ev_dir / f"{eff_did}.jsonl", "a", encoding="utf-8") as f:
+    ev_file = ev_dir / f"{eff_did}.jsonl"
+    with open(ev_file, "a", encoding="utf-8") as f:
         f.write(row_line)
-
     try:
-        run_ev_dir = main_root / ".orca" / "runs" / eff_run
-        run_ev_dir.mkdir(parents=True, exist_ok=True)
-        with open(run_ev_dir / "evidence.jsonl", "a", encoding="utf-8") as f2:
-            f2.write(row_line)
+        os.chmod(ev_file, 0o600)
     except Exception:
         pass
 
-    sys.exit(proc.returncode)
+    sys.exit(eff_exit)
 
 
 def cmd_gate(args: list, caller_dir: Path | None = None):
@@ -3157,25 +3212,31 @@ def cmd_wait_events(args: list, caller_dir: Path | None = None):
             if isinstance(ack_meta, dict):
                 prior_deliv = str(ack_meta.get("unackedDeliveryId") or "").strip()
                 prior_cursor = int(ack_meta.get("cursor") or 0)
-                if prior_deliv and not pending_ack and not extra_flags and "--allow-unacked" not in (args or []):
-                    print(
-                        json.dumps(
-                            {
-                                "ok": False,
-                                "error": {
-                                    "code": "ack_required",
-                                    "message": (
-                                        f"[ORCA ACK-REQUIRED GUARD] Batch trước đã trả về deliveryId='{prior_deliv}' nhưng bạn gọi "
-                                        f"'orca-team wait-events' thiếu cờ '--ack {prior_deliv}'! "
-                                        f"Hãy chạy lại: orca-team wait-events --ack {prior_deliv}" + (f" --run {run_id}" if run_id else "")
-                                    ),
+                if prior_deliv and not pending_ack and not extra_flags:
+                    if "--allow-unacked" in (args or []):
+                        print(
+                            f"⚠️ [ORCA ACK WARNING] Batch trước có deliveryId='{prior_deliv}' chưa ack (đang dùng --allow-unacked).",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            json.dumps(
+                                {
+                                    "ok": False,
+                                    "error": {
+                                        "code": "ack_required",
+                                        "message": (
+                                            f"[ORCA ACK-REQUIRED GUARD] Batch trước đã trả về deliveryId='{prior_deliv}' nhưng bạn gọi "
+                                            f"'orca-team wait-events' thiếu cờ '--ack {prior_deliv}'! "
+                                            f"Hãy chạy lại: orca-team wait-events --ack {prior_deliv}" + (f" --run {run_id}" if run_id else "")
+                                        ),
+                                    },
                                 },
-                            },
-                            ensure_ascii=False,
-                        ),
-                        file=sys.stderr,
-                    )
-                    sys.exit(2)
+                                ensure_ascii=False,
+                            ),
+                            file=sys.stderr,
+                        )
+                        sys.exit(2)
         except SystemExit:
             raise
         except Exception:
