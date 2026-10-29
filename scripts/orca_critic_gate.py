@@ -472,10 +472,14 @@ def validate_independence(
     plan_text: str,
     hypothesis: dict[str, Any] | None = None,
     risk: dict[str, Any] | None = None,
+    hypothesis_md_text: str | None = None,
+    first_challenge_at: str | None = None,
 ) -> list[str]:
     """
-    Verify that Critic investigated independent sources outside the plan text
-    and recorded a pre-plan hypothesis (for risk >= medium).
+    C-FIX-23: Verify that Critic investigated independent sources outside the plan text
+    and recorded a pre-plan hypothesis (for risk >= medium) whose SHA-256 matches
+    `hypothesis.md`, whose `planHash` matches the plan, and whose `createdAt` is valid
+    and precedes the first challenge message.
     """
     if not isinstance(review, dict):
         return ["[ORCA CRITIC INDEPENDENCE GUARD] Review không hợp lệ."]
@@ -486,9 +490,11 @@ def validate_independence(
 
     items = extract_items(plan_text)
     contracts = contract_lines(plan_text)
+    computed_risk = compute_risk(items, contracts)
     if risk is None:
-        risk = compute_risk(items, contracts)
-    risk_level = str((risk or {}).get("level") or "high").lower()
+        risk = computed_risk
+    risk_level = str((risk or {}).get("level") or computed_risk.get("level") or "high").lower()
+    expected_plan_hash = plan_hash(plan_text)
 
     violations: list[str] = []
 
@@ -498,12 +504,52 @@ def validate_independence(
                 f"[ORCA CRITIC INDEPENDENCE GUARD] Thiếu hypothesis.json độc lập cho plan risk={risk_level}."
             )
         else:
+            if str(hypothesis.get("schema") or "").strip() != HYPOTHESIS_SCHEMA:
+                violations.append(
+                    f"[ORCA CRITIC INDEPENDENCE GUARD] hypothesis.json sai schema ('{hypothesis.get('schema')}')."
+                )
+            hyp_plan_hash = str(hypothesis.get("planHash") or "").strip()
+            if hyp_plan_hash != expected_plan_hash:
+                violations.append(
+                    f"[ORCA CRITIC INDEPENDENCE GUARD] hypothesis.json có planHash ('{hyp_plan_hash}') không khớp với planHash thực tế ('{expected_plan_hash}')."
+                )
+            hyp_refs = hypothesis.get("refs")
+            valid_hyp_refs = [str(r).strip() for r in (hyp_refs or []) if _is_valid_path_line(str(r).strip())] if isinstance(hyp_refs, list) else []
+            if not valid_hyp_refs:
+                violations.append(
+                    "[ORCA CRITIC INDEPENDENCE GUARD] hypothesis.json thiếu danh sách refs (path:line) hợp lệ."
+                )
+            created_at = str(hypothesis.get("createdAt") or "").strip()
+            m_yr = re.match(r"^(\d{4})-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", created_at)
+            if not m_yr or int(m_yr.group(1)) < 2024:
+                violations.append(
+                    f"[ORCA CRITIC INDEPENDENCE GUARD] hypothesis.json có createdAt không hợp lệ hoặc giả mạo ('{created_at}')."
+                )
+            elif first_challenge_at and str(first_challenge_at).strip():
+                if created_at > str(first_challenge_at).strip():
+                    violations.append(
+                        f"[ORCA CRITIC INDEPENDENCE GUARD] hypothesis.json được tạo SAU challenge đầu tiên ({created_at} > {first_challenge_at})."
+                    )
             h_hash = str(hypothesis.get("hash") or "").strip()
             rev_h_hash = str(review.get("hypothesisHash") or "").strip()
+            if not h_hash or not re.fullmatch(r"sha256:[0-9a-f]{64}", h_hash):
+                violations.append(
+                    f"[ORCA CRITIC INDEPENDENCE GUARD] hypothesis.json thiếu trường hash sha256 hợp lệ ('{h_hash}')."
+                )
+            if not rev_h_hash or not re.fullmatch(r"sha256:[0-9a-f]{64}", rev_h_hash):
+                violations.append(
+                    f"[ORCA CRITIC INDEPENDENCE GUARD] Review thiếu trường hypothesisHash sha256 hợp lệ ('{rev_h_hash}')."
+                )
             if h_hash and rev_h_hash and h_hash != rev_h_hash:
                 violations.append(
                     f"[ORCA CRITIC INDEPENDENCE GUARD] hypothesisHash trong review ('{rev_h_hash}') không khớp hypothesis.json ('{h_hash}')."
                 )
+            if hypothesis_md_text is not None:
+                actual_md_hash = "sha256:" + hashlib.sha256(hypothesis_md_text.encode("utf-8")).hexdigest()
+                if h_hash != actual_md_hash or rev_h_hash != actual_md_hash:
+                    violations.append(
+                        f"[ORCA CRITIC INDEPENDENCE GUARD] Mã băm thực tế của hypothesis.md ('{actual_md_hash}') không khớp với hypothesis.json ('{h_hash}') hoặc review ('{rev_h_hash}')."
+                    )
 
     indep_sources = review.get("independentSources")
     if not isinstance(indep_sources, list):
@@ -539,7 +585,7 @@ def validate_consensus_file(
     plan_text: str,
 ) -> list[str]:
     """
-    Validate consensus.json against contracts.json and current plan text.
+    Validate consensus.json against contracts.json and current plan text (including C-FIX-20 risk binding).
     """
     if not isinstance(consensus, dict):
         return ["[ORCA CONSENSUS PROVENANCE GUARD] consensus.json không hợp lệ hoặc bị hỏng."]
@@ -557,6 +603,22 @@ def validate_consensus_file(
         violations.append(
             f"[ORCA PLAN BINDING GUARD] Plan đã đổi sau khi duyệt: duyệt {contracts_hash}, hiện {h_now}. Chạy lại critic."
         )
+
+    # C-FIX-20: Always recompute risk from plan_text and reject any downgrade/mismatch in contracts.json or consensus.json
+    computed_risk = compute_risk(extract_items(plan_text), contract_lines(plan_text))
+    actual_level = str(computed_risk.get("level") or "high").lower()
+    if isinstance(contracts, dict) and isinstance(contracts.get("riskLevel"), dict):
+        c_level = str(contracts["riskLevel"].get("level") or "").strip().lower()
+        if c_level and c_level != actual_level:
+            violations.append(
+                f"[ORCA RISK BINDING GUARD] riskLevel trong contracts.json ('{c_level}') đã bị sửa lệch với risk tính từ plan ('{actual_level}')!"
+            )
+    if isinstance(consensus.get("risk"), dict):
+        cons_level = str(consensus["risk"].get("level") or "").strip().lower()
+        if cons_level and cons_level != actual_level:
+            violations.append(
+                f"[ORCA RISK BINDING GUARD] risk trong consensus.json ('{cons_level}') lệch với risk tính từ plan ('{actual_level}')!"
+            )
 
     verdict = str(consensus.get("verdict") or "").strip()
     if verdict == "DEADLOCK":

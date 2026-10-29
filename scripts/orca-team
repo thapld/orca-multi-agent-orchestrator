@@ -2132,14 +2132,15 @@ ROLE_PHASE_CARDS = {
 2. Kiểm quota theo `riskLevel`: `high` cần >=3 objections (>=1 blocker) + >=2 `independentSources` ngoài plan; `medium` cần >=1 objection + >=1 source.
 3. Gửi `orca orchestration ask --from critic-worker --question "CRITIC_CHALLENGE vòng 1/3: ..."` và chờ Leader `reply` (>=60 ký tự).""",
     ("critic", "3"): """[CARD critic · BƯỚC 3 — REVIEW JSON & CHỐT CONSENSUS]
-1. Ghi `.orca/runs/$RUN/critic/review-<planHash>.json` (schema `orca.critic.review/v1`): phủ 100% [P1..Pn] (`checked=true` + `path:line`).
-2. Mỗi objection phải có resolution kèm `leaderReplyId` thật trong `messages`. Còn blocker `unresolved` → `verdict=DEADLOCK`.
-3. Gửi handoff kèm `plan_hash=<H> answer_message_id=<ID>` và khối ```json <review> ``` để Leader chạy `orca-team plan consensus --run $RUN`.""",
+1. Đính kèm khối ```json <review> ``` (schema `orca.critic.review/v1`) trực tiếp trong body của handoff: phủ 100% [P1..Pn] (`checked=true` + `path:line`).
+2. Mỗi objection phải có resolution kèm `leaderReplyId` thật trong `question_threads`. Còn blocker `unresolved` → `verdict=DEADLOCK`.
+3. Gửi handoff kèm `plan_hash=<H> answer_message_id=<ID>` để Leader chạy `orca-team plan consensus --run $RUN`.
+4. Lưu ý mô hình đe dọa (C-FIX-26): Khi cùng UID không có external signer riêng, consensus chống chủ quan/thông đồng chứ không chống giả mạo DB trực tiếp cùng-UID.""",
     ("critic", "plan"): """[CARD critic · BƯỚC 1 — BLIND PACK & GIẢ THUYẾT ĐỘC LẬP]
 1. Chạy `orca-team critic brief --run $RUN` và `orca-team kb` (chỉ mở 1-2 chuyên đề liên quan).
 2. Tự khảo sát repo (`rg -n`, `view_file <= 160 dòng`) TRƯỚC khi đọc `plan-draft.md`.
-3. Ghi `.orca/runs/$RUN/critic/hypothesis.md` (>=5 giả thuyết rủi ro + `path:line` + falsifier) và `hypothesis.json` trước lần `ask` đầu tiên.
-4. Read-Only 100% với code app: chỉ được phép ghi file dưới `.orca/runs/$RUN/critic/`.""",
+3. Dùng `orca-team critic write --run $RUN --file hypothesis.md` (>=5 giả thuyết rủi ro + `path:line` + falsifier) và `hypothesis.json` trước lần `ask` đầu tiên.
+4. Read-Only 100% (allowlist): chỉ được ghi dưới `.orca/runs/$RUN/critic/`. Lưu ý (C-FIX-26): cùng UID không có external signer thì consensus chỉ chống chủ quan, không chống giả mạo DB cùng-UID.""",
     ("qa", "verify"): """[CARD qa · VERIFY — điều kiện để được gửi QA_VERDICT: PASS]
 Bắt buộc có, nếu thiếu bất kỳ mục nào thì gửi QA_REJECT/FAIL:
 1. Bảng đối chiếu [P1..Pn] X/X: mỗi mục ghi file:line thật từ `git diff main...HEAD`.
@@ -3352,6 +3353,59 @@ def cmd_critic_brief(args: list, caller_dir: Path | None = None):
         f"NEXT: Tự khảo sát repo và ghi .orca/runs/{eff_run}/critic/hypothesis.md + hypothesis.json TRƯỚC khi gọi ask!",
     ]
     print("\n".join(out))
+
+
+def cmd_critic_write(args: list, caller_dir: Path | None = None):
+    """C-FIX-25: CLI `orca-team critic write --run <RUN_ID> --file <filename> [--content <text>]` — Sanctioned write path into `.orca/runs/<run>/critic/`."""
+    work_dir = Path(caller_dir).resolve() if caller_dir else Path.cwd().resolve()
+    run_id = ""
+    file_name = ""
+    content_arg: str | None = None
+    idx = 0
+    while idx < len(args):
+        tok = str(args[idx])
+        if tok in ("-h", "--help", "help"):
+            print("Sử dụng: orca-team critic write --run <RUN_ID> --file <tên-file-trong-critic/> [--content <text>]")
+            return
+        elif tok in ("--run", "--run-id") and idx + 1 < len(args):
+            run_id = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--run=") or tok.startswith("--run-id="):
+            run_id = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--file", "-f") and idx + 1 < len(args):
+            file_name = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--file="):
+            file_name = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--content", "-c") and idx + 1 < len(args):
+            content_arg = str(args[idx + 1])
+            idx += 2
+        elif tok.startswith("--content="):
+            content_arg = tok.split("=", 1)[1]
+            idx += 1
+        else:
+            idx += 1
+
+    if not file_name or "/" in file_name.replace("\\", "/") or ".." in file_name:
+        print("❌ [ORCA CRITIC WRITE] Chỉ cho phép ghi tên file đơn trực tiếp bên trong '.orca/runs/<run>/critic/' (cấm '..' hoặc đường dẫn con).", file=sys.stderr)
+        sys.exit(2)
+
+    info = resolve_run_upstream_branches(work_dir, run_id=run_id)
+    eff_run = info.get("runId") or run_id or "default"
+    main_root = Path(info.get("mainRoot") or work_dir)
+    critic_dir = (main_root / ".orca" / "runs" / eff_run / "critic").resolve()
+    critic_dir.mkdir(parents=True, exist_ok=True)
+    target_path = (critic_dir / file_name).resolve()
+    if target_path.parent != critic_dir:
+        print("❌ [ORCA CRITIC WRITE] Đường dẫn đích vượt ra ngoài thư mục critic!", file=sys.stderr)
+        sys.exit(2)
+
+    data = content_arg if content_arg is not None else sys.stdin.read()
+    target_path.write_text(data, encoding="utf-8")
+    _sync_orca_runs_into_child_worktrees(main_root)
+    print(f"✅ [CRITIC WRITE] Đã ghi {len(data)} bytes vào {target_path}")
 
 
 def cmd_wait_events(args: list, caller_dir: Path | None = None):
@@ -5501,6 +5555,28 @@ def cmd_plan(args: list, caller_dir: Path = None):
             return
 
         # sub == "pin"
+        for existing_cp in (run_dir / "plan-draft.contracts.json", run_dir / "contracts.json"):
+            if existing_cp.is_file():
+                try:
+                    ec_obj = json.loads(existing_cp.read_text(encoding="utf-8", errors="ignore"))
+                except Exception:
+                    ec_obj = {}
+                if isinstance(ec_obj, dict):
+                    ec_hash = str(ec_obj.get("planHash") or "").strip()
+                    if ec_hash and ec_hash != computed_hash and not from_scratch:
+                        print(
+                            f"❌ [ORCA PLAN BINDING GUARD] Plan đã đổi sau khi duyệt: duyệt {ec_hash}, hiện {computed_hash}. Chạy lại critic (hoặc dùng --from-scratch để xoá consensus cũ).",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                    if isinstance(ec_obj.get("riskLevel"), dict) and not from_scratch:
+                        ec_lvl = str(ec_obj["riskLevel"].get("level") or "").strip().lower()
+                        if ec_lvl and ec_lvl != computed_risk["level"]:
+                            print(
+                                f"❌ [ORCA RISK BINDING GUARD] riskLevel trong '{existing_cp.name}' ('{ec_lvl}') đã bị sửa lệch với risk tính từ plan ('{computed_risk['level']}')!",
+                                file=sys.stderr,
+                            )
+                            sys.exit(2)
         draft_contracts_file = run_dir / "plan-draft.contracts.json"
         if draft_contracts_file.is_file():
             try:
@@ -5567,15 +5643,19 @@ def cmd_plan(args: list, caller_dir: Path = None):
         return
 
     if sub == "consensus":
-        # C-FIX-03: Projection of Critic Consensus from SQLite messages log
+        # C-FIX-03 & C-FIX-20..C-FIX-24: Projection of Critic Consensus from SQLite messages + question_threads
         import sqlite3
 
         contracts_obj: dict = {}
+        loaded_contracts_files: list[tuple[str, dict]] = []
         for cp in (run_dir / "contracts.json", run_dir / "plan-draft.contracts.json"):
             if cp.is_file():
                 try:
-                    contracts_obj = json.loads(cp.read_text(encoding="utf-8", errors="ignore"))
-                    break
+                    c_loaded = json.loads(cp.read_text(encoding="utf-8", errors="ignore"))
+                    if isinstance(c_loaded, dict):
+                        loaded_contracts_files.append((cp.name, c_loaded))
+                        if not contracts_obj:
+                            contracts_obj = c_loaded
                 except Exception:
                     continue
 
@@ -5606,6 +5686,24 @@ def cmd_plan(args: list, caller_dir: Path = None):
             )
             sys.exit(2)
 
+        # C-FIX-20: Always compute risk directly from plan_txt and block if any contracts file downgraded/modified riskLevel
+        items_ext = cg.extract_items(plan_txt)
+        contracts_ext = cg.contract_lines(plan_txt)
+        computed_risk = cg.compute_risk(items_ext, contracts_ext)
+        actual_risk_level = str(computed_risk.get("level") or "high").lower()
+        for c_name, c_dict in loaded_contracts_files:
+            rl_obj = c_dict.get("riskLevel")
+            if isinstance(rl_obj, dict):
+                file_lvl = str(rl_obj.get("level") or "").strip().lower()
+                if file_lvl and file_lvl != actual_risk_level:
+                    msg_err = (
+                        f"[ORCA RISK BINDING GUARD] riskLevel trong '{c_name}' ('{file_lvl}') "
+                        f"lệch với risk thực tế tính từ plan ('{actual_risk_level}')!"
+                    )
+                    _append_critic_audit({"ok": False, "error": "risk_level_mismatch", "file": c_name, "fileLevel": file_lvl, "computedLevel": actual_risk_level})
+                    print(json.dumps({"ok": False, "error": "risk_level_mismatch", "message": msg_err}, ensure_ascii=False))
+                    sys.exit(2)
+
         db_path = _find_orca_orchestration_db()
         if not db_path or not db_path.is_file():
             _append_critic_audit({"ok": False, "error": "missing_db", "planHash": expected_h})
@@ -5618,63 +5716,76 @@ def cmd_plan(args: list, caller_dir: Path = None):
             dc_rows = conn.execute(
                 "SELECT dc.id AS did, dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id, t.spec "
                 "FROM dispatch_contexts dc "
-                "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                "INNER JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
                 "LEFT JOIN tasks t ON t.id = dc.task_id "
                 "WHERE dc.run_id = ? ORDER BY dc.created_at DESC",
                 (resolved_run,),
             ).fetchall()
+            # C-FIX-21: Never hardcode 'critic-worker'; bind strictly to worker_dispatches.agent_terminal_handle
+            # whose worktree_id contains 'critic' for this run.
             critic_dids: list[str] = []
-            critic_handles: set[str] = {"critic-worker"}
+            critic_handles: set[str] = set()
             for r in dc_rows:
                 wt_id = str(r["worktree_id"] or "")
-                a_h = str(r["assignee_handle"] or "")
-                t_h = str(r["agent_terminal_handle"] or "")
-                sp = str(r["spec"] or "")
-                if (
-                    "critic-worker" in wt_id
-                    or "critic" in a_h
-                    or "critic" in t_h
-                    or "[ROLE: PRINCIPAL RESEARCH, ADVERSARIAL CRITIC" in sp
-                ):
+                t_h = str(r["agent_terminal_handle"] or "").strip()
+                if "critic" in wt_id.lower() and t_h:
                     critic_dids.append(str(r["did"]))
-                    if a_h:
-                        critic_handles.add(a_h)
-                    if t_h:
-                        critic_handles.add(t_h)
-                    critic_handles.add(f"dispatch:{r['did']}")
+                    critic_handles.add(t_h)
 
             msgs = conn.execute(
                 "SELECT rowid AS r_idx, * FROM messages WHERE run_id = ? ORDER BY created_at ASC, rowid ASC",
                 (resolved_run,),
             ).fetchall()
-            qt_rows = []
-            try:
-                qt_rows = conn.execute(
-                    "SELECT * FROM question_threads WHERE run_id = ? ORDER BY created_at ASC",
-                    (resolved_run,),
-                ).fetchall()
-            except Exception:
-                qt_rows = []
+            qt_rows = conn.execute(
+                "SELECT * FROM question_threads WHERE run_id = ? ORDER BY created_at ASC",
+                (resolved_run,),
+            ).fetchall()
             conn.close()
         except Exception as exc:
             _append_critic_audit({"ok": False, "error": f"db_error:{exc}", "planHash": expected_h})
             print(json.dumps({"ok": False, "error": f"db_error:{exc}"}, ensure_ascii=False))
             sys.exit(3)
 
-        if not critic_dids:
+        if not critic_dids or not critic_handles:
             _append_critic_audit({"ok": False, "error": "no_critic_dispatch", "planHash": expected_h})
             print(json.dumps({"ok": False, "error": "no_critic_dispatch"}, ensure_ascii=False))
             sys.exit(3)
 
+        # C-FIX-21 & C-FIX-24: Bind challenges and replies to verified question_threads of the critic dispatch
+        qt_by_challenge: dict[str, dict] = {}
+        for q in qt_rows:
+            q_did = str(q["dispatch_id"] or "").strip()
+            q_asker = str(q["asker_handle"] or "").strip()
+            q_status = str(q["status"] or "").strip().lower()
+            q_mid = str(q["message_id"] or "").strip()
+            q_ans = str(q["answer_message_id"] or "").strip()
+            if (
+                q_did in critic_dids
+                and q_asker in critic_handles
+                and q_status in ("answered", "resolved", "closed")
+                and q_mid
+                and q_ans
+            ):
+                qt_by_challenge[q_mid] = dict(q)
+
         challenges = [
             m for m in msgs
-            if str(m["type"] or "").lower() == "question" and "CRITIC_CHALLENGE" in str(m["body"] or "")
+            if str(m["id"] or "") in qt_by_challenge
+            and str(m["from_handle"] or "") in critic_handles
+            and str(m["type"] or "").lower() == "question"
+            and "CRITIC_CHALLENGE" in str(m["body"] or "")
         ]
+        expected_answer_to_challenge = {
+            str(qt_by_challenge[str(c["id"])]["answer_message_id"]): str(c["id"])
+            for c in challenges
+        }
         replies = [
             m for m in msgs
-            if str(m["type"] or "").lower() in ("reply", "answer")
-            or "reply" in str(m["subject"] or "").lower()
-            or str(m["subject"] or "").lower().startswith("re:")
+            if str(m["id"] or "") in expected_answer_to_challenge
+            and str(m["from_handle"] or "").lower() in ("leader", "coordinator", "orca")
+            and str(m["to_handle"] or "") in critic_handles
+            and str(m["thread_id"] or "") == expected_answer_to_challenge[str(m["id"] or "")]
+            and len(str(m["body"] or "").strip()) >= 60
         ]
         finals = [
             m for m in msgs
@@ -5687,7 +5798,7 @@ def cmd_plan(args: list, caller_dir: Path = None):
             _append_critic_audit(
                 {
                     "ok": False,
-                    "error": "incomplete_message_chain",
+                    "error": "incomplete_or_unverified_message_chain",
                     "planHash": expected_h,
                     "challenges": len(challenges),
                     "replies": len(replies),
@@ -5698,7 +5809,7 @@ def cmd_plan(args: list, caller_dir: Path = None):
                 json.dumps(
                     {
                         "ok": False,
-                        "error": "incomplete_message_chain",
+                        "error": "incomplete_or_unverified_message_chain",
                         "challenges": len(challenges),
                         "replies": len(replies),
                         "finals": len(finals),
@@ -5713,15 +5824,19 @@ def cmd_plan(args: list, caller_dir: Path = None):
         final_body = str(final_m["body"] or "")
 
         for ch in challenges:
+            ch_id = str(ch["id"] or "")
             ch_ts = str(ch["created_at"] or "")
             if ch_ts > final_ts:
                 _append_critic_audit({"ok": False, "error": "challenge_after_final", "planHash": expected_h})
                 print(json.dumps({"ok": False, "error": "challenge_after_final"}, ensure_ascii=False))
                 sys.exit(3)
-            has_rep = any(ch_ts <= str(rp["created_at"] or "") <= final_ts for rp in replies)
+            has_rep = any(
+                str(rp["thread_id"] or "") == ch_id and ch_ts <= str(rp["created_at"] or "") <= final_ts
+                for rp in replies
+            )
             if not has_rep:
-                _append_critic_audit({"ok": False, "error": f"unanswered_challenge:{ch['id']}", "planHash": expected_h})
-                print(json.dumps({"ok": False, "error": f"unanswered_challenge:{ch['id']}"}, ensure_ascii=False))
+                _append_critic_audit({"ok": False, "error": f"unanswered_challenge:{ch_id}", "planHash": expected_h})
+                print(json.dumps({"ok": False, "error": f"unanswered_challenge:{ch_id}"}, ensure_ascii=False))
                 sys.exit(3)
 
         if expected_h not in final_body:
@@ -5729,33 +5844,26 @@ def cmd_plan(args: list, caller_dir: Path = None):
             print(json.dumps({"ok": False, "error": "missing_plan_hash_in_final"}, ensure_ascii=False))
             sys.exit(3)
 
-        last_reply_id = str(replies[-1]["id"])
-        qt_ans_ids = {str(q["answer_message_id"]) for q in qt_rows if q["answer_message_id"]} | {str(q["message_id"]) for q in qt_rows if str(q["status"] or "") == "answered"}
-        valid_reply_ids = {str(r["id"]) for r in replies} | qt_ans_ids
+        valid_reply_ids = {str(r["id"]) for r in replies}
         if not any(rid in final_body for rid in valid_reply_ids):
             _append_critic_audit({"ok": False, "error": "missing_answer_message_id_in_final", "planHash": expected_h})
             print(json.dumps({"ok": False, "error": "missing_answer_message_id_in_final", "expectedOneOf": sorted(valid_reply_ids)}, ensure_ascii=False))
             sys.exit(3)
 
-        # Parse review JSON from final_body fenced block or file
-        review_obj = None
-        fenced_matches = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", final_body, re.IGNORECASE)
-        if fenced_matches:
-            try:
-                review_obj = json.loads(fenced_matches[-1])
-            except Exception:
-                review_obj = None
-        h_hex = expected_h.split(":", 1)[-1]
-        rev_file = run_dir / "critic" / f"review-{h_hex}.json"
-        if review_obj is None and rev_file.is_file():
-            try:
-                review_obj = json.loads(rev_file.read_text(encoding="utf-8", errors="ignore"))
-            except Exception:
-                review_obj = None
-
+        # C-FIX-22: Parse review JSON EXCLUSIVELY from final_body fenced block (NEVER fallback to file on disk!)
+        review_obj = cg.extract_review_json_from_body(final_body)
         if not isinstance(review_obj, dict):
-            _append_critic_audit({"ok": False, "error": "missing_or_invalid_review_json", "planHash": expected_h})
-            print(json.dumps({"ok": False, "error": "missing_or_invalid_review_json"}, ensure_ascii=False))
+            _append_critic_audit({"ok": False, "error": "missing_or_invalid_review_json_in_body", "planHash": expected_h})
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "missing_or_invalid_review_json_in_body",
+                        "message": "[ORCA CONSENSUS PROVENANCE GUARD] Bản tin handoff cuối của Critic không chứa khối ```json ... ``` review hợp lệ (cấm fallback đọc từ file rời)!",
+                    },
+                    ensure_ascii=False,
+                )
+            )
             sys.exit(3)
 
         hyp_obj = None
@@ -5766,17 +5874,28 @@ def cmd_plan(args: list, caller_dir: Path = None):
             except Exception:
                 hyp_obj = None
 
-        items_ext = cg.extract_items(plan_txt)
-        contracts_ext = cg.contract_lines(plan_txt)
-        risk_obj = contracts_obj.get("riskLevel") or cg.compute_risk(items_ext, contracts_ext)
+        hyp_md_file = run_dir / "critic" / "hypothesis.md"
+        hyp_md_txt = hyp_md_file.read_text(encoding="utf-8", errors="ignore") if hyp_md_file.is_file() else ""
+        first_challenge_at = min(str(c["created_at"] or "") for c in challenges)
 
-        viols = cg.validate_review(review_obj, plan_txt, risk_obj, valid_reply_ids=valid_reply_ids)
-        viols.extend(cg.validate_independence(review_obj, plan_txt, hyp_obj, risk_obj))
+        viols = cg.validate_review(review_obj, plan_txt, computed_risk, valid_reply_ids=valid_reply_ids)
+        viols.extend(
+            cg.validate_independence(
+                review_obj,
+                plan_txt,
+                hyp_obj,
+                computed_risk,
+                hypothesis_md_text=hyp_md_txt,
+                first_challenge_at=first_challenge_at,
+            )
+        )
         if viols:
             _append_critic_audit({"ok": False, "error": "review_validation_failed", "planHash": expected_h, "violations": viols})
             print(json.dumps({"ok": False, "error": "review_validation_failed", "violations": viols}, ensure_ascii=False, indent=2))
             sys.exit(3)
 
+        h_hex = expected_h.split(":", 1)[-1]
+        rev_file = run_dir / "critic" / f"review-{h_hex}.json"
         (run_dir / "critic").mkdir(parents=True, exist_ok=True)
         rev_file.write_text(json.dumps(review_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -5790,6 +5909,7 @@ def cmd_plan(args: list, caller_dir: Path = None):
             "schema": cg.CONSENSUS_SCHEMA,
             "runId": resolved_run,
             "planHash": expected_h,
+            "risk": computed_risk,
             "verdict": verdict_val,
             "criticDispatchId": critic_dids[0],
             "messageIds": msg_ids_obj,
@@ -12139,6 +12259,10 @@ def main():
         if cmd0 == "critic" and len(args) > 1 and args[1].lower() in ("brief", "blind-pack", "pack"):
             caller_dir = explicit_root if explicit_root is not None else Path.cwd().resolve()
             cmd_critic_brief(args[2:], caller_dir=caller_dir)
+            return
+        if cmd0 == "critic" and len(args) > 1 and args[1].lower() == "write":
+            caller_dir = explicit_root if explicit_root is not None else Path.cwd().resolve()
+            cmd_critic_write(args[2:], caller_dir=caller_dir)
             return
         if cmd0 in ("critic-brief", "blind-pack"):
             caller_dir = explicit_root if explicit_root is not None else Path.cwd().resolve()
