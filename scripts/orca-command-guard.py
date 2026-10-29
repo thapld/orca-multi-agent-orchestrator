@@ -3070,6 +3070,33 @@ def _check_critic_bash_readonly_guard(cmd: str, no_heredoc: str, cwd_slot: str) 
     return ""
 
 
+TRUSTED_OFFICIAL_FILENAMES = {
+    "orca-team",
+    "orca-command-guard.py",
+    "orca_critic_gate.py",
+    "orca-dispatch",
+    "orca-project-init",
+    "orca-hotfix",
+    "orca-review",
+    "orca_sim.py",
+    "run-tests.sh",
+    "test_guard_bypass.py",
+    "test_guard_adversarial.py",
+    "test_critic_gate_unit.py",
+    "test_critic_gate.py",
+    "test_guard_adversarial_v2.py",
+    "test_critic_gate_adversarial.py",
+    "test_guard_e2e_adversarial.py",
+    "test_guard_policy_anchor_adversarial.py",
+    "test_critic_identity_adversarial.py",
+    "test_guard_root_hijack_adversarial.py",
+    "test_state_recovery.py",
+    "probe_db_guard_995711b.py",
+    "probe_db_guard_edfe31b.py",
+    "probe_db_guard_34837ac.py",
+}
+
+
 def _is_official_orca_trusted_path(cand_p: str) -> bool:
     try:
         norm = os.path.realpath(cand_p)
@@ -3078,6 +3105,9 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
             return False
         st = os.stat(norm)
         if st.st_uid != os.getuid():
+            return False
+        base = os.path.basename(norm)
+        if base not in TRUSTED_OFFICIAL_FILENAMES:
             return False
         trusted_dirs = (
             os.path.realpath(os.path.expanduser("~/.orca/orca-multi-agent-orchestrator")) + os.sep,
@@ -3094,7 +3124,7 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
 
 def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> str:
     """
-    C-FIX-35..C-FIX-38: Best-effort Bash-hook defense blocking direct SQLite CLI / script mutations
+    C-FIX-35..C-FIX-39: Best-effort Bash-hook defense blocking direct SQLite CLI / script mutations
     against orchestration databases (`orchestration.db`, `messages`, `question_threads`, `orca_policy_anchors`).
     Note: Same-UID lexical/hook filtering is best-effort and cannot replace an out-of-process / separate-UID DB daemon.
     """
@@ -3103,21 +3133,33 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         r"\b(?:orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages)\b",
         re.IGNORECASE,
     )
-    # C-FIX-38: Detect base64 encoded strings in cmd decoding to sqlite3 or DB tables
+    # C-FIX-38..C-FIX-39: Detect base64 encoded strings in cmd decoding to sqlite3 or DB tables
     import base64
     for m_b64 in re.finditer(r"(?:^|[^A-Za-z0-9+/])([A-Za-z0-9+/]{4,}={0,2})(?=[^A-Za-z0-9+/]|$)", cmd):
         b64_cand = m_b64.group(1)
         pad_cand = b64_cand + "=" * (-len(b64_cand) % 4)
         try:
             dec_b = base64.b64decode(pad_cand)
-            if re.search(rb"sqlite3|orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages", dec_b, re.IGNORECASE):
+            if re.search(rb"sqlite3?|orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages", dec_b, re.IGNORECASE):
                 return (
                     "[ORCA DB-INTEGRITY GUARD] CẤM giải mã base64 chứa chuỗi sqlite3/cơ sở dữ liệu điều phối trong lệnh Bash!"
                 )
         except Exception:
             pass
 
-    if re.search(r"\bsqlite3\b|\b\.read\s+['\"]?[/\w.\-~]+", no_heredoc, re.IGNORECASE):
+    # C-FIX-39: Detect hex encoded tokens in cmd decoding to orchestration DB or critical tables
+    for m_hex in re.finditer(r"\b([0-9a-fA-F]{16,})\b", cmd):
+        hex_cand = m_hex.group(1)
+        if len(hex_cand) % 2 == 0:
+            try:
+                dec_hex = bytes.fromhex(hex_cand).decode(errors="ignore")
+                if re.search(r"sqlite3?|orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages|CRITIC_CHALLENGE|CRITIC_VERDICT", dec_hex, re.IGNORECASE):
+                    return "[ORCA DB-INTEGRITY GUARD] CẤM truyền chuỗi hex mã hóa đường dẫn cơ sở dữ liệu điều phối trong lệnh Bash!"
+            except Exception:
+                pass
+
+    no_quotes = re.sub(r"['\"]", "", no_heredoc)
+    if re.search(r"\bsqlite3?\b|\b\.read\s+[\w.\-~/]+", no_quotes, re.IGNORECASE):
         return (
             "[ORCA DB-INTEGRITY GUARD] CẤM gọi trực tiếp sqlite3 CLI, lệnh '.read' hoặc thư viện sqlite3 qua Bash "
             "(kể cả '.read', DML hoặc truy vấn trực tiếp)! Mọi thao tác với cơ sở dữ liệu điều phối phải đi qua CLI chính thức của Orca."
@@ -3138,6 +3180,11 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             "[ORCA DB-INTEGRITY GUARD] CẤM truyền trực tiếp đường dẫn orchestration.db / ORCA_ORCHESTRATION_DB "
             "vào trình thông dịch script ngoài CLI chính thức của Orca!"
         )
+    # C-FIX-39: Scan inline python -c commands for dynamic imports / DB DML
+    if re.search(r"\bpython3?\s+-c\b", no_heredoc):
+        if re.search(r"__import__\s*\(\s*['\"][^'\"]*sql|getattr\s*\([^)]*['\"]con|executemany|['\"]m['\"]\s*\+\s*['\"]essages['\"]|['\"]question_['\"]\s*\+\s*['\"]thr", no_heredoc):
+            return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
+
     if re.search(r"\b(?:python3?|node|ruby|perl|php|sh|bash|zsh)\b", no_heredoc):
         for m_tok in re.finditer(r"['\"]?([/\w.\-~]+(?:\.[a-zA-Z0-9_]+)?)['\"]?", no_heredoc):
             tok_s = m_tok.group(1)
@@ -3162,13 +3209,28 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
                                 break
                         except Exception:
                             pass
+
+                    # C-FIX-39: Detect hex-encoded payloads in files
+                    has_hex_db = False
+                    hex_clean = re.sub(r"\s+", "", scr_txt)
+                    if len(hex_clean) >= 32 and re.fullmatch(r"[0-9a-fA-F]+", hex_clean) and len(hex_clean) % 2 == 0:
+                        try:
+                            h_dec = bytes.fromhex(hex_clean).decode(errors="ignore")
+                            if re.search(r"sqlite3?|orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages|CRITIC_CHALLENGE|CRITIC_VERDICT", h_dec, re.IGNORECASE):
+                                has_hex_db = True
+                        except Exception:
+                            pass
+
                     if (
                         has_b64_db
+                        or has_hex_db
                         or re.search(r"sqlite3", scr_txt, re.IGNORECASE)
                         or orch_tbl_re.search(scr_txt)
                         or re.search(r"\b(?:CRITIC_CHALLENGE|CRITIC_VERDICT)\b", scr_txt)
-                        or re.search(r"__import__\s*\(\s*['\"]sql['\"]\s*\+\s*['\"]ite3['\"]", scr_txt)
-                        or re.search(r"['\"]mes['\"]\s*\+\s*['\"]sages['\"]|['\"]question_['\"]\s*\+\s*['\"]threads['\"]", scr_txt)
+                        or re.search(r"__import__\s*\(\s*['\"][^'\"]*sql[^'\"]*['\"]\s*\+\s*['\"][^'\"]*ite", scr_txt)
+                        or re.search(r"getattr\s*\([^)]*['\"]con['\"]\s*\+\s*['\"]nect['\"]", scr_txt)
+                        or re.search(r"['\"]m['\"]\s*\+\s*['\"]essages['\"]|['\"]question_['\"]\s*\+\s*['\"]thr", scr_txt)
+                        or (re.search(r"\b(?:execute|executemany)\b", scr_txt) and re.search(r"\bcommit\b", scr_txt) and re.search(r"fromhex|b64decode", scr_txt))
                         or (re.search(r"\bconnect\b", scr_txt) and re.search(r"\bexecute\b", scr_txt))
                         or (sql_dml_re.search(scr_txt) and re.search(r"\b(?:execute|executemany|executescript|connect)\b", scr_txt))
                     ):
@@ -5291,7 +5353,31 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 if p_clean.lower().endswith(".py"):
                     import ast
                     try:
-                        if ast.dump(ast.parse(old_src), include_attributes=False) == ast.dump(ast.parse(new_src), include_attributes=False):
+                        old_ast = ast.parse(old_src)
+                        new_ast = ast.parse(new_src)
+                        if ast.dump(old_ast, include_attributes=False) == ast.dump(new_ast, include_attributes=False):
+                            return False
+
+                        # C-FIX-39: Functional progression requires changes to logic, functions, classes, or control flow
+                        # Ignore top-level dummy variable/constant assignments (e.g. UNUSED = 123)
+                        def _filter_top_dummy_assigns(tree: ast.AST) -> list[ast.stmt]:
+                            filtered = []
+                            for stmt in getattr(tree, "body", []):
+                                if (
+                                    isinstance(stmt, ast.Assign)
+                                    and len(stmt.targets) == 1
+                                    and isinstance(stmt.targets[0], ast.Name)
+                                    and isinstance(stmt.value, (ast.Constant, ast.Str, ast.Num))
+                                ):
+                                    continue
+                                filtered.append(stmt)
+                            return filtered
+
+                        old_func = _filter_top_dummy_assigns(old_ast)
+                        new_func = _filter_top_dummy_assigns(new_ast)
+                        m_old = ast.Module(body=old_func, type_ignores=[])
+                        m_new = ast.Module(body=new_func, type_ignores=[])
+                        if ast.dump(m_old, include_attributes=False) == ast.dump(m_new, include_attributes=False):
                             return False
                     except Exception:
                         pass
