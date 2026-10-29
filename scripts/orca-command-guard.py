@@ -490,9 +490,9 @@ def _strip_single_quotes_and_quoted_heredocs(cmd: str) -> str:
 
 
 def _is_safe_orca_spec_inner(inner: str) -> bool:
-    """Verify the interior of $(orca-team spec|worktree-arg|merge-upstream|plan|kb ...) has no unescaped backticks, nested $(), or command chaining."""
+    """Verify the interior of $(orca-team spec|worktree-arg|merge-upstream|plan|kb|verify|gate|state|card|brief ...) has no unescaped backticks, nested $(), or command chaining."""
     if not re.match(
-        r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|worktree-arg|wt-arg|slot-arg|merge-upstream|merge-run|run-branches|release-workers|plan|pin-plan|master-plan|kb|knowledge|system-engineer)\b",
+        r"^\s*(?:\S*/)?orca-team(?:\s+(?:--path|-C)\s+\S+|\s+--path=\S+)*\s+(?:spec|role-spec|prompt|worktree-arg|wt-arg|slot-arg|merge-upstream|merge-run|run-branches|release-workers|plan|pin-plan|master-plan|kb|knowledge|system-engineer|verify|gate|state|card|brief)\b",
         inner,
     ):
         return False
@@ -3222,299 +3222,1045 @@ def _check_png_uniformity(path: str) -> tuple[float, int, int] | None:
         return None
 
 
-def _check_qa_and_ui_verification_guards(
-    cmd: str, sanitized_orch: str, payload: dict, args: dict
+def _get_guard_mode() -> str:
+    """Return active guard mode: 'enforce' (default), 'shadow', or 'off'."""
+    m = os.environ.get("ORCA_GUARD_MODE", "enforce").strip().lower()
+    if m in ("shadow", "off", "enforce"):
+        return m
+    return "enforce"
+
+
+def _log_guard_decision(decision: str, reason: str, cmd: str, slot: str = "") -> None:
+    """Append guard decision telemetry to ~/.orca/guard-log.jsonl (or ORCA_GUARD_LOG)."""
+    try:
+        log_p = (os.environ.get("ORCA_GUARD_LOG") or os.environ.get("ORCA_GUARD_LOG_FILE") or "").strip()
+        if not log_p:
+            log_p = os.path.join(os.path.expanduser("~"), ".orca", "guard-log.jsonl")
+        os.makedirs(os.path.dirname(log_p), exist_ok=True)
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "mode": _get_guard_mode(),
+            "slot": slot or "",
+            "decision": decision,
+            "reason": (reason or "")[:500],
+            "cmd": (cmd or "")[:400],
+        }
+        with open(log_p, "a", encoding="utf-8") as lf:
+            lf.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _detect_caller_slot_safe(payload: dict, args: dict, cmd: str = "") -> tuple[str, str, str]:
+    """
+    Slot-first detector (FIX-01): safely extract (raw_cwd_in, real_cwd, cwd_slot)
+    before any regex or project root check so fail-closed logic always knows the caller slot.
+    """
+    raw_cwd_in = ""
+    real_cwd = ""
+    cwd_slot = ""
+    try:
+        if isinstance(args, dict):
+            raw_cwd_in = str(args.get("Cwd") or args.get("cwd") or "").strip()
+        if not raw_cwd_in and isinstance(payload, dict):
+            raw_cwd_in = str(payload.get("cwd") or "").strip()
+        _, cwd = _resolve_orca_team_bin_and_cwd(payload if isinstance(payload, dict) else {}, args if isinstance(args, dict) else {})
+        real_cwd = os.path.realpath(cwd) if cwd else (os.path.realpath(raw_cwd_in) if raw_cwd_in else "")
+    except Exception:
+        real_cwd = raw_cwd_in
+    try:
+        env_slot = os.environ.get("ORCA_SLOT", "").strip()
+        cwd_slot = (
+            (_extract_canonical_worker_slot(env_slot) if env_slot else "")
+            or (_extract_canonical_worker_slot(os.path.basename(raw_cwd_in.rstrip("/"))) if raw_cwd_in else "")
+            or (_extract_canonical_worker_slot(os.path.basename(real_cwd.rstrip("/"))) if real_cwd else "")
+        )
+        if not cwd_slot and cmd:
+            no_hd = _strip_quoted_heredocs(cmd)
+            m_from = re.search(
+                r"(?:^|[;&|()\n])\s*(?:\S*/)?orca\s+orchestration\s+send\b[^\n;|&]*--from(?:\s+|=)['\"]?([a-z]+-worker(?:-\d+)?)\b",
+                no_hd,
+                re.IGNORECASE,
+            )
+            if m_from:
+                cwd_slot = _extract_canonical_worker_slot(m_from.group(1))
+    except Exception:
+        pass
+    return raw_cwd_in, real_cwd, cwd_slot
+
+
+def _expand_inline_cat_substitutions(cmd: str, real_cwd: str) -> tuple[str, list[str]]:
+    """
+    Expand `$(cat <file>)` or `` `cat <file>` `` inside `cmd` against `real_cwd` (FIX-01)
+    so indirect `--body "$(cat QA_REPORT.txt)"` cannot hide report contents from the guard.
+    Returns `(expanded_cmd, unresolved_files)`.
+    """
+    unresolved: list[str] = []
+    if not cmd or "cat " not in cmd:
+        return cmd, unresolved
+
+    def _repl(m: re.Match) -> str:
+        raw_arg = (m.group(1) or "").strip().strip("'\"")
+        if not raw_arg or raw_arg.startswith("$"):
+            unresolved.append(raw_arg or "$VAR")
+            return m.group(0)
+        cand_p = raw_arg if os.path.isabs(raw_arg) else os.path.join(real_cwd or os.getcwd(), raw_arg)
+        try:
+            if os.path.isfile(cand_p) and os.path.getsize(cand_p) <= 512 * 1024:
+                with open(cand_p, "r", encoding="utf-8", errors="ignore") as cf:
+                    return cf.read()
+            unresolved.append(raw_arg)
+        except Exception:
+            unresolved.append(raw_arg)
+        return m.group(0)
+
+    expanded = re.sub(r"\$\(\s*cat\s+([^)\n;|&]+)\)", _repl, cmd)
+    expanded = re.sub(r"`\s*cat\s+([^`\n;|&]+)`", _repl, expanded)
+    return expanded, unresolved
+
+
+def _inspect_test_report_file(fp: str, real_cwd: str) -> tuple[bool, str]:
+    """
+    Multi-format test report inspector (FIX-03):
+    Supports Jest/Vitest, Playwright, JUnit XML, pytest lastfailed/JSON, Go test JSONL, TAP, and internal JSON schema.
+    Never skips files > 5MB (uses streaming XML iterparse and chunked fallback for oversized JSON).
+    Returns `(has_positive_pass_evidence, failure_error_message)`.
+    """
+    rel_fp = os.path.relpath(fp, real_cwd) if real_cwd else os.path.basename(fp)
+    low = os.path.basename(fp).lower()
+
+    def _fmt_err(detail: str) -> str:
+        return (
+            f"[ORCA QA REPORT-VERDICT MISMATCH GUARD] File báo cáo '{rel_fp}' được tạo/cập nhật trong phiên này đang ghi nhận kết quả THẤT BẠI ({detail}), "
+            f"nhưng bạn lại đang gửi tin nhắn báo cáo PASS / succeeded! "
+            f"CẤM ngụy tạo kết quả 'QA_VERDICT: PASS' hoặc tự ý bỏ qua lỗi trong file report. "
+            f"Cách sửa bắt buộc: Nếu lỗi là bug thật của hệ thống, hãy đổi báo cáo sang 'QA_VERDICT: FAIL' (hoặc '--type escalation' / 'QA_REJECT'); "
+            f"nếu file '{rel_fp}' là kết quả nháp cũ trước khi fix, hãy chạy lại test qua 'orca-team verify' để cập nhật '{rel_fp}' đạt PASS 100% trước khi gửi!"
+        )
+
+    try:
+        fsize = os.path.getsize(fp)
+    except OSError:
+        return False, ""
+
+    # 1. JUnit XML (`.xml`) via streaming iterparse (no 5MB limit)
+    if low.endswith(".xml"):
+        try:
+            import xml.etree.ElementTree as ET
+
+            total_tests = 0
+            total_failures = 0
+            total_errors = 0
+            failed_cases: list[str] = []
+            saw_suite = False
+            for _ev, elem in ET.iterparse(fp, events=("end",)):
+                tag = elem.tag.split("}")[-1].lower()
+                if tag in ("testsuite", "testsuites"):
+                    saw_suite = True
+                    try:
+                        total_tests += int(elem.attrib.get("tests") or 0)
+                    except ValueError:
+                        pass
+                    try:
+                        total_failures += int(elem.attrib.get("failures") or 0)
+                    except ValueError:
+                        pass
+                    try:
+                        total_errors += int(elem.attrib.get("errors") or 0)
+                    except ValueError:
+                        pass
+                elif tag in ("failure", "error"):
+                    total_failures += 1
+                elif tag == "testcase":
+                    for child in list(elem):
+                        ctag = child.tag.split("}")[-1].lower()
+                        if ctag in ("failure", "error"):
+                            tc_name = elem.attrib.get("name") or elem.attrib.get("classname") or "testcase"
+                            if tc_name not in failed_cases:
+                                failed_cases.append(tc_name)
+                elem.clear()
+            if total_failures > 0 or total_errors > 0 or failed_cases:
+                return False, _fmt_err(f"JUnit XML failures={total_failures}, errors={total_errors}")
+            if saw_suite and total_tests > 0:
+                return True, ""
+        except Exception:
+            pass
+        return False, ""
+
+    # 2. TAP format (`.tap`)
+    if low.endswith(".tap"):
+        try:
+            ok_cnt = 0
+            not_ok_lines: list[str] = []
+            with open(fp, "r", encoding="utf-8", errors="ignore") as tf:
+                for raw_ln in tf:
+                    ln = raw_ln.strip()
+                    if re.match(r"^not\s+ok\b", ln, re.IGNORECASE) and not re.search(r"#\s*(?:TODO|SKIP)\b", ln, re.IGNORECASE):
+                        not_ok_lines.append(ln[:80])
+                    elif re.match(r"^ok\b", ln, re.IGNORECASE):
+                        ok_cnt += 1
+            if not_ok_lines:
+                return False, _fmt_err(f"TAP not ok ({len(not_ok_lines)} failed: {not_ok_lines[0]})")
+            if ok_cnt > 0:
+                return True, ""
+        except Exception:
+            pass
+        return False, ""
+
+    # 3. Pytest `.pytest_cache/v/cache/lastfailed`
+    if low == "lastfailed":
+        try:
+            with open(fp, "r", encoding="utf-8", errors="ignore") as lf:
+                lf_obj = json.load(lf)
+            if isinstance(lf_obj, dict) and any(bool(v) for v in lf_obj.values()):
+                keys = [str(k) for k, v in lf_obj.items() if v][:4]
+                return False, _fmt_err(f"pytest lastfailed={len(lf_obj)} ({', '.join(keys)})")
+        except Exception:
+            pass
+        return False, ""
+
+    # 4. JSON / JSONL reports (Jest, Vitest, Playwright, Pytest JSON, Go test -json, Internal schema)
+    if low.endswith(".json") or low.endswith(".jsonl"):
+        try:
+            if fsize > 25 * 1024 * 1024:
+                # Stream regex scan for oversized JSON (>25MB) so we never skip large reports
+                with open(fp, "r", encoding="utf-8", errors="ignore") as big_f:
+                    chunk = big_f.read(2 * 1024 * 1024)
+                if re.search(r'"(?:numFailedTests|numFailedTestSuites|numRuntimeErrorTestSuites|unexpected|failed)"\s*:\s*[1-9]\d*', chunk):
+                    return False, _fmt_err("oversized JSON report has failed/unexpected > 0")
+                if re.search(r'"success"\s*:\s*false\b', chunk) or re.search(r'"Action"\s*:\s*"fail"', chunk):
+                    return False, _fmt_err("oversized JSON report has success=false or Action=fail")
+                return False, ""
+
+            with open(fp, "r", encoding="utf-8", errors="ignore") as jf:
+                raw_txt = jf.read().strip()
+            if not raw_txt:
+                return False, ""
+
+            # Check Go test JSONL (`{"Action":"fail"}` per line)
+            if "\n" in raw_txt and raw_txt.startswith("{") and '"Action"' in raw_txt:
+                go_fails: list[str] = []
+                go_passes = 0
+                is_jsonl = True
+                for ln in raw_txt.splitlines():
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        row = json.loads(ln)
+                        if isinstance(row, dict) and "Action" in row:
+                            act = str(row.get("Action") or "").lower()
+                            if act == "fail":
+                                go_fails.append(str(row.get("Test") or row.get("Package") or "go_test"))
+                            elif act == "pass":
+                                go_passes += 1
+                        else:
+                            is_jsonl = False
+                            break
+                    except Exception:
+                        is_jsonl = False
+                        break
+                if is_jsonl:
+                    if go_fails:
+                        return False, _fmt_err(f"go test Action=fail ({', '.join(go_fails[:5])})")
+                    if go_passes > 0:
+                        return True, ""
+
+            j_obj = json.loads(raw_txt)
+            if not isinstance(j_obj, dict):
+                return False, ""
+
+            # 4a. Jest / Vitest format (`numFailedTests`, `numFailedTestSuites`, `numRuntimeErrorTestSuites`, `success: false`)
+            jest_failed = 0
+            for jk in ("numFailedTests", "numFailedTestSuites", "numRuntimeErrorTestSuites"):
+                jv = j_obj.get(jk)
+                if isinstance(jv, int) and not isinstance(jv, bool) and jv > 0:
+                    jest_failed += jv
+            if jest_failed > 0 or j_obj.get("success") is False:
+                return False, _fmt_err(
+                    f"Jest/Vitest numFailedTests={j_obj.get('numFailedTests', 0)}, "
+                    f"runtimeErrors={j_obj.get('numRuntimeErrorTestSuites', 0)}, success={j_obj.get('success')}"
+                )
+
+            # 4b. Playwright format (`stats.unexpected`, `stats.failed`)
+            stats_obj = j_obj.get("stats")
+            if isinstance(stats_obj, dict):
+                pw_unexp = stats_obj.get("unexpected", 0)
+                pw_fail = stats_obj.get("failed", 0)
+                if (isinstance(pw_unexp, int) and pw_unexp > 0) or (isinstance(pw_fail, int) and pw_fail > 0):
+                    return False, _fmt_err(f"Playwright stats.unexpected={pw_unexp}, stats.failed={pw_fail}")
+
+            # 4c. Internal / Pytest / Generic schema (`verdict`, `status`, `failed`, `summary.failed`, `checks/results/tests/items/suites`)
+            v_str = str(j_obj.get("verdict") or j_obj.get("status") or "").strip().upper()
+            failed_cnt = 0
+            raw_failed = j_obj.get("failed")
+            if isinstance(raw_failed, int) and not isinstance(raw_failed, bool):
+                failed_cnt = int(raw_failed)
+            elif isinstance(j_obj.get("summary"), dict):
+                for sk in ("failed", "errors", "error"):
+                    sum_f = j_obj["summary"].get(sk)
+                    if isinstance(sum_f, int) and not isinstance(sum_f, bool):
+                        failed_cnt += int(sum_f)
+
+            failed_ids: list[str] = []
+            for arr_k in ("checks", "results", "tests", "items", "suites", "testResults"):
+                arr_v = j_obj.get(arr_k)
+                if isinstance(arr_v, list):
+                    for item in arr_v:
+                        if isinstance(item, dict):
+                            st = str(item.get("status") or item.get("verdict") or "").strip().upper()
+                            if st in ("FAIL", "FAILED", "ERROR", "UNEXPECTED") or item.get("pass") is False or item.get("passed") is False or item.get("ok") is False:
+                                failed_ids.append(str(item.get("id") or item.get("name") or item.get("title") or item.get("test") or "check"))
+
+            if v_str in ("FAIL", "FAILED", "ERROR") or failed_cnt > 0 or failed_ids:
+                f_detail = f"checks FAIL: {', '.join(failed_ids[:6])}" if failed_ids else f"verdict='{v_str or 'FAIL'}', failed={failed_cnt}"
+                return False, _fmt_err(f_detail)
+
+            # Check positive pass evidence in JSON
+            has_pass = False
+            if v_str in ("PASS", "PASSED", "OK", "SUCCEEDED"):
+                has_pass = True
+            elif isinstance(j_obj.get("numPassedTests"), int) and j_obj.get("numPassedTests", 0) > 0 and jest_failed == 0:
+                has_pass = True
+            elif isinstance(stats_obj, dict) and int(stats_obj.get("expected") or 0) > 0:
+                has_pass = True
+            elif isinstance(j_obj.get("passed"), int) and j_obj.get("passed", 0) > 0 and failed_cnt == 0:
+                has_pass = True
+            return has_pass, ""
+        except Exception:
+            pass
+    return False, ""
+
+
+def _check_qa_reject_and_ping_pong_guards(
+    expanded_cmd: str, no_heredoc: str, real_cwd: str
 ) -> str:
     """
-    Universal, project-agnostic QA & UI Evidence Guards (`[ORCA QA & UI EVIDENCE GUARD]`):
-    1. `[ORCA LOG-TRUNCATION GUARD]`: Block short `--since` (`--since 30s`, `--since 2m`, `--since 5m`) on `docker/kubectl logs` in QA/DevOps.
-    2. `[ORCA QA REPORT-VERDICT MISMATCH GUARD]`: Block `QA_VERDICT: PASS` / `worker_done --outcome succeeded` if any JSON test report modified in the workspace during the current dispatch has `verdict: FAIL` or `failed > 0`.
-    3. `[ORCA VISUAL BLANK-SCREEN GUARD]`: Block `QA_VERDICT: PASS` / `UI Ready` if any screenshot (`.png`) captured/modified during the dispatch has `>= 92%` uniform/blank scanlines.
-    4. `[ORCA MULTIMODAL VISUAL INSPECTION GUARD]`: Block `QA_VERDICT: PASS` / `UI Ready` if screenshots (`.png`/`.jpg`/`.webp`) were captured/modified during the dispatch without being opened via `view_file` / `read_file` / `Read`.
+    Enforce FIX-08 (Structured Bug Report JSON schema on QA_REJECT) and
+    FIX-10 (Block >= 3 QA_REJECT ping-pong loops on the same [Pn], requiring --type escalation).
     """
-    if not _is_orca_managed_project(payload, args):
-        return ""
-    raw_cwd_in = str(
-        args.get("Cwd")
-        or args.get("cwd")
-        or (payload.get("cwd") if isinstance(payload, dict) else "")
-        or ""
-    ).strip()
-    _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
-    real_cwd = os.path.realpath(cwd) if cwd else ""
-    cwd_slot = (
-        _extract_canonical_worker_slot(os.path.basename(raw_cwd_in.rstrip("/")))
-        or (_extract_canonical_worker_slot(os.path.basename(real_cwd)) if real_cwd else "")
-    )
+    is_escalation_type = bool(re.search(r"--type(?:\s+|=)['\"]?escalation\b", no_heredoc))
+    p_items = re.findall(r"\[(P\d+)\]", expanded_cmd)
+    if not p_items:
+        p_items = re.findall(r'"plan_item"\s*:\s*"(P\d+)"', expanded_cmd)
 
-    # 1. [ORCA LOG-TRUNCATION GUARD]
-    if cwd_slot and (cwd_slot.startswith("qa-worker") or cwd_slot.startswith("devops-worker")):
-        if re.search(
-            r"\b(?:docker(?:\s+compose|-compose)?|kubectl)\s+logs\b[^\n;|&]*\s--since(?:\s+|=)['\"]?(?:[1-9]\d?\s*s|[12]\d\d\s*s|[1-5]\s*m)\b",
-            sanitized_orch,
-        ):
-            return (
-                "[ORCA LOG-TRUNCATION GUARD] CẤM dùng '--since <ngắn>' ('--since 30s' / '--since 2m' / '--since 5m') khi kiểm tra runtime logs trong QA/DevOps! "
-                "Cờ '--since' ngắn sẽ bỏ sót hoàn toàn các lỗi khởi tạo (startup/DI crash, schema/migration error) xảy ra lúc container vừa boot. "
-                "Cách sửa bắt buộc: Bỏ cờ '--since' và dùng 'docker compose logs --no-color --tail=300 <service>' (hoặc 'docker logs --tail 300 <container>') để quét toàn bộ lịch sử log từ lúc khởi động!"
-            )
-
-    if not re.search(r"\borca\s+orchestration\s+send\b", sanitized_orch):
-        return ""
-
-    no_heredoc = _strip_quoted_heredocs(cmd)
-    # Allow escalations, questions, P2P rejections (QA_REJECT/INCOMPLETE_PLAN/TEST_FAIL/SEC_BLOCK), or explicit FAIL verdicts through immediately
-    if (
-        re.search(r"--type(?:\s+|=)['\"]?(?:escalation|question)\b", no_heredoc)
-        or re.search(r"--outcome(?:\s+|=)['\"]?failed\b", no_heredoc)
-        or re.search(
-            r"\b(?:QA_VERDICT\s*:\s*FAIL|QA_REJECT|INCOMPLETE_PLAN|TEST_FAIL|SEC_BLOCK|SECURITY_VERDICT\s*:\s*BLOCK|PERF_VERDICT\s*:\s*BOTTLENECK_FOUND|BLOCKED_BY_UNKNOWN)\b",
-            cmd,
-            re.IGNORECASE,
-        )
-    ):
-        return ""
-
-    is_qa_slot = bool(
-        (cwd_slot and cwd_slot.startswith("qa-worker"))
-        or re.search(r"\b(?:QA_VERDICT\s*:\s*PASS|QA_FINAL|Worker\s+Done:\s*qa-worker)\b", cmd, re.IGNORECASE)
-    )
-    is_ui_slot = bool(
-        (cwd_slot and cwd_slot.startswith("ui-worker"))
-        or re.search(r"\b(?:UI\s+Ready|UI_READY|Worker\s+Done:\s*ui-worker)\b", cmd, re.IGNORECASE)
-    )
-    if not (is_qa_slot or is_ui_slot):
-        return ""
-
-    is_completion_send = bool(
-        re.search(r"--type(?:\s+|=)['\"]?(?:handoff|worker_done)\b", no_heredoc)
-        or re.search(r"\b(?:QA_VERDICT\s*:\s*PASS|QA_FINAL|UI\s+Ready|UI_READY)\b", cmd, re.IGNORECASE)
-    )
-    if not is_completion_send or not real_cwd or not os.path.isdir(real_cwd):
-        return ""
-
-    # Determine dispatch_start_epoch from SQLite `dispatch_contexts`
-    now_ts = time.time()
-    dispatch_start_epoch = now_ts - 1800.0
+    # 1. FIX-10: Count prior QA_REJECT messages in SQLite `messages` for the same [Pn] in this run
     db_path = _find_orca_orchestration_db_path()
-    if db_path:
+    if db_path and os.path.isfile(db_path):
         try:
             import sqlite3
 
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
             conn.row_factory = sqlite3.Row
+            run_id = _extract_cli_flag_value(no_heredoc, ("run", "run-id"))
             disp_id = _extract_cli_flag_value(no_heredoc, ("dispatch-id", "dispatch"))
-            from_handle = _extract_cli_flag_value(no_heredoc, ("from",))
-            row_dc = None
-            if disp_id:
-                row_dc = conn.execute(
-                    "SELECT CAST(strftime('%s', dc.created_at) AS INTEGER) AS c_ts "
-                    "FROM dispatch_contexts dc WHERE dc.id = ? LIMIT 1",
-                    (disp_id,),
-                ).fetchone()
-            if not row_dc and from_handle:
-                row_dc = conn.execute(
-                    "SELECT CAST(strftime('%s', dc.created_at) AS INTEGER) AS c_ts "
-                    "FROM dispatch_contexts dc "
-                    "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
-                    "WHERE dc.assignee_handle = ? OR wd.agent_terminal_handle = ? "
-                    "ORDER BY dc.created_at DESC LIMIT 1",
-                    (from_handle, from_handle),
-                ).fetchone()
-            if not row_dc:
-                row_dc = conn.execute(
-                    "SELECT CAST(strftime('%s', dc.created_at) AS INTEGER) AS c_ts "
-                    "FROM dispatch_contexts dc "
-                    "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
-                    "WHERE wd.worktree_id = ? ORDER BY dc.created_at DESC LIMIT 1",
-                    (real_cwd,),
-                ).fetchone()
-            if row_dc and row_dc["c_ts"]:
-                c_val = float(row_dc["c_ts"])
-                if c_val > 1e9:
-                    dispatch_start_epoch = c_val
+            if not run_id and disp_id:
+                r_row = conn.execute("SELECT run_id FROM dispatch_contexts WHERE id = ? LIMIT 1", (disp_id,)).fetchone()
+                if r_row:
+                    run_id = str(r_row["run_id"] or "")
+            if not run_id:
+                r_row = conn.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+                if r_row:
+                    run_id = str(r_row["id"] or "")
+            if run_id:
+                m_rows = conn.execute(
+                    "SELECT subject, body FROM messages WHERE run_id = ? AND type IN ('handoff', 'escalation')",
+                    (run_id,),
+                ).fetchall()
+                reject_msgs = [
+                    f"{r['subject'] or ''} {r['body'] or ''}"
+                    for r in m_rows
+                    if "QA_REJECT" in f"{r['subject'] or ''} {r['body'] or ''}"
+                ]
+                max_pn_cnt = 0
+                hit_pn = ""
+                if p_items:
+                    for pn in p_items:
+                        cnt = sum(1 for txt in reject_msgs if f"[{pn}]" in txt or f'"{pn}"' in txt)
+                        if cnt > max_pn_cnt:
+                            max_pn_cnt = cnt
+                            hit_pn = pn
+                else:
+                    max_pn_cnt = len(reject_msgs)
+                    hit_pn = "RUN"
+                if max_pn_cnt >= 3:
+                    has_escalation_fields = bool(
+                        re.search(r"(?:đã\s+thử|tried)", expanded_cmd, re.IGNORECASE)
+                        and re.search(r"(?:vì\s+sao|nguyên\s+nhân|root_cause|why)", expanded_cmd, re.IGNORECASE)
+                        and re.search(r"(?:cần\s+quyết\s+định|quyết\s+định\s+gì|decision_needed|decision)", expanded_cmd, re.IGNORECASE)
+                    )
+                    if not is_escalation_type or not has_escalation_fields:
+                        conn.close()
+                        return (
+                            f"[ORCA PING-PONG ESCALATION GUARD] Hạng mục [{hit_pn}] đã bị QA_REJECT {max_pn_cnt}/3 vòng trong Run '{run_id}'! "
+                            f"CẤM tiếp tục bắn P2P reject vòng thứ {max_pn_cnt + 1} giữa Dev↔QA gây lặp vô hạn. "
+                            f"Cách sửa bắt buộc: Gửi '--type escalation' về thẳng Lead Coordinator kèm đủ 3 mục: "
+                            f"(1) Đã thử gì (tried), (2) Vì sao vẫn fail / nguyên nhân gốc (root_cause), (3) Cần Leader quyết định gì (decision_needed)!"
+                        )
             conn.close()
         except Exception:
             pass
 
-    cutoff_ts = dispatch_start_epoch - 5.0
-    # Advance cutoff_ts past `orca-team merge-upstream` (`ORIG_HEAD` mtime) so files merely pulled in
-    # from upstream branches via `git merge` are not mistaken for screenshots/reports created by this worker.
-    try:
-        dot_git = os.path.join(real_cwd, ".git")
-        git_dir = dot_git
-        if os.path.isfile(dot_git):
-            with open(dot_git, "r", encoding="utf-8", errors="ignore") as gf:
-                first_ln = gf.readline().strip()
-            if first_ln.lower().startswith("gitdir:"):
-                raw_gd = first_ln.split(":", 1)[1].strip()
-                git_dir = raw_gd if os.path.isabs(raw_gd) else os.path.abspath(os.path.join(real_cwd, raw_gd))
-        orig_head_p = os.path.join(git_dir, "ORIG_HEAD")
-        if os.path.isfile(orig_head_p):
-            oh_mtime = os.path.getmtime(orig_head_p)
-            if oh_mtime >= dispatch_start_epoch - 5.0:
-                cutoff_ts = max(cutoff_ts, oh_mtime + 2.0)
-    except Exception:
-        pass
-
-    skip_dirs = {
-        ".git",
-        "node_modules",
-        ".next",
-        "dist",
-        "build",
-        "target",
-        "vendor",
-        ".gradle",
-        ".idea",
-        "__pycache__",
-        ".venv",
-        "venv",
-        # Static source/asset directories (not runtime screenshot directories)
-        "src",
-        "app",
-        "public",
-        "static",
-        "assets",
-        "res",
-        "android",
-        "ios",
-        "packages",
-        "lib",
-        "components",
-        "pages",
-        "views",
-        "styles",
-        "icons",
-        "images",
-        "img",
-        "media",
-        "fonts",
-        "fixtures",
-        "__snapshots__",
-    }
-    screenshot_name_re = re.compile(
-        r"(?:screen|shot|captur|verif|audit|qa|ui[-_]|page|modal|drawer|dark|light|desktop|mobile|test|after|before|live|clone|orig|rebuilt|parity)",
-        re.IGNORECASE,
-    )
-
-    # Discover JSON reports and screenshot images modified during the current dispatch (up to depth 2)
-    recent_jsons: list[str] = []
-    recent_pngs: list[str] = []
-    try:
-        for root_d, dirs, files in os.walk(real_cwd):
-            rel_d = os.path.relpath(root_d, real_cwd)
-            depth = 0 if rel_d == "." else len(rel_d.split(os.sep))
-            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
-            if depth >= 2:
-                dirs[:] = []
-            for fname in files:
-                low = fname.lower()
-                fp = os.path.join(root_d, fname)
-                try:
-                    mtime = os.path.getmtime(fp)
-                except OSError:
-                    continue
-                if mtime < cutoff_ts:
-                    continue
-                if is_qa_slot and low.endswith(".json") and any(k in low for k in ("report", "result", "verif", "summary", "audit")):
-                    recent_jsons.append(fp)
-                elif low.endswith(".png") and (rel_d != "." or screenshot_name_re.search(low)):
-                    recent_pngs.append(fp)
-    except Exception:
-        pass
-
-    # 2. [ORCA QA REPORT-VERDICT MISMATCH GUARD]
-    if is_qa_slot and recent_jsons:
-        for jp in sorted(recent_jsons):
-            try:
-                if os.path.getsize(jp) > 5 * 1024 * 1024:
-                    continue
-                with open(jp, "r", encoding="utf-8", errors="ignore") as jf:
-                    j_obj = json.load(jf)
-                if not isinstance(j_obj, dict):
-                    continue
-                rel_jp = os.path.relpath(jp, real_cwd)
-                v_str = str(j_obj.get("verdict") or j_obj.get("status") or "").strip().upper()
-                failed_cnt = 0
-                raw_failed = j_obj.get("failed")
-                if isinstance(raw_failed, int) and not isinstance(raw_failed, bool):
-                    failed_cnt = int(raw_failed)
-                elif isinstance(j_obj.get("summary"), dict):
-                    sum_f = j_obj["summary"].get("failed")
-                    if isinstance(sum_f, int) and not isinstance(sum_f, bool):
-                        failed_cnt = int(sum_f)
-
-                failed_ids: list[str] = []
-                for arr_k in ("checks", "results", "tests", "items", "suites"):
-                    arr_v = j_obj.get(arr_k)
-                    if isinstance(arr_v, list):
-                        for item in arr_v:
-                            if isinstance(item, dict):
-                                st = str(item.get("status") or item.get("verdict") or "").strip().upper()
-                                if st in ("FAIL", "FAILED", "ERROR") or item.get("pass") is False or item.get("passed") is False:
-                                    failed_ids.append(str(item.get("id") or item.get("name") or item.get("test") or "check"))
-
-                if v_str in ("FAIL", "FAILED") or failed_cnt > 0 or failed_ids:
-                    f_detail = f" (checks FAIL: {', '.join(failed_ids[:6])})" if failed_ids else (f" (failed={failed_cnt})" if failed_cnt else "")
+    # 2. FIX-08: Validate structured bug report JSON block on QA_REJECT when JSON block is present or ORCA_REQUIRE_STRUCTURED_BUG=1
+    req_keys = ("plan_item", "file_path", "line", "error_code", "repro_cmd", "expected", "actual", "evidence")
+    m_json = re.search(r"(\{[^{}]*\"(?:plan_item|file_path|error_code|repro_cmd)\"[^{}]*\})", expanded_cmd, re.DOTALL)
+    if m_json:
+        try:
+            bug_obj = json.loads(m_json.group(1))
+            if isinstance(bug_obj, dict):
+                missing_k = [k for k in req_keys if k not in bug_obj or bug_obj.get(k) in (None, "")]
+                if missing_k:
                     return (
-                        f"[ORCA QA REPORT-VERDICT MISMATCH GUARD] File báo cáo '{rel_jp}' được tạo/cập nhật trong phiên này đang ghi nhận kết quả THẤT BẠI (verdict='{v_str or 'FAIL'}'{f_detail}), "
-                        f"nhưng bạn lại đang gửi tin nhắn báo cáo PASS / succeeded! "
-                        f"CẤM ngụy tạo kết quả 'QA_VERDICT: PASS' hoặc tự ý bỏ qua lỗi trong file report. "
-                        f"Cách sửa bắt buộc: Nếu lỗi là bug thật của hệ thống, hãy đổi báo cáo sang 'QA_VERDICT: FAIL' (hoặc '--type escalation' / 'QA_REJECT'); nếu file '{rel_jp}' là kết quả nháp cũ trước khi fix, hãy chạy lại test để cập nhật '{rel_jp}' đạt PASS 100% (hoặc xóa file report nháp cũ) trước khi gửi!"
+                        f"[ORCA STRUCTURED BUG REPORT GUARD] Khối JSON báo lỗi QA_REJECT thiếu các trường bắt buộc: {', '.join(missing_k)}! "
+                        f"Schema bắt buộc: {{\"plan_item\":\"P2\",\"file_path\":\"...\",\"line\":41,\"error_code\":\"...\",\"repro_cmd\":\"...\",\"expected\":\"...\",\"actual\":\"...\",\"evidence\":\"...\"}}."
                     )
+        except Exception:
+            return (
+                "[ORCA STRUCTURED BUG REPORT GUARD] Khối JSON trong QA_REJECT bị lỗi cú pháp (malformed JSON)! "
+                "Hãy truyền JSON hợp lệ với đủ 8 trường: plan_item, file_path, line, error_code, repro_cmd, expected, actual, evidence."
+            )
+    elif os.environ.get("ORCA_REQUIRE_STRUCTURED_BUG", "").strip() == "1":
+        return (
+            "[ORCA STRUCTURED BUG REPORT GUARD] QA_REJECT bắt buộc phải đính kèm khối JSON cấu trúc chuẩn "
+            "({\"plan_item\":...,\"file_path\":...,\"line\":...,\"error_code\":...,\"repro_cmd\":...,\"expected\":...,\"actual\":...,\"evidence\":...})!"
+        )
+    return ""
+
+
+def _verify_qa_evidence_ledger_and_ancestry(
+    real_cwd: str,
+    no_heredoc: str,
+    expanded_cmd: str,
+    cwd_slot: str,
+    dispatch_start_epoch: float,
+) -> str:
+    """
+    Enforce FIX-02 (Machine-recorded Evidence Ledger), FIX-04 (Git Merge Ancestry & Scope-Drift),
+    FIX-07 (Contracts & TDD Red->Green), and FIX-09 (Gate Ledger rows).
+    """
+    disp_id = _extract_cli_flag_value(no_heredoc, ("dispatch-id", "dispatch"))
+    task_id = _extract_cli_flag_value(no_heredoc, ("task-id", "task"))
+    run_id = _extract_cli_flag_value(no_heredoc, ("run", "run-id"))
+    from_handle = _extract_cli_flag_value(no_heredoc, ("from",)) or cwd_slot
+
+    # Resolve run_id, disp_id, project_root, and upstream dev/ui branches from SQLite
+    project_root = os.path.dirname(real_cwd) if cwd_slot and real_cwd.endswith(cwd_slot) else real_cwd
+    upstream_branches: list[str] = []
+    db_path = _find_orca_orchestration_db_path()
+    if db_path and os.path.isfile(db_path):
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+            conn.row_factory = sqlite3.Row
+            if not run_id and disp_id:
+                row = conn.execute("SELECT run_id, task_id FROM dispatch_contexts WHERE id = ? LIMIT 1", (disp_id,)).fetchone()
+                if row:
+                    run_id = str(row["run_id"] or "")
+                    if not task_id:
+                        task_id = str(row["task_id"] or "")
+            if not run_id and task_id:
+                row = conn.execute("SELECT run_id FROM tasks WHERE id = ? LIMIT 1", (task_id,)).fetchone()
+                if row:
+                    run_id = str(row["run_id"] or "")
+            if not run_id:
+                row = conn.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+                if row:
+                    run_id = str(row["id"] or "")
+            if run_id:
+                w_rows = conn.execute(
+                    "SELECT dc.id AS did, wd.state, wd.worktree_id, wd.agent_terminal_handle "
+                    "FROM dispatch_contexts dc "
+                    "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                    "WHERE dc.run_id = ?",
+                    (run_id,),
+                ).fetchall()
+                for wr in w_rows:
+                    wt_id = str(wr["worktree_id"] or "")
+                    if wt_id.startswith("path:"):
+                        wt_id = wt_id[5:]
+                    slot_n = _extract_canonical_worker_slot(os.path.basename(wt_id.rstrip("/"))) or _extract_canonical_worker_slot(str(wr["agent_terminal_handle"] or ""))
+                    if slot_n and (slot_n.startswith("dev-worker") or slot_n.startswith("ui-worker")):
+                        if slot_n not in upstream_branches:
+                            upstream_branches.append(slot_n)
+            conn.close()
+        except Exception:
+            pass
+
+    # Determine current git HEAD SHA & check git status / merge ancestry (FIX-04) when real_cwd is a git repo
+    current_head_sha = os.environ.get("ORCA_HEAD_SHA", "").strip()
+    is_git_repo = False
+    try:
+        import subprocess
+
+        rev_p = subprocess.run(
+            ["git", "-C", real_cwd, "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if rev_p.returncode == 0 and (rev_p.stdout or "").strip():
+            is_git_repo = True
+            if not current_head_sha:
+                current_head_sha = (rev_p.stdout or "").strip()
+    except Exception:
+        pass
+
+    if is_git_repo:
+        try:
+            import subprocess
+
+            # Check git status --porcelain (ignore untracked .orca/ and temporary test report / ledger files)
+            st_p = subprocess.run(
+                ["git", "-C", real_cwd, "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if st_p.returncode == 0 and (st_p.stdout or "").strip():
+                dirty_lines = []
+                for ln in (st_p.stdout or "").splitlines():
+                    if len(ln) < 4:
+                        continue
+                    rel_f = ln[3:].strip().strip('"')
+                    if rel_f.startswith(".orca") or rel_f.endswith(("evidence.jsonl", "test-report.json", "junit.xml")):
+                        continue
+                    dirty_lines.append(rel_f)
+                if dirty_lines:
+                    return (
+                        f"[ORCA GIT-CLEAN GUARD] Worktree '{cwd_slot or 'qa-worker'}' đang có file chưa commit hoặc bẩn ({', '.join(dirty_lines[:5])})! "
+                        f"Cách sửa bắt buộc: Commit hoặc dọn sạch các file thay đổi ('git status --porcelain' phải rỗng) trước khi gửi QA_VERDICT: PASS!"
+                    )
+
+            # Discover any additional dev-worker* / ui-worker* git branches in the repo if upstream_branches is empty
+            if not upstream_branches:
+                br_p = subprocess.run(
+                    ["git", "-C", real_cwd, "for-each-ref", "--format=%(refname:short)", "refs/heads/dev-worker*", "refs/heads/ui-worker*"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if br_p.returncode == 0:
+                    upstream_branches = [b.strip() for b in (br_p.stdout or "").splitlines() if b.strip()]
+
+            for br in upstream_branches:
+                if br == cwd_slot:
+                    continue
+                v_ref = subprocess.run(
+                    ["git", "-C", real_cwd, "rev-parse", "--verify", "--quiet", br],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if v_ref.returncode != 0:
+                    continue
+                anc_p = subprocess.run(
+                    ["git", "-C", real_cwd, "merge-base", "--is-ancestor", br, "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if anc_p.returncode != 0:
+                    return (
+                        f"[ORCA MERGE-ANCESTRY GUARD] Nhánh upstream '{br}' của Run '{run_id or 'active'}' CHƯA được merge vào HEAD của '{cwd_slot or 'qa-worker'}' "
+                        f"('git merge-base --is-ancestor {br} HEAD' thất bại)! "
+                        f"CẤM gửi báo cáo PASS khi chưa tích hợp đầy đủ code từ mọi nhánh dev/ui. "
+                        f"Cách sửa bắt buộc: Chạy 'orca-team merge-upstream --role qa --run {run_id or '<RUN_ID>'}' rồi chạy lại test qua 'orca-team verify'!"
+                    )
+        except Exception:
+            pass
+
+    # Collect Evidence Ledger rows (FIX-02, FIX-07, FIX-09)
+    # Priority 1: Explicit per-test/per-dispatch ledger (ORCA_EVIDENCE_DIR, <real_cwd>/evidence.jsonl, ~/.orca/evidence/<run>/<disp>.jsonl)
+    # Priority 2: Run-level ledger (<project_root>/.orca/runs/<run>/evidence.jsonl)
+    explicit_ledger_files: list[str] = []
+    env_ev_dir = os.environ.get("ORCA_EVIDENCE_DIR", "").strip()
+    if env_ev_dir:
+        if os.path.isfile(env_ev_dir):
+            explicit_ledger_files.append(env_ev_dir)
+        elif os.path.isdir(env_ev_dir):
+            for cand in (
+                os.path.join(env_ev_dir, run_id or "", f"{disp_id}.jsonl") if disp_id else "",
+                os.path.join(env_ev_dir, f"{disp_id}.jsonl") if disp_id else "",
+                os.path.join(env_ev_dir, run_id or "", "evidence.jsonl") if run_id else "",
+                os.path.join(env_ev_dir, "evidence.jsonl"),
+            ):
+                if cand and os.path.isfile(cand) and cand not in explicit_ledger_files:
+                    explicit_ledger_files.append(cand)
+    for local_cand in (
+        os.path.join(real_cwd, "evidence.jsonl"),
+        os.path.join(real_cwd, ".orca", "evidence.jsonl"),
+        os.path.join(os.path.expanduser("~"), ".orca", "evidence", run_id or "default", f"{disp_id}.jsonl") if disp_id else "",
+        os.path.join(os.path.expanduser("~"), ".orca", "evidence", run_id or "default", "evidence.jsonl") if run_id else "",
+    ):
+        if local_cand and os.path.isfile(local_cand) and local_cand not in explicit_ledger_files:
+            explicit_ledger_files.append(local_cand)
+
+    fallback_ledger_files: list[str] = []
+    if run_id and project_root:
+        run_ev = os.path.join(project_root, ".orca", "runs", run_id, "evidence.jsonl")
+        if os.path.isfile(run_ev) and run_ev not in explicit_ledger_files:
+            fallback_ledger_files.append(run_ev)
+
+    target_files = explicit_ledger_files if (explicit_ledger_files or env_ev_dir) else fallback_ledger_files
+    ledger_rows: list[dict] = []
+    for lf_p in target_files:
+        try:
+            with open(lf_p, "r", encoding="utf-8", errors="ignore") as lf:
+                for raw_ln in lf:
+                    ln = raw_ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        row = json.loads(ln)
+                        if isinstance(row, dict):
+                            row["_file"] = lf_p
+                            ledger_rows.append(row)
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+
+    # Filter rows relevant to QA / gate / current dispatch
+    qa_rows: list[dict] = []
+    for r in ledger_rows:
+        r_disp = str(r.get("dispatch") or r.get("dispatch_id") or "").strip()
+        r_src = str(r.get("source") or "").strip().lower()
+        if r.get("_file") in explicit_ledger_files:
+            if not r_disp or r_disp in (disp_id, from_handle, cwd_slot, "d_qa", "qa-worker") or r_src in ("recorder", "gate", "verify"):
+                qa_rows.append(r)
+        else:
+            if r_disp in (disp_id, from_handle, cwd_slot, "d_qa", "qa-worker") or r_src in ("recorder", "gate", "verify"):
+                qa_rows.append(r)
+
+    if not qa_rows:
+        return (
+            "[ORCA QA EVIDENCE LEDGER GUARD] Không tìm thấy bằng chứng thực thi test trong Evidence Ledger "
+            f"('~/.orca/evidence/{run_id or '<run>'}/{disp_id or '<dispatch>'}.jsonl')! "
+            "Theo quy tắc Zero-Trust P0, 'không có bằng chứng = BLOCK'. "
+            "Cách sửa bắt buộc: Chạy bộ kiểm thử qua 'orca-team verify --run <RUN> --dispatch-id <DID> --task-id <TID> -- <lệnh test>' "
+            "để máy ghi nhận exit_code=0 và head_sha vào ledger trước khi gửi QA_VERDICT: PASS!"
+        )
+
+    # Evaluate chronological sequence per command/key for latest exit status, head_sha, dirty, and TDD red->green
+    latest_by_key: dict[str, dict] = {}
+    history_by_key: dict[str, list[int]] = {}
+    for r in qa_rows:
+        cmd_v = r.get("cmd")
+        cmd_str = " ".join(str(x) for x in cmd_v) if isinstance(cmd_v, list) else str(cmd_v or "")
+        key = str(r.get("cmd_hash") or cmd_str or r.get("kind") or "default")
+        raw_exit = r.get("exit_code") if r.get("exit_code") is not None else r.get("exit")
+        exit_code = int(raw_exit) if isinstance(raw_exit, (int, float)) and not isinstance(raw_exit, bool) else 1
+        history_by_key.setdefault(key, []).append(exit_code)
+        latest_by_key[key] = r
+
+    for key, last_r in latest_by_key.items():
+        raw_exit = last_r.get("exit_code") if last_r.get("exit_code") is not None else last_r.get("exit")
+        exit_code = int(raw_exit) if isinstance(raw_exit, (int, float)) and not isinstance(raw_exit, bool) else 1
+        failed_n = int(last_r.get("tests_failed") or last_r.get("failed") or 0)
+        if exit_code != 0 or failed_n > 0:
+            return (
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger ghi nhận kết quả THẤT BẠI ở lần chạy mới nhất "
+                f"(exit_code={exit_code}, failed={failed_n}, cmd={last_r.get('cmd')})! "
+                f"CẤM gửi báo cáo QA_VERDICT: PASS khi lệnh kiểm thử trong ledger có exit_code != 0."
+            )
+        if last_r.get("dirty") is True:
+            return (
+                "[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger ghi nhận worktree đang bẩn (dirty=true) lúc chạy test! "
+                "Hãy commit sạch mọi thay đổi rồi chạy lại 'orca-team verify' trước khi báo PASS."
+            )
+        if last_r.get("tests_total") is not None and int(last_r.get("tests_total")) <= 0:
+            return (
+                "[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger ghi nhận tests_total=0 (không có test nào chạy)! "
+                "CẤM báo cáo PASS khi chưa có test thực tế nào được thực thi."
+            )
+        row_sha = str(last_r.get("head_sha") or "").strip()
+        if row_sha:
+            is_stale_marker = row_sha.lower().startswith(("old", "stale", "outdated", "000000"))
+            sha_mismatch = bool(
+                current_head_sha
+                and not current_head_sha.startswith(row_sha)
+                and not row_sha.startswith(current_head_sha)
+            )
+            if is_stale_marker or sha_mismatch:
+                return (
+                    f"[ORCA QA EVIDENCE LEDGER GUARD] Bằng chứng trong Evidence Ledger có commit 'head_sha={row_sha}' "
+                    f"CŨ / KHÁC với HEAD hiện tại ('{current_head_sha or 'HEAD'}')! "
+                    f"Mọi lần sửa code hoặc commit mới đều làm vô hiệu hóa kết quả test cũ. "
+                    f"Cách sửa bắt buộc: Chạy lại 'orca-team verify' trên commit HEAD hiện tại trước khi báo PASS!"
+                )
+
+    # Check TDD Red -> Green requirement when requested by contract / env / row flag (FIX-07)
+    require_tdd = os.environ.get("ORCA_REQUIRE_TDD", "").strip() == "1" or any(
+        bool(r.get("require_tdd")) for r in qa_rows
+    )
+    if require_tdd:
+        for key, seq in history_by_key.items():
+            if not (len(seq) >= 2 and any(x != 0 for x in seq[:-1]) and seq[-1] == 0):
+                return (
+                    f"[ORCA TDD GUARD] Hạng mục/lệnh '{key}' chưa có đủ chuỗi bằng chứng TDD Red→Green "
+                    f"(cần ít nhất 1 dòng exit_code!=0 trước và 1 dòng exit_code=0 sau cùng cmd_hash trong ledger)!"
+                )
+
+    return ""
+
+
+def _check_qa_and_ui_verification_guards(
+    cmd: str, sanitized_orch: str, payload: dict, args: dict
+) -> str:
+    """
+    Universal, project-agnostic QA & UI Evidence Guards (`[ORCA QA & UI EVIDENCE GUARD]`):
+    - FIX-01: Slot-first detection, fail-closed when `orca-team.json` is missing or guard raises on QA/UI slots,
+              and indirect variable/subshell (`--type "$T"`, `--body "$(cat ...)"`) expansion.
+    - FIX-02 / FIX-07 / FIX-09: Machine-recorded Evidence Ledger verification (`exit_code==0`, `head_sha==HEAD`,
+              `dirty==false`, positive test count, and TDD red->green).
+    - FIX-03: Multi-format test report parser (Jest, Playwright, JUnit XML, pytest, Go test JSON, TAP) without 5MB skip.
+    - FIX-04: Read-only Git merge ancestry (`git merge-base --is-ancestor`) & clean worktree check.
+    - FIX-05: Scan source directories (`src/`, `app/`, `packages/`... up to depth 4) for test reports and verify
+              `.png`/`.jpg`/`.jpeg`/`.webp` screenshots.
+    - FIX-08 / FIX-10: Structured JSON bug report check and >=3 QA_REJECT ping-pong escalation guard.
+    """
+    raw_cwd_in, real_cwd, cwd_slot = _detect_caller_slot_safe(payload, args, cmd)
+    try:
+        if os.environ.get("ORCA_GUARD_FORCE_RAISE", "").strip() == "1":
+            raise RuntimeError("Simulated guard internal exception (ORCA_GUARD_FORCE_RAISE=1)")
+
+        managed = _is_orca_managed_project(payload, args)
+        if not managed:
+            if cwd_slot and (cwd_slot.startswith("qa-worker") or cwd_slot.startswith("ui-worker")):
+                return (
+                    f"[ORCA GUARD-ERROR] Không xác định được project root (thiếu 'orca-team.json') để verify cho slot '{cwd_slot}'. "
+                    f"Thực thi Fail-Closed: CẤM cho qua lệnh báo cáo hoàn tất khi không tìm thấy cấu hình project!"
+                )
+            return ""
+
+        # 1. [ORCA LOG-TRUNCATION GUARD]
+        if cwd_slot and (cwd_slot.startswith("qa-worker") or cwd_slot.startswith("devops-worker")):
+            if re.search(
+                r"\b(?:docker(?:\s+compose|-compose)?|kubectl)\s+logs\b[^\n;|&]*\s--since(?:\s+|=)['\"]?(?:[1-9]\d?\s*s|[12]\d\d\s*s|[1-5]\s*m)\b",
+                sanitized_orch,
+            ):
+                return (
+                    "[ORCA LOG-TRUNCATION GUARD] CẤM dùng '--since <ngắn>' ('--since 30s' / '--since 2m' / '--since 5m') khi kiểm tra runtime logs trong QA/DevOps! "
+                    "Cờ '--since' ngắn sẽ bỏ sót hoàn toàn các lỗi khởi tạo (startup/DI crash, schema/migration error) xảy ra lúc container vừa boot. "
+                    "Cách sửa bắt buộc: Bỏ cờ '--since' và dùng 'docker compose logs --no-color --tail=300 <service>' (hoặc 'docker logs --tail 300 <container>') để quét toàn bộ lịch sử log từ lúc khởi động!"
+                )
+
+        no_heredoc = _strip_quoted_heredocs(cmd)
+        expanded_cmd, unresolved_cats = _expand_inline_cat_substitutions(cmd, real_cwd)
+
+        is_qa_slot = bool(
+            (cwd_slot and cwd_slot.startswith("qa-worker"))
+            or re.search(r"--from(?:\s+|=)['\"]?qa-worker\b", no_heredoc, re.IGNORECASE)
+            or re.search(r"\b(?:QA_VERDICT\s*:\s*PASS|QA_FINAL|Worker\s+Done:\s*qa-worker)\b", expanded_cmd, re.IGNORECASE)
+        )
+        is_ui_slot = bool(
+            (cwd_slot and cwd_slot.startswith("ui-worker"))
+            or re.search(r"--from(?:\s+|=)['\"]?ui-worker\b", no_heredoc, re.IGNORECASE)
+            or re.search(r"\b(?:UI\s+Ready|UI_READY|Worker\s+Done:\s*ui-worker)\b", expanded_cmd, re.IGNORECASE)
+        )
+
+        has_orch_send = bool(re.search(r"\borca\s+orchestration\s+send\b", sanitized_orch))
+        has_completion_markers = bool(
+            re.search(r"\b(?:QA_VERDICT\s*:\s*PASS|QA_FINAL|UI\s+Ready|UI_READY|worker_done)\b", expanded_cmd, re.IGNORECASE)
+        )
+        if not has_orch_send and not ((is_qa_slot or is_ui_slot) and has_completion_markers):
+            return ""
+        if not (is_qa_slot or is_ui_slot):
+            return ""
+
+        # Check FIX-08 & FIX-10 when sending QA_REJECT
+        if is_qa_slot and re.search(r"\bQA_REJECT\b", expanded_cmd, re.IGNORECASE):
+            rej_err = _check_qa_reject_and_ping_pong_guards(expanded_cmd, no_heredoc, real_cwd)
+            if rej_err:
+                return rej_err
+
+        # Detect indirect variable/subshell flags on `orca orchestration send` (e.g. `--type "$T"`, `--body "$(cat ...)"`)
+        has_indirect_type_or_body = bool(
+            re.search(r"--(?:type|outcome)(?:\s+|=)['\"]?\$(?:\w+|\{|\()", no_heredoc)
+            or unresolved_cats
+        )
+
+        # Allow explicit literal questions, explicit literal failed outcomes, or explicit literal FAIL/REJECT verdicts
+        # (ONLY when not obfuscated with indirect `--type "$T"` and when escalation includes mandatory context or FAIL marker)
+        has_explicit_fail_marker = bool(
+            re.search(
+                r"\b(?:QA_VERDICT\s*:\s*FAIL|QA_REJECT|INCOMPLETE_PLAN|TEST_FAIL|SEC_BLOCK|SECURITY_VERDICT\s*:\s*BLOCK|PERF_VERDICT\s*:\s*BOTTLENECK_FOUND|BLOCKED_BY_UNKNOWN)\b",
+                expanded_cmd,
+                re.IGNORECASE,
+            )
+        )
+        is_literal_question = bool(re.search(r"--type(?:\s+|=)['\"]?question\b", no_heredoc))
+        is_literal_escalation = bool(re.search(r"--type(?:\s+|=)['\"]?escalation\b", no_heredoc))
+        is_literal_failed_outcome = bool(re.search(r"--outcome(?:\s+|=)['\"]?failed\b", no_heredoc))
+
+        if not has_indirect_type_or_body:
+            if is_literal_question or is_literal_failed_outcome or has_explicit_fail_marker:
+                return ""
+            if is_literal_escalation and not re.search(r"\b(?:QA_VERDICT\s*:\s*PASS|QA_FINAL|UI\s+Ready|UI_READY)\b", expanded_cmd, re.IGNORECASE):
+                return ""
+
+        is_completion_send = bool(
+            has_orch_send
+            or has_indirect_type_or_body
+            or re.search(r"--type(?:\s+|=)['\"]?(?:handoff|worker_done)\b", no_heredoc)
+            or has_completion_markers
+        )
+        if not is_completion_send:
+            return ""
+        if not real_cwd or not os.path.isdir(real_cwd):
+            return (
+                f"[ORCA GUARD-ERROR] Không xác định được thư mục làm việc hợp lệ ('{real_cwd}') cho slot '{cwd_slot or 'qa/ui'}'. "
+                f"Thực thi Fail-Closed: CẤM gửi báo cáo PASS!"
+            )
+
+        # Determine dispatch_start_epoch from SQLite `dispatch_contexts`
+        now_ts = time.time()
+        dispatch_start_epoch = now_ts - 1800.0
+        db_path = _find_orca_orchestration_db_path()
+        if db_path:
+            try:
+                import sqlite3
+
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+                conn.row_factory = sqlite3.Row
+                disp_id = _extract_cli_flag_value(no_heredoc, ("dispatch-id", "dispatch"))
+                from_handle = _extract_cli_flag_value(no_heredoc, ("from",))
+                row_dc = None
+                if disp_id:
+                    row_dc = conn.execute(
+                        "SELECT CAST(strftime('%s', dc.created_at) AS INTEGER) AS c_ts "
+                        "FROM dispatch_contexts dc WHERE dc.id = ? LIMIT 1",
+                        (disp_id,),
+                    ).fetchone()
+                if not row_dc and from_handle:
+                    row_dc = conn.execute(
+                        "SELECT CAST(strftime('%s', dc.created_at) AS INTEGER) AS c_ts "
+                        "FROM dispatch_contexts dc "
+                        "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                        "WHERE dc.assignee_handle = ? OR wd.agent_terminal_handle = ? "
+                        "ORDER BY dc.created_at DESC LIMIT 1",
+                        (from_handle, from_handle),
+                    ).fetchone()
+                if not row_dc:
+                    row_dc = conn.execute(
+                        "SELECT CAST(strftime('%s', dc.created_at) AS INTEGER) AS c_ts "
+                        "FROM dispatch_contexts dc "
+                        "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                        "WHERE wd.worktree_id = ? OR wd.worktree_id = ? ORDER BY dc.created_at DESC LIMIT 1",
+                        (real_cwd, f"path:{real_cwd}"),
+                    ).fetchone()
+                if row_dc and row_dc["c_ts"]:
+                    c_val = float(row_dc["c_ts"])
+                    if c_val > 1e9:
+                        dispatch_start_epoch = c_val
+                conn.close()
             except Exception:
                 pass
 
-    # 3 & 4. [ORCA VISUAL BLANK-SCREEN GUARD] & [ORCA MULTIMODAL VISUAL INSPECTION GUARD]
-    valid_screenshots: list[str] = []
-    for png_p in sorted(recent_pngs):
-        uni_res = _check_png_uniformity(png_p)
-        if uni_res is not None:
-            uni_ratio, w_px, h_px = uni_res
-            if w_px >= 150 and h_px >= 150:
-                valid_screenshots.append(png_p)
-                if uni_ratio >= 0.92:
-                    rel_p = os.path.relpath(png_p, real_cwd)
-                    return (
-                        f"[ORCA VISUAL BLANK-SCREEN GUARD] Ảnh chụp màn hình '{rel_p}' ({w_px}x{h_px}px) vừa tạo có tới {uni_ratio * 100:.1f}% số dòng điểm ảnh đồng nhất (màn hình đen / trắng rỗng / sụp đổ layout)! "
-                        f"CẤM gửi báo cáo PASS / UI Ready khi ảnh screenshot thực tế bị đen hoặc trống rỗng. "
-                        f"Cách sửa bắt buộc: Dùng tool 'view_file' / 'read_file' / 'Read' để xem trực tiếp '{png_p}', kiểm tra lỗi render/layout và sửa lại UI hoặc báo cáo 'QA_VERDICT: FAIL'!"
-                    )
+        cutoff_ts = dispatch_start_epoch - 5.0
+        try:
+            dot_git = os.path.join(real_cwd, ".git")
+            git_dir = dot_git
+            if os.path.isfile(dot_git):
+                with open(dot_git, "r", encoding="utf-8", errors="ignore") as gf:
+                    first_ln = gf.readline().strip()
+                if first_ln.lower().startswith("gitdir:"):
+                    raw_gd = first_ln.split(":", 1)[1].strip()
+                    git_dir = raw_gd if os.path.isabs(raw_gd) else os.path.abspath(os.path.join(real_cwd, raw_gd))
+            orig_head_p = os.path.join(git_dir, "ORIG_HEAD")
+            if os.path.isfile(orig_head_p):
+                oh_mtime = os.path.getmtime(orig_head_p)
+                if oh_mtime >= dispatch_start_epoch - 5.0:
+                    cutoff_ts = max(cutoff_ts, oh_mtime + 2.0)
+        except Exception:
+            pass
 
-    if valid_screenshots:
-        inspected_map: dict[str, float] = {}
-        cache_p = _visual_inspection_cache_path()
-        if os.path.isfile(cache_p):
-            try:
-                with open(cache_p, "r", encoding="utf-8") as cf:
-                    loaded = json.load(cf)
-                if isinstance(loaded, dict):
-                    inspected_map = {str(k): float(v) for k, v in loaded.items() if isinstance(v, (int, float))}
-            except Exception:
-                inspected_map = {}
+        # FIX-05: Split report_skip_dirs (depth 4, scanning src/app/packages/...) vs image_skip_dirs (depth 2)
+        report_skip_dirs = {
+            ".git",
+            "node_modules",
+            ".next",
+            "dist",
+            "build",
+            "target",
+            "vendor",
+            ".gradle",
+            ".idea",
+            "__pycache__",
+            ".venv",
+            "venv",
+        }
+        image_skip_dirs = report_skip_dirs | {
+            "src",
+            "app",
+            "public",
+            "static",
+            "assets",
+            "res",
+            "android",
+            "ios",
+            "packages",
+            "lib",
+            "components",
+            "pages",
+            "views",
+            "styles",
+            "icons",
+            "images",
+            "img",
+            "media",
+            "fonts",
+            "fixtures",
+            "__snapshots__",
+        }
+        screenshot_name_re = re.compile(
+            r"(?:screen|shot|captur|verif|audit|qa|ui[-_]|page|modal|drawer|dark|light|desktop|mobile|test|after|before|live|clone|orig|rebuilt|parity)",
+            re.IGNORECASE,
+        )
+        non_report_json_names = {
+            "orca-team.json",
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "jsconfig.json",
+            "budget.json",
+            "contracts.json",
+            "composer.json",
+            "manifest.json",
+        }
 
-        def _was_inspected(p: str) -> bool:
-            rp = os.path.realpath(p)
-            bp = os.path.basename(rp)
-            min_ts = max(cutoff_ts - 120.0, os.path.getmtime(p) - 5.0)
+        recent_reports: list[str] = []
+        recent_images: list[str] = []
+        try:
+            for root_d, dirs, files in os.walk(real_cwd):
+                rel_d = os.path.relpath(root_d, real_cwd)
+                depth = 0 if rel_d == "." else len(rel_d.split(os.sep))
+                dirs[:] = [
+                    d for d in dirs
+                    if d not in report_skip_dirs and (not d.startswith(".") or d == ".pytest_cache")
+                ]
+                if depth >= 4:
+                    dirs[:] = []
+                rel_parts = set() if rel_d == "." else set(rel_d.split(os.sep))
+                in_img_skip = bool(rel_parts & image_skip_dirs) or any(p.startswith(".") for p in rel_parts)
+                for fname in files:
+                    low = fname.lower()
+                    fp = os.path.join(root_d, fname)
+                    try:
+                        mtime = os.path.getmtime(fp)
+                    except OSError:
+                        continue
+                    if mtime < cutoff_ts:
+                        continue
+                    if is_qa_slot:
+                        if low == "lastfailed" and ".pytest_cache" in rel_d:
+                            recent_reports.append(fp)
+                        elif low.endswith(".tap"):
+                            recent_reports.append(fp)
+                        elif low.endswith(".xml") and any(k in low for k in ("junit", "report", "result", "test", "surefire", "failsafe", "xunit")):
+                            recent_reports.append(fp)
+                        elif low.endswith((".json", ".jsonl")) and low not in non_report_json_names and low != "evidence.jsonl":
+                            recent_reports.append(fp)
+                    if depth <= 2 and not in_img_skip and low.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                        if rel_d != "." or screenshot_name_re.search(low):
+                            recent_images.append(fp)
+        except Exception:
+            pass
+
+        # 2. [ORCA QA REPORT-VERDICT MISMATCH GUARD] (FIX-03 & FIX-05)
+        if is_qa_slot and recent_reports:
+            for rp in sorted(recent_reports):
+                _has_pass, rep_err = _inspect_test_report_file(rp, real_cwd)
+                if rep_err:
+                    return rep_err
+
+        # Block indirect variable obfuscation (`--type "$T"` or missing `$(cat ...)`) in QA/UI slots (FIX-01)
+        if has_indirect_type_or_body:
             return (
-                inspected_map.get(rp, 0.0) >= min_ts
-                or inspected_map.get(p, 0.0) >= min_ts
-                or inspected_map.get(bp, 0.0) >= min_ts
+                "[ORCA INDIRECT-SEND GUARD] Phát hiện lệnh 'orca orchestration send' trong slot QA/UI dùng biến shell gián tiếp "
+                "('--type \"$T\"' hoặc '--body \"$(cat ...)\"' không đọc được file)! "
+                "CẤM ẩn loại tin nhắn hoặc nội dung báo cáo qua biến trung gian. "
+                "Cách sửa bắt buộc: Truyền tường minh '--type worker_done' / '--type handoff' và nội dung báo cáo trực tiếp!"
             )
 
-        inspected_imgs = [p for p in valid_screenshots if _was_inspected(p)]
-        req_count = min(2, len(valid_screenshots))
-        if len(inspected_imgs) < req_count:
-            must_view = [os.path.relpath(p, real_cwd) for p in valid_screenshots if not _was_inspected(p)][:3]
-            return (
-                f"[ORCA MULTIMODAL VISUAL INSPECTION GUARD] Bạn vừa tạo/cập nhật {len(valid_screenshots)} ảnh chụp màn hình trong phiên này nhưng mới mở xem {len(inspected_imgs)}/{req_count} ảnh tối thiểu bằng mắt thần Multimodal ('view_file' / 'read_file' / 'Read')! "
-                f"CẤM báo cáo PASS / UI Ready nếu chỉ chạy script tự động mà không mở xem trực tiếp file ảnh chụp màn hình. "
-                f"Cách sửa bắt buộc ngay lúc này: Gọi tool 'view_file' / 'read_file' / 'Read' trên ít nhất {req_count - len(inspected_imgs)} file ảnh ({', '.join(must_view)}) để kiểm tra trực quan bố cục & hiển thị, sau đó mới chạy lại lệnh 'orca orchestration send'!"
+        # 2b. [ORCA QA EVIDENCE LEDGER & MERGE ANCESTRY GUARD] (FIX-02, FIX-04, FIX-07, FIX-09)
+        if is_qa_slot:
+            ledger_or_ancestry_err = _verify_qa_evidence_ledger_and_ancestry(
+                real_cwd, no_heredoc, expanded_cmd, cwd_slot, dispatch_start_epoch
             )
+            if ledger_or_ancestry_err:
+                return ledger_or_ancestry_err
 
-    return ""
+        # 3 & 4. [ORCA VISUAL BLANK-SCREEN GUARD] & [ORCA MULTIMODAL VISUAL INSPECTION GUARD] (FIX-05)
+        valid_screenshots: list[str] = []
+        for img_p in sorted(recent_images):
+            low_img = img_p.lower()
+            if low_img.endswith(".png"):
+                uni_res = _check_png_uniformity(img_p)
+                if uni_res is not None:
+                    uni_ratio, w_px, h_px = uni_res
+                    if w_px >= 150 and h_px >= 150:
+                        valid_screenshots.append(img_p)
+                        if uni_ratio >= 0.92:
+                            rel_p = os.path.relpath(img_p, real_cwd)
+                            return (
+                                f"[ORCA VISUAL BLANK-SCREEN GUARD] Ảnh chụp màn hình '{rel_p}' ({w_px}x{h_px}px) vừa tạo có tới {uni_ratio * 100:.1f}% số dòng điểm ảnh đồng nhất (màn hình đen / trắng rỗng / sụp đổ layout)! "
+                                f"CẤM gửi báo cáo PASS / UI Ready khi ảnh screenshot thực tế bị đen hoặc trống rỗng. "
+                                f"Cách sửa bắt buộc: Dùng tool 'view_file' / 'read_file' / 'Read' để xem trực tiếp '{img_p}', kiểm tra lỗi render/layout và sửa lại UI hoặc báo cáo 'QA_VERDICT: FAIL'!"
+                            )
+            else:
+                try:
+                    if os.path.getsize(img_p) >= 1024:
+                        valid_screenshots.append(img_p)
+                except OSError:
+                    pass
+
+        if valid_screenshots:
+            inspected_map: dict[str, float] = {}
+            cache_p = _visual_inspection_cache_path()
+            if os.path.isfile(cache_p):
+                try:
+                    with open(cache_p, "r", encoding="utf-8") as cf:
+                        loaded = json.load(cf)
+                    if isinstance(loaded, dict):
+                        inspected_map = {str(k): float(v) for k, v in loaded.items() if isinstance(v, (int, float))}
+                except Exception:
+                    inspected_map = {}
+
+            def _was_inspected(p: str) -> bool:
+                rp = os.path.realpath(p)
+                bp = os.path.basename(rp)
+                min_ts = max(cutoff_ts - 120.0, os.path.getmtime(p) - 5.0)
+                return (
+                    inspected_map.get(rp, 0.0) >= min_ts
+                    or inspected_map.get(p, 0.0) >= min_ts
+                    or inspected_map.get(bp, 0.0) >= min_ts
+                )
+
+            inspected_imgs = [p for p in valid_screenshots if _was_inspected(p)]
+            req_count = min(2, len(valid_screenshots))
+            if len(inspected_imgs) < req_count:
+                must_view = [os.path.relpath(p, real_cwd) for p in valid_screenshots if not _was_inspected(p)][:3]
+                return (
+                    f"[ORCA MULTIMODAL VISUAL INSPECTION GUARD] Bạn vừa tạo/cập nhật {len(valid_screenshots)} ảnh chụp màn hình trong phiên này nhưng mới mở xem {len(inspected_imgs)}/{req_count} ảnh tối thiểu bằng mắt thần Multimodal ('view_file' / 'read_file' / 'Read')! "
+                    f"CẤM báo cáo PASS / UI Ready nếu chỉ chạy script tự động mà không mở xem trực tiếp file ảnh chụp màn hình. "
+                    f"Cách sửa bắt buộc ngay lúc này: Gọi tool 'view_file' / 'read_file' / 'Read' trên ít nhất {req_count - len(inspected_imgs)} file ảnh ({', '.join(must_view)}) để kiểm tra trực quan bố cục & hiển thị, sau đó mới chạy lại lệnh 'orca orchestration send'!"
+                )
+
+        return ""
+    except Exception as exc:
+        # FIX-01: Slot-aware Fail-Closed exception handling
+        is_qa_or_ui = bool(
+            (cwd_slot and (cwd_slot.startswith("qa-worker") or cwd_slot.startswith("ui-worker")))
+            or re.search(r"\b(?:QA_VERDICT\s*:\s*PASS|QA_FINAL|UI\s+Ready|UI_READY|Worker\s+Done:\s*(?:qa|ui)-worker)\b", cmd or "", re.IGNORECASE)
+        )
+        if is_qa_or_ui:
+            return (
+                f"[ORCA FAIL-CLOSED GUARD] Lỗi nội bộ trong guard khi xác minh bằng chứng cho slot '{cwd_slot or 'qa/ui'}' ({exc}). "
+                f"Thực thi Fail-Closed: CẤM cho qua báo cáo hoàn tất khi guard gặp ngoại lệ!"
+            )
+        return ""
 
 
 def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict, args: dict) -> str:
@@ -4745,7 +5491,23 @@ def main() -> None:
         if not is_antigravity_hook:
             allow_out = "{}\n"
 
+        tc = payload.get("toolCall") or payload.get("tool_call") or {}
+        tool_name, args, cmd = _extract_normalized_tool_call(payload)
+        _, _, caller_slot = _detect_caller_slot_safe(payload, args, cmd)
+        guard_mode = _get_guard_mode()
+        if guard_mode == "off":
+            sys.stdout.write(allow_out)
+            sys.stdout.flush()
+            return
+
+        if os.environ.get("ORCA_GUARD_FORCE_RAISE", "").strip() == "1":
+            raise RuntimeError("Simulated guard internal exception (ORCA_GUARD_FORCE_RAISE=1)")
+
         def _deny_json(reason_msg: str) -> str:
+            if guard_mode == "shadow":
+                _log_guard_decision("would_block", reason_msg, cmd, caller_slot)
+                return allow_out
+            _log_guard_decision("block", reason_msg, cmd, caller_slot)
             if not is_antigravity_hook:
                 hook_ev_name = "BeforeTool" if is_gemini_cli_hook else "PreToolUse"
                 return (
@@ -4765,9 +5527,6 @@ def main() -> None:
                     + "\n"
                 )
             return json.dumps({"decision": "deny", "reason": reason_msg}) + "\n"
-
-        tc = payload.get("toolCall") or payload.get("tool_call") or {}
-        tool_name, args, cmd = _extract_normalized_tool_call(payload)
 
         _ensure_child_worktree_hygiene(payload, args)
         _ensure_watcher_for_payload(payload, event, cmd)
@@ -4966,7 +5725,32 @@ def main() -> None:
 
         sys.stdout.write(allow_out)
         sys.stdout.flush()
-    except Exception:
+    except Exception as exc:
+        # FIX-01: Slot-aware Fail-Closed exception handling in main()
+        try:
+            p_fb = payload if "payload" in locals() and isinstance(payload, dict) else {}
+            a_fb = args if "args" in locals() and isinstance(args, dict) else {}
+            c_fb = cmd if "cmd" in locals() and isinstance(cmd, str) else ""
+            _, _, s_fb = _detect_caller_slot_safe(p_fb, a_fb, c_fb)
+            is_qa_ui_fb = bool(
+                (s_fb and (s_fb.startswith("qa-worker") or s_fb.startswith("ui-worker")))
+                or re.search(r"\b(?:QA_VERDICT\s*:\s*PASS|QA_FINAL|UI\s+Ready|UI_READY|Worker\s+Done:\s*(?:qa|ui)-worker)\b", c_fb, re.IGNORECASE)
+            )
+            if is_qa_ui_fb and _get_guard_mode() != "off":
+                fc_msg = (
+                    f"[ORCA FAIL-CLOSED GUARD] Lỗi nội bộ trong guard khi xác minh bằng chứng cho slot '{s_fb or 'qa/ui'}' ({exc}). "
+                    f"Thực thi Fail-Closed: CẤM cho qua báo cáo hoàn tất khi guard gặp ngoại lệ!"
+                )
+                if _get_guard_mode() == "shadow":
+                    _log_guard_decision("would_block", fc_msg, c_fb, s_fb)
+                    sys.stdout.write(allow_out)
+                else:
+                    _log_guard_decision("block", fc_msg, c_fb, s_fb)
+                    sys.stdout.write(json.dumps({"decision": "deny", "reason": fc_msg}) + "\n")
+                sys.stdout.flush()
+                return
+        except Exception:
+            pass
         sys.stdout.write(allow_out)
         sys.stdout.flush()
 
