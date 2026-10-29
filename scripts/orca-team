@@ -5535,6 +5535,9 @@ def cmd_plan(args: list, caller_dir: Path = None):
             draft_contracts_file = run_dir / "plan-draft.contracts.json"
             draft_file.write_text(formatted_plan, encoding="utf-8")
             draft_contracts_file.write_text(json.dumps(contracts_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            hist_dir = run_dir / "plan-history"
+            hist_dir.mkdir(parents=True, exist_ok=True)
+            (hist_dir / f"{computed_hash.split(':', 1)[-1]}.md").write_text(formatted_plan, encoding="utf-8")
             _sync_orca_runs_into_child_worktrees(main_root)
             if as_json:
                 print(
@@ -5722,6 +5725,22 @@ def cmd_plan(args: list, caller_dir: Path = None):
                         "ok": False,
                         "error": "plan_hash_mismatch",
                         "message": f"[ORCA PLAN BINDING GUARD] Plan đã đổi sau khi duyệt: duyệt {expected_h}, hiện {actual_h}. Chạy lại critic.",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            sys.exit(2)
+
+        h_hex = expected_h.split(":", 1)[-1]
+        hist_file = run_dir / "plan-history" / f"{h_hex}.md"
+        if not hist_file.is_file():
+            _append_critic_audit({"ok": False, "error": "missing_plan_draft_history", "planHash": expected_h})
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "missing_plan_draft_history",
+                        "message": f"[ORCA PLAN BINDING GUARD] Thiếu bản ghi lịch sử kế hoạch ('plan-history/{h_hex}.md') cho Run '{resolved_run}'! Run chưa từng được tạo qua 'orca-team plan draft'.",
                     },
                     ensure_ascii=False,
                 )

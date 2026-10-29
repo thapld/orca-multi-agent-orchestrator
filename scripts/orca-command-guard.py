@@ -3070,9 +3070,31 @@ def _check_critic_bash_readonly_guard(cmd: str, no_heredoc: str, cwd_slot: str) 
     return ""
 
 
+def _is_official_orca_trusted_path(cand_p: str) -> bool:
+    try:
+        norm = os.path.realpath(cand_p)
+        # Never exempt any path under /tmp, /var, /private
+        if norm.startswith(("/tmp/", "/var/", "/private/var/", "/private/tmp/")):
+            return False
+        st = os.stat(norm)
+        if st.st_uid != os.getuid():
+            return False
+        trusted_dirs = (
+            os.path.realpath(os.path.expanduser("~/.orca/orca-multi-agent-orchestrator")) + os.sep,
+            os.path.realpath("/Users/macbook/work/tools/orca-multi-agent-orchestrator") + os.sep,
+            os.path.realpath("/Users/macbook/work/tools/orca-sim/bin") + os.sep,
+            os.path.realpath("/Users/macbook/work/tools/orca-sim/tests") + os.sep,
+        )
+        if any(norm.startswith(td) for td in trusted_dirs):
+            return True
+        return norm == os.path.realpath("/Users/macbook/work/tools/orca-sim/run-tests.sh")
+    except Exception:
+        return False
+
+
 def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> str:
     """
-    C-FIX-35..C-FIX-37: Best-effort Bash-hook defense blocking direct SQLite CLI / script mutations
+    C-FIX-35..C-FIX-38: Best-effort Bash-hook defense blocking direct SQLite CLI / script mutations
     against orchestration databases (`orchestration.db`, `messages`, `question_threads`, `orca_policy_anchors`).
     Note: Same-UID lexical/hook filtering is best-effort and cannot replace an out-of-process / separate-UID DB daemon.
     """
@@ -3081,6 +3103,20 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         r"\b(?:orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages)\b",
         re.IGNORECASE,
     )
+    # C-FIX-38: Detect base64 encoded strings in cmd decoding to sqlite3 or DB tables
+    import base64
+    for m_b64 in re.finditer(r"\b([A-Za-z0-9+/]{4,}={0,2})\b", cmd):
+        b64_cand = m_b64.group(1)
+        if len(b64_cand) % 4 == 0:
+            try:
+                dec_b = base64.b64decode(b64_cand)
+                if re.search(rb"sqlite3|orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages", dec_b, re.IGNORECASE):
+                    return (
+                        "[ORCA DB-INTEGRITY GUARD] CẤM giải mã base64 chứa chuỗi sqlite3/cơ sở dữ liệu điều phối trong lệnh Bash!"
+                    )
+            except Exception:
+                pass
+
     if re.search(r"\bsqlite3\b", no_heredoc, re.IGNORECASE):
         return (
             "[ORCA DB-INTEGRITY GUARD] CẤM gọi trực tiếp sqlite3 CLI hoặc thư viện sqlite3 qua Bash "
@@ -3110,30 +3146,38 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             cand_p = os.path.expanduser(tok_s)
             if not os.path.isabs(cand_p) and real_cwd:
                 cand_p = os.path.join(real_cwd, cand_p)
-            norm_cand = os.path.realpath(cand_p) if os.path.exists(cand_p) else cand_p
-            base_cand = os.path.basename(norm_cand)
-            if (
-                "/orca-multi-agent-orchestrator/" in norm_cand
-                or "/orca-sim/bin/" in norm_cand
-                or "/orca-sim/tests/" in norm_cand
-                or base_cand in ("orca-team", "orca-command-guard.py", "orca_critic_gate.py", "run-tests.sh")
-            ):
+            if not os.path.isfile(cand_p):
                 continue
-            if os.path.isfile(cand_p):
-                try:
-                    if os.path.getsize(cand_p) <= 16 * 1024 * 1024:
-                        scr_txt = open(cand_p, "r", encoding="utf-8", errors="ignore").read()
-                        if (
-                            re.search(r"sqlite3", scr_txt, re.IGNORECASE)
-                            or orch_tbl_re.search(scr_txt)
-                            or (sql_dml_re.search(scr_txt) and re.search(r"\b(?:execute|executemany|executescript|connect)\b", scr_txt))
-                        ):
-                            return (
-                                f"[ORCA DB-INTEGRITY GUARD] CẤM chạy script/file '{tok_s}' có chứa tham chiếu "
-                                "sqlite3 hoặc cơ sở dữ liệu điều phối (orchestration.db)!"
-                            )
-                except Exception:
-                    pass
+            if _is_official_orca_trusted_path(cand_p):
+                continue
+            try:
+                if os.path.getsize(cand_p) <= 16 * 1024 * 1024:
+                    scr_txt = open(cand_p, "r", encoding="utf-8", errors="ignore").read()
+                    has_b64_db = False
+                    for m_fb64 in re.finditer(r"['\"]([A-Za-z0-9+/]{4,}={0,2})['\"]", scr_txt):
+                        try:
+                            fdec = base64.b64decode(m_fb64.group(1))
+                            if re.search(rb"sqlite3|orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|messages", fdec, re.IGNORECASE):
+                                has_b64_db = True
+                                break
+                        except Exception:
+                            pass
+                    if (
+                        has_b64_db
+                        or re.search(r"sqlite3", scr_txt, re.IGNORECASE)
+                        or orch_tbl_re.search(scr_txt)
+                        or re.search(r"\b(?:CRITIC_CHALLENGE|CRITIC_VERDICT)\b", scr_txt)
+                        or re.search(r"__import__\s*\(\s*['\"]sql['\"]\s*\+\s*['\"]ite3['\"]", scr_txt)
+                        or re.search(r"['\"]mes['\"]\s*\+\s*['\"]sages['\"]|['\"]question_['\"]\s*\+\s*['\"]threads['\"]", scr_txt)
+                        or (re.search(r"\bconnect\b", scr_txt) and re.search(r"\bexecute\b", scr_txt))
+                        or (sql_dml_re.search(scr_txt) and re.search(r"\b(?:execute|executemany|executescript|connect)\b", scr_txt))
+                    ):
+                        return (
+                            f"[ORCA DB-INTEGRITY GUARD] CẤM chạy script/file '{tok_s}' có chứa tham chiếu "
+                            "sqlite3 hoặc cơ sở dữ liệu điều phối (orchestration.db)!"
+                        )
+            except Exception:
+                pass
     return ""
 
 
@@ -3776,6 +3820,15 @@ def _check_critic_two_way_debate_and_question_guards(
                         cons_obj = json.loads(open(cons_p, "r", encoding="utf-8", errors="ignore").read())
                     except Exception:
                         cons_obj = None
+
+                    h_hex_pin = str((cons_obj or {}).get("planHash") or "").split(":", 1)[-1]
+                    hist_p = os.path.join(pin_run_dir, "plan-history", f"{h_hex_pin}.md") if pin_run_dir and h_hex_pin else ""
+                    if not (hist_p and os.path.isfile(hist_p)):
+                        return _handle_critic_gate_violation(
+                            f"[ORCA PLAN BINDING GUARD] Thiếu bản ghi lịch sử kế hoạch ('plan-history/{h_hex_pin}.md') cho Run '{explicit_run_id}'! Run chưa từng được tạo qua 'orca-team plan draft'.",
+                            explicit_run_id,
+                            cmd,
+                        )
 
                     for p_txt in plan_candidates:
                         for c_dict in all_contracts_objs:
@@ -5264,6 +5317,8 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 green_dirty = bool(green_r.get("dirty"))
                 has_code_progression = False
                 hermetic_red_passed_sha = ""
+                hermetic_green_failed_sha = ""
+                hermetic_green_exit = 1
                 red_reverify_cmds = [toks for k, toks in canonical_cmds if k == "test"]
                 for rr in red_rows:
                     r_sha = str(rr.get("head_sha") or "").strip().lower()
@@ -5284,46 +5339,69 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     if _has_substantive_source_diff(r_sha, green_sha, ln)
                                 ]
                                 if src_changed:
-                                    # C-FIX-37: Hermetic RED Re-Verification — extract r_sha into an isolated temp dir
-                                    # and run the canonical test command. If r_sha exits 0 (PASS) now, the RED->GREEN
-                                    # transition was driven by external state outside git rather than the code diff!
-                                    red_still_fails = True
-                                    if red_reverify_cmds:
-                                        import tempfile
-                                        with tempfile.TemporaryDirectory(prefix="orca-red-reverify-") as tmp_red_dir:
-                                            arch_p = subprocess.run(
-                                                ["git", "-C", real_cwd, "archive", r_sha],
+                                    # C-FIX-38: Hermetic RED & GREEN Re-Verification (Fail-Closed)
+                                    # Both r_sha and green_sha are extracted to clean tempdirs via git archive.
+                                    # Invariants:
+                                    # 1. Tests on r_sha MUST FAIL (exit_code != 0)
+                                    # 2. Tests on green_sha MUST PASS (exit_code == 0)
+                                    # 3. Fail-Closed on archive error, tar error, or execution exception/timeout.
+                                    if not red_reverify_cmds:
+                                        return (
+                                            "[ORCA TDD-PROGRESSION GUARD] Không tìm thấy lệnh kiểm thử chuẩn để thực hiện Hermetic Re-Verification! "
+                                            "Thực thi Fail-Closed."
+                                        )
+                                    import tempfile
+                                    with tempfile.TemporaryDirectory(prefix="orca-red-reverify-") as tmp_red_dir, tempfile.TemporaryDirectory(prefix="orca-green-reverify-") as tmp_green_dir:
+                                        arch_red = subprocess.run(["git", "-C", real_cwd, "archive", r_sha], capture_output=True, timeout=15)
+                                        if arch_red.returncode != 0 or not arch_red.stdout:
+                                            return f"[ORCA TDD-PROGRESSION GUARD] Không thể trích xuất git archive tại commit pha RED ({r_sha[:12]})! Thực thi Fail-Closed."
+                                        tar_red = subprocess.run(["tar", "-x", "-C", tmp_red_dir], input=arch_red.stdout, capture_output=True, timeout=15)
+                                        if tar_red.returncode != 0:
+                                            return f"[ORCA TDD-PROGRESSION GUARD] Lỗi giải nén git archive tại commit pha RED ({r_sha[:12]})! Thực thi Fail-Closed."
+
+                                        arch_green = subprocess.run(["git", "-C", real_cwd, "archive", green_sha], capture_output=True, timeout=15)
+                                        if arch_green.returncode != 0 or not arch_green.stdout:
+                                            return f"[ORCA TDD-PROGRESSION GUARD] Không thể trích xuất git archive tại commit pha GREEN ({green_sha[:12]})! Thực thi Fail-Closed."
+                                        tar_green = subprocess.run(["tar", "-x", "-C", tmp_green_dir], input=arch_green.stdout, capture_output=True, timeout=15)
+                                        if tar_green.returncode != 0:
+                                            return f"[ORCA TDD-PROGRESSION GUARD] Lỗi giải nén git archive tại commit pha GREEN ({green_sha[:12]})! Thực thi Fail-Closed."
+
+                                        hermetic_pair_ok = True
+                                        for r_toks in red_reverify_cmds:
+                                            rv_red = subprocess.run(
+                                                list(r_toks),
+                                                cwd=tmp_red_dir,
+                                                shell=False,
                                                 capture_output=True,
-                                                timeout=15,
+                                                text=True,
+                                                timeout=120,
+                                                env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
                                             )
-                                            if arch_p.returncode == 0 and arch_p.stdout:
-                                                tar_p = subprocess.run(
-                                                    ["tar", "-x", "-C", tmp_red_dir],
-                                                    input=arch_p.stdout,
-                                                    capture_output=True,
-                                                    timeout=15,
-                                                )
-                                                if tar_p.returncode == 0:
-                                                    for r_toks in red_reverify_cmds:
-                                                        rv_p = subprocess.run(
-                                                            list(r_toks),
-                                                            cwd=tmp_red_dir,
-                                                            shell=False,
-                                                            capture_output=True,
-                                                            text=True,
-                                                            timeout=120,
-                                                            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
-                                                        )
-                                                        if rv_p.returncode == 0:
-                                                            red_still_fails = False
-                                                            hermetic_red_passed_sha = r_sha
-                                                            break
-                                    if red_still_fails:
-                                        has_code_progression = True
-                                        break
-                        except Exception:
-                            has_code_progression = True
-                            break
+                                            if rv_red.returncode == 0:
+                                                hermetic_red_passed_sha = r_sha
+                                                hermetic_pair_ok = False
+                                                break
+
+                                            rv_green = subprocess.run(
+                                                list(r_toks),
+                                                cwd=tmp_green_dir,
+                                                shell=False,
+                                                capture_output=True,
+                                                text=True,
+                                                timeout=120,
+                                                env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+                                            )
+                                            if rv_green.returncode != 0:
+                                                hermetic_green_failed_sha = green_sha
+                                                hermetic_green_exit = rv_green.returncode
+                                                hermetic_pair_ok = False
+                                                break
+
+                                        if hermetic_pair_ok:
+                                            has_code_progression = True
+                                            break
+                        except Exception as exc:
+                            return f"[ORCA TDD-PROGRESSION GUARD] Lỗi ngoại lệ trong quá trình kiểm thử TDD cô lập ({exc})! Thực thi Fail-Closed."
                 if not has_code_progression:
                     if hermetic_red_passed_sha:
                         return (
@@ -5331,6 +5409,12 @@ def _verify_qa_evidence_ledger_and_ancestry(
                             f"(head_sha='{hermetic_red_passed_sha[:12]}') trong thư mục cô lập lại PASS (exit_code=0)! "
                             "Bằng chứng RED trong ledger không tái lập được từ cây git (bài kiểm thử phụ thuộc trạng thái ngoại lai ngoài git, "
                             "thay đổi code giữa RED và GREEN không phải nguyên nhân làm test chuyển xanh)."
+                        )
+                    if hermetic_green_failed_sha:
+                        return (
+                            f"[ORCA TDD-PROGRESSION GUARD] Chạy lại bộ kiểm thử chuẩn tại commit pha GREEN "
+                            f"(head_sha='{hermetic_green_failed_sha[:12]}') trong thư mục cô lập lại THẤT BẠI (exit_code={hermetic_green_exit})! "
+                            "Bài kiểm thử chỉ chạy xanh nhờ file/trạng thái ngoại lai ngoài git trong worktree nhưng thất bại khi chạy trên mã nguồn git sạch đã commit."
                         )
                     return (
                         f"[ORCA TDD-PROGRESSION GUARD] Chuỗi TDD RED→GREEN của '{key}' không có thay đổi mã nguồn thực chất "
