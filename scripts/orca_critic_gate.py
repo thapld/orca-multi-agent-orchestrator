@@ -974,6 +974,28 @@ def verify_policy_anchor_hmac(anchor: dict[str, Any], secret: bytes) -> bool:
     return hmac.compare_digest(sig, expected)
 
 
+def compute_baseline_test_files(repo_dir: Path | str | None) -> dict[str, str]:
+    """
+    C-FIX-13 & C-FIX-27: Compute SHA-256 map `{rel_path: sha256:<hex>}` for all test files
+    and runner manifests in `repo_dir` (`baselineTestFiles`).
+    """
+    if not repo_dir:
+        return {}
+    root = Path(repo_dir).resolve()
+    if not root.is_dir():
+        return {}
+    _, matched_files = compute_test_tree_hash(root)
+    out: dict[str, str] = {}
+    for rel_p in matched_files:
+        fp = root / rel_p
+        try:
+            raw_b = fp.read_bytes()
+        except Exception:
+            raw_b = b""
+        out[rel_p] = f"sha256:{hashlib.sha256(raw_b).hexdigest()}"
+    return out
+
+
 def write_pinned_policy_anchor(
     ev_base_dir: Path | str,
     run_id: str,
@@ -981,10 +1003,14 @@ def write_pinned_policy_anchor(
     canonical_cmds: list[tuple[str, list[str]]],
     item_test_patterns: dict[str, str],
     test_allowlist: list[str] | None = None,
+    worktree_dir: Path | str | None = None,
+    run_dir: Path | str | None = None,
 ) -> tuple[Path | None, str]:
     """
-    C-FIX-27: Write 0600 HMAC-signed policy anchor outside the worktree at `<ev_base_dir>/<run_id>/.policy_anchor.json`
-    so agent edits to `contracts.json` or `orca-team.json` cannot alter the canonical test command or test patterns.
+    C-FIX-13 & C-FIX-27: Write 0600 HMAC-signed policy anchor outside the worktree at
+    `<ev_base_dir>/<run_id>/.policy_anchor.json` AND write `.orca/acceptance-manifest.json`
+    (`acceptanceCommands`, `baselineTestFiles`, `manifestSha256`) so agent edits to
+    `contracts.json` or `orca-team.json` cannot alter the canonical test command or test patterns.
     """
     secret, err = get_or_create_hmac_secret(ev_base_dir, create_if_missing=True)
     if err or not secret:
@@ -1000,20 +1026,49 @@ def write_pinned_policy_anchor(
         }
         for k, toks in canonical_cmds
     ]
+    baseline_files = compute_baseline_test_files(worktree_dir)
+    manifest_core = {
+        "runId": run_id,
+        "planHash": plan_hash_val,
+        "acceptanceCommands": cmds_norm,
+        "itemTestPatterns": dict(sorted((item_test_patterns or {}).items())),
+        "testAllowlist": sorted(set(test_allowlist or [])),
+        "baselineTestFiles": baseline_files,
+    }
+    manifest_sha256 = "sha256:" + hashlib.sha256(
+        json.dumps(manifest_core, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     anchor_obj: dict[str, Any] = {
         "schema": "orca.policy.anchor/v1",
         "runId": run_id,
         "planHash": plan_hash_val,
         "canonicalCommands": cmds_norm,
+        "acceptanceCommands": cmds_norm,
         "itemTestPatterns": dict(sorted((item_test_patterns or {}).items())),
         "testAllowlist": sorted(set(test_allowlist or [])),
+        "baselineTestFiles": baseline_files,
+        "manifestSha256": manifest_sha256,
     }
     anchor_obj["anchor_hmac"] = compute_policy_anchor_hmac(anchor_obj, secret)
     fd = os.open(str(anchor_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as af:
         af.write(json.dumps(anchor_obj, ensure_ascii=False, indent=2) + "\n")
     os.chmod(str(anchor_path), 0o600)
-    return anchor_path, ""
+
+    # Also write `.orca/acceptance-manifest.json` in worktree_dir and run_dir if provided
+    manifest_text = json.dumps(anchor_obj, ensure_ascii=False, indent=2) + "\n"
+    for target_base in (worktree_dir, run_dir):
+        if not target_base:
+            continue
+        try:
+            tb = Path(target_base)
+            m_path = (tb / ".orca" / "acceptance-manifest.json") if (tb / ".orca").is_dir() or tb.name != run_id else (tb / "acceptance-manifest.json")
+            m_path.parent.mkdir(parents=True, exist_ok=True)
+            m_path.write_text(manifest_text, encoding="utf-8")
+        except Exception:
+            pass
+
+    return anchor_path, manifest_sha256
 
 
 def load_pinned_policy_anchor(ev_base_dir: Path | str, run_id: str) -> tuple[dict[str, Any] | None, str]:

@@ -5610,11 +5610,7 @@ def cmd_plan(args: list, caller_dir: Path = None):
         h_hex = computed_hash.split(":", 1)[-1]
         (hist_dir / f"{h_hex}.md").write_text(formatted_plan, encoding="utf-8")
 
-        (run_dir / "contracts.json").write_text(
-            json.dumps(contracts_payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        # C-FIX-27: Write 0600 HMAC-signed policy anchor outside the worktree at plan pin
+        # C-FIX-13 & C-FIX-27: Write 0600 HMAC-signed policy anchor outside the worktree + .orca/acceptance-manifest.json at plan pin
         try:
             ev_base_pin = Path(os.environ.get("ORCA_EVIDENCE_DIR", "").strip() or str(Path.home() / ".orca" / "evidence"))
             pin_patterns = {
@@ -5622,16 +5618,30 @@ def cmd_plan(args: list, caller_dir: Path = None):
                 for it in items_v2
                 if isinstance(it, dict) and it.get("id") and isinstance(it.get("verify"), dict)
             }
-            cg.write_pinned_policy_anchor(
+            pin_gates = resolved_gates or [("test", canon_test_toks)]
+            _, manifest_sha = cg.write_pinned_policy_anchor(
                 ev_base_pin,
                 resolved_run,
                 computed_hash,
-                resolved_gates or [("test", canon_test_toks)],
+                pin_gates,
                 pin_patterns,
                 contracts_payload.get("test_allowlist") or [],
+                worktree_dir=main_root,
+                run_dir=run_dir,
             )
+            if manifest_sha and manifest_sha.startswith("sha256:"):
+                contracts_payload["manifestSha256"] = manifest_sha
+                contracts_payload["acceptanceCommands"] = [
+                    {"kind": k, "cmd": cg.normalize_cmd_tokens(toks), "cmd_hash": cg.canonical_cmd_hash(toks)}
+                    for k, toks in pin_gates
+                ]
+                contracts_payload["baselineTestFiles"] = cg.compute_baseline_test_files(main_root)
         except Exception:
             pass
+        (run_dir / "contracts.json").write_text(
+            json.dumps(contracts_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         if "--contracts" in raw_list:
             docs_c_dir = main_root / "docs" / "orca-contracts"
             docs_c_dir.mkdir(parents=True, exist_ok=True)
@@ -5732,21 +5742,21 @@ def cmd_plan(args: list, caller_dir: Path = None):
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
             conn.row_factory = sqlite3.Row
             dc_rows = conn.execute(
-                "SELECT dc.id AS did, dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id, t.spec "
+                "SELECT dc.id AS did, dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id, t.task_title, t.spec "
                 "FROM dispatch_contexts dc "
                 "INNER JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
                 "LEFT JOIN tasks t ON t.id = dc.task_id "
                 "WHERE dc.run_id = ? ORDER BY dc.created_at DESC",
                 (resolved_run,),
             ).fetchall()
-            # C-FIX-21: Never hardcode 'critic-worker'; bind strictly to worker_dispatches.agent_terminal_handle
-            # whose worktree_id contains 'critic' for this run.
+            # C-FIX-21: Never hardcode 'critic-worker' or infer from worktree_id substring;
+            # bind strictly to task role in DB (_infer_task_role_prefix == 'critic') + worker_dispatches.agent_terminal_handle
             critic_dids: list[str] = []
             critic_handles: set[str] = set()
             for r in dc_rows:
-                wt_id = str(r["worktree_id"] or "")
+                t_role = _infer_task_role_prefix(str(r["task_title"] or ""), str(r["spec"] or ""))
                 t_h = str(r["agent_terminal_handle"] or "").strip()
-                if "critic" in wt_id.lower() and t_h:
+                if t_role == "critic" and t_h:
                     critic_dids.append(str(r["did"]))
                     critic_handles.add(t_h)
 

@@ -3705,7 +3705,7 @@ def _check_critic_two_way_debate_and_question_guards(
                     critic_handles_db: set[str] = set()
                     if explicit_run_id:
                         dc_c_rows = conn.execute(
-                            "SELECT dc.id, dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id, t.spec "
+                            "SELECT dc.id, dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id, t.task_title, t.spec "
                             "FROM dispatch_contexts dc "
                             "INNER JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
                             "LEFT JOIN tasks t ON t.id = dc.task_id "
@@ -3713,9 +3713,15 @@ def _check_critic_two_way_debate_and_question_guards(
                             (explicit_run_id,),
                         ).fetchall()
                         for r_c in dc_c_rows:
-                            wt_id = str(r_c["worktree_id"] or "")
+                            t_spec_up = str(r_c["spec"] or "").upper()
+                            t_title_low = str(r_c["task_title"] or "").strip().lower()
+                            is_critic_role = (
+                                "[ROLE: PRINCIPAL RESEARCH" in t_spec_up
+                                or "ADVERSARIAL CRITIC" in t_spec_up
+                                or bool(re.match(r"^(?:t-)?critic(?:[-_\s\d:]|$)", t_title_low))
+                            )
                             t_h = str(r_c["agent_terminal_handle"] or "").strip()
-                            if "critic" in wt_id.lower() and t_h:
+                            if is_critic_role and t_h:
                                 critic_dids_db.add(str(r_c["id"]))
                                 critic_handles_db.add(t_h)
 
@@ -5010,7 +5016,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
         return anchor_err
 
     if isinstance(policy_anchor, dict):
-        anchor_cmds = policy_anchor.get("canonicalCommands") or []
+        anchor_cmds = policy_anchor.get("acceptanceCommands") or policy_anchor.get("canonicalCommands") or []
         canonical_cmds = [
             (str(ac.get("kind") or "test"), [str(x) for x in (ac.get("cmd") or [])])
             for ac in anchor_cmds
@@ -5021,6 +5027,22 @@ def _verify_qa_evidence_ledger_and_ancestry(
             for pk, pat_v in anchor_pats.items():
                 if isinstance(pat_v, str) and pat_v.strip():
                     item_test_patterns[str(pk)] = pat_v.strip()
+        anchor_msha = str(policy_anchor.get("manifestSha256") or "").strip()
+        if isinstance(c_obj, dict) and c_obj.get("manifestSha256") and anchor_msha:
+            if str(c_obj.get("manifestSha256")).strip() != anchor_msha:
+                return (
+                    f"[ORCA POLICY-ANCHOR GUARD] manifestSha256 trong contracts.json ('{c_obj.get('manifestSha256')}') "
+                    f"không khớp với .policy_anchor.json / acceptance-manifest.json ('{anchor_msha}')!"
+                )
+        baseline_files = policy_anchor.get("baselineTestFiles")
+        if isinstance(baseline_files, dict) and baseline_files:
+            cur_baseline = cg.compute_baseline_test_files(real_cwd)
+            for b_rel, b_sha in baseline_files.items():
+                if b_rel not in test_allowlist and cur_baseline.get(b_rel) and cur_baseline.get(b_rel) != b_sha:
+                    return (
+                        f"[ORCA TEST-INTEGRITY GUARD] File kiểm thử/cấu hình gốc '{b_rel}' trong baselineTestFiles "
+                        f"đã bị sửa đổi sau khi pin ngoài test_allowlist!"
+                    )
     else:
         canonical_cmds = cg.resolve_canonical_gate_commands(
             real_cwd, project_root or real_cwd, contracts_obj=c_obj, cfg_obj=cfg_obj
