@@ -725,7 +725,7 @@ echo "PHẦN 3: QA & TEST ENGINEERS (Nhóm Kiểm thử chất lượng)"
 echo "Nhiệm vụ: Viết integration tests, kiểm tra edge cases và acceptance criteria (Auto-scale worktree)."
 choose_agent "QA & Testing" 5
 QA_AGENT="$SELECTED_AGENT"
-choose_model "$QA_AGENT" "QA & Testing" "medium" "tier3"
+choose_model "$QA_AGENT" "QA & Testing" "high" "tier3"
 QA_MODEL="$SELECTED_MODEL"
 QA_EFFORT="$SELECTED_EFFORT"
 choose_utilities "1,2,5"
@@ -784,7 +784,7 @@ ENABLE_UI="$TOGGLE_RESULT"
 if [[ "$ENABLE_UI" == true ]]; then
   choose_agent "UI/UX Specialist" 5
   UI_AGENT="$SELECTED_AGENT"
-  choose_model "$UI_AGENT" "UI/UX Specialist" "medium" "tier3"
+  choose_model "$UI_AGENT" "UI/UX Specialist" "high" "tier3"
   UI_MODEL="$SELECTED_MODEL"
   UI_EFFORT="$SELECTED_EFFORT"
 fi
@@ -955,6 +955,23 @@ if [[ "$ENABLE_RE" == true ]]; then
       fi
     done
   fi
+  for sk_item in "reverse-clone-website" "game-reverse-reconstruct" "impeccable" "design-taste-frontend"; do
+    src_sk_dir=""
+    for sr_root in "$HOME/.gemini/config/skills" "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.qoder/skills"; do
+      if [[ -f "$sr_root/$sk_item/SKILL.md" ]]; then
+        src_sk_dir="$sr_root/$sk_item"
+        break
+      fi
+    done
+    if [[ -n "$src_sk_dir" ]]; then
+      for dst_root in "$HOME/.gemini/config/skills" "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.qoder/skills"; do
+        if [[ ! -f "$dst_root/$sk_item/SKILL.md" ]]; then
+          mkdir -p "$dst_root"
+          cp -RL "$src_sk_dir" "$dst_root/$sk_item" 2>/dev/null || true
+        fi
+      done
+    fi
+  done
   rea_client="antigravity"
   case "${RE_AGENT:l}" in
     antigravity) rea_client="antigravity" ;;
@@ -1061,7 +1078,7 @@ cat > "$TARGET_CONFIG" << JSON
       "model": $(json_str_or_null "$RE_MODEL"),
       "effort": $(json_str_or_null "$RE_EFFORT"),
       "goalMode": $GOAL_MODE,
-      "utilities": ["git-worktrees", "orca-skills-registry", "reverse-engineer-anything"]
+      "utilities": ["git-worktrees", "orca-skills-registry", "reverse-engineer-anything", "reverse-clone-website", "game-reverse-reconstruct"]
     },
     "criticSpecialist": {
       "enabled": $ENABLE_CRITIC,

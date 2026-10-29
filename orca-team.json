@@ -108,7 +108,9 @@
       "utilities": [
         "git-worktrees",
         "orca-skills-registry",
-        "reverse-engineer-anything"
+        "reverse-engineer-anything",
+        "reverse-clone-website",
+        "game-reverse-reconstruct"
       ],
       "model": "gemini-4-argon-high",
       "effort": "high"

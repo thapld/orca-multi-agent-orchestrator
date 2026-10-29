@@ -26,7 +26,7 @@
 | **Issue Resolver** | `antigravity` (gemini-4-argon-high) | On-demand | Issue checkout (`--issue`), reproduction test & fix |
 | **DevOps Specialist** | `antigravity` (gemini-3.8-flash-high) | Auto-scale | Docker/K8s rollout, DB migrations, SSH worktrees |
 | **Bench & Perf Specialist** | `antigravity` (gemini-3.8-flash-high) | Auto-scale | Stress/Load test (RPS/EPS), p95/p99 latency, profiling |
-| **Reverse Eng (REA)** | `antigravity` (gemini-4-argon-high) | Auto-scale | Binary/Package/ASAR/Protocol decompile (`rea` skill) |
+| **Reverse Eng (REA)** | `antigravity` (gemini-4-argon-high) | Auto-scale | Binary/Package/Protocol/Web 1:1 decompile (`rea`, `reverse-clone-website`, `game-reverse-reconstruct`) |
 | **UI/UX Specialist** | `antigravity` (gemini-3.8-flash-medium) | Auto-scale | Design Mode (Click-to-code), responsive & a11y |
 | **Research & Critic** | `antigravity` (gemini-4-argon-high) | Auto-scale | Deep research, Devil's Advocate critique, root-cause consensus |
 

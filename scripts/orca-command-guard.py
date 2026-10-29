@@ -3112,6 +3112,411 @@ def _check_critic_two_way_debate_and_question_guards(
     return ""
 
 
+def _visual_inspection_cache_path() -> str:
+    return f"/tmp/orca-visual-inspected-{os.getuid()}.json"
+
+
+def _record_visual_image_inspection(payload: dict, args: dict, tool_name: str = "") -> None:
+    """Record when an Agent CLI calls `view_file` / `read_file` / `Read` on an image (`.png`, `.jpg`, `.jpeg`, `.webp`)."""
+    if not isinstance(args, dict):
+        return
+    raw_paths: list[str] = []
+    for k in ("Path", "AbsolutePath", "file_path", "filePath", "path", "image_path", "imagePath", "TargetFile"):
+        v = args.get(k)
+        if isinstance(v, str) and v.strip():
+            raw_paths.append(v.strip())
+    paths_arr = args.get("paths")
+    if isinstance(paths_arr, list):
+        for item in paths_arr:
+            if isinstance(item, str) and item.strip():
+                raw_paths.append(item.strip())
+    img_Exts = (".png", ".jpg", ".jpeg", ".webp")
+    cand_imgs = [p for p in raw_paths if p.lower().endswith(img_Exts)]
+    if not cand_imgs:
+        return
+    try:
+        _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
+        cache_p = _visual_inspection_cache_path()
+        data: dict[str, float] = {}
+        if os.path.isfile(cache_p):
+            try:
+                with open(cache_p, "r", encoding="utf-8") as cf:
+                    loaded = json.load(cf)
+                if isinstance(loaded, dict):
+                    data = {str(k): float(v) for k, v in loaded.items() if isinstance(v, (int, float))}
+            except Exception:
+                data = {}
+        now_ts = time.time()
+        cutoff = now_ts - 86400.0
+        data = {k: v for k, v in data.items() if v >= cutoff}
+        for raw_p in cand_imgs:
+            abs_p = raw_p if os.path.isabs(raw_p) else os.path.abspath(os.path.join(cwd or os.getcwd(), raw_p))
+            real_p = os.path.realpath(abs_p)
+            data[real_p] = now_ts
+            data[abs_p] = now_ts
+            data[os.path.basename(real_p)] = now_ts
+        tmp_p = f"{cache_p}.{os.getpid()}.tmp"
+        with open(tmp_p, "w", encoding="utf-8") as tf:
+            json.dump(data, tf)
+        os.replace(tmp_p, cache_p)
+    except Exception:
+        pass
+
+
+def _check_png_uniformity(path: str) -> tuple[float, int, int] | None:
+    """
+    Pure-Python fast PNG scanline uniformity detector (`struct` + `zlib`).
+    Returns `(uniform_row_ratio, width, height)` or `None` if not a standard 8-bit PNG.
+    Broken black/white/collapsed screenshots score `>= 0.92` (`92%+` uniform scanlines).
+    """
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) > 15 * 1024 * 1024:
+            return None
+        with open(path, "rb") as pf:
+            data = pf.read()
+        if data[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
+        pos = 8
+        w = h = bit_depth = color_type = 0
+        idat = bytearray()
+        n = len(data)
+        while pos + 8 <= n:
+            length = int.from_bytes(data[pos : pos + 4], "big")
+            ctype = data[pos + 4 : pos + 8]
+            chunk = data[pos + 8 : pos + 8 + length]
+            if ctype == b"IHDR" and len(chunk) >= 10:
+                w = int.from_bytes(chunk[0:4], "big")
+                h = int.from_bytes(chunk[4:8], "big")
+                bit_depth = chunk[8]
+                color_type = chunk[9]
+                if bit_depth != 8 or color_type not in (0, 2, 3, 4, 6) or w <= 0 or h <= 0:
+                    return None
+            elif ctype == b"IDAT":
+                idat.extend(chunk)
+            elif ctype == b"IEND":
+                break
+            pos += 12 + length
+        if not idat or w <= 0 or h <= 0:
+            return None
+        import zlib
+
+        raw = zlib.decompress(bytes(idat))
+        bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type, 4)
+        stride = 1 + w * bpp
+        if len(raw) < h * stride:
+            return None
+        zero_row = b"\x00" * (w * bpp)
+        uniform_rows = 0
+        for y in range(h):
+            r_start = y * stride
+            ftype = raw[r_start]
+            pixels = raw[r_start + 1 : r_start + stride]
+            if ftype == 0:
+                first_px = pixels[:bpp]
+                if pixels == first_px * w:
+                    uniform_rows += 1
+            elif ftype in (1, 2) and pixels == zero_row:
+                uniform_rows += 1
+        return (uniform_rows / float(h), w, h)
+    except Exception:
+        return None
+
+
+def _check_qa_and_ui_verification_guards(
+    cmd: str, sanitized_orch: str, payload: dict, args: dict
+) -> str:
+    """
+    Universal, project-agnostic QA & UI Evidence Guards (`[ORCA QA & UI EVIDENCE GUARD]`):
+    1. `[ORCA LOG-TRUNCATION GUARD]`: Block short `--since` (`--since 30s`, `--since 2m`, `--since 5m`) on `docker/kubectl logs` in QA/DevOps.
+    2. `[ORCA QA REPORT-VERDICT MISMATCH GUARD]`: Block `QA_VERDICT: PASS` / `worker_done --outcome succeeded` if any JSON test report modified in the workspace during the current dispatch has `verdict: FAIL` or `failed > 0`.
+    3. `[ORCA VISUAL BLANK-SCREEN GUARD]`: Block `QA_VERDICT: PASS` / `UI Ready` if any screenshot (`.png`) captured/modified during the dispatch has `>= 92%` uniform/blank scanlines.
+    4. `[ORCA MULTIMODAL VISUAL INSPECTION GUARD]`: Block `QA_VERDICT: PASS` / `UI Ready` if screenshots (`.png`/`.jpg`/`.webp`) were captured/modified during the dispatch without being opened via `view_file` / `read_file` / `Read`.
+    """
+    if not _is_orca_managed_project(payload, args):
+        return ""
+    raw_cwd_in = str(
+        args.get("Cwd")
+        or args.get("cwd")
+        or (payload.get("cwd") if isinstance(payload, dict) else "")
+        or ""
+    ).strip()
+    _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
+    real_cwd = os.path.realpath(cwd) if cwd else ""
+    cwd_slot = (
+        _extract_canonical_worker_slot(os.path.basename(raw_cwd_in.rstrip("/")))
+        or (_extract_canonical_worker_slot(os.path.basename(real_cwd)) if real_cwd else "")
+    )
+
+    # 1. [ORCA LOG-TRUNCATION GUARD]
+    if cwd_slot and (cwd_slot.startswith("qa-worker") or cwd_slot.startswith("devops-worker")):
+        if re.search(
+            r"\b(?:docker(?:\s+compose|-compose)?|kubectl)\s+logs\b[^\n;|&]*\s--since(?:\s+|=)['\"]?(?:[1-9]\d?\s*s|[12]\d\d\s*s|[1-5]\s*m)\b",
+            sanitized_orch,
+        ):
+            return (
+                "[ORCA LOG-TRUNCATION GUARD] CẤM dùng '--since <ngắn>' ('--since 30s' / '--since 2m' / '--since 5m') khi kiểm tra runtime logs trong QA/DevOps! "
+                "Cờ '--since' ngắn sẽ bỏ sót hoàn toàn các lỗi khởi tạo (startup/DI crash, schema/migration error) xảy ra lúc container vừa boot. "
+                "Cách sửa bắt buộc: Bỏ cờ '--since' và dùng 'docker compose logs --no-color --tail=300 <service>' (hoặc 'docker logs --tail 300 <container>') để quét toàn bộ lịch sử log từ lúc khởi động!"
+            )
+
+    if not re.search(r"\borca\s+orchestration\s+send\b", sanitized_orch):
+        return ""
+
+    no_heredoc = _strip_quoted_heredocs(cmd)
+    # Allow escalations, questions, P2P rejections (QA_REJECT/INCOMPLETE_PLAN/TEST_FAIL/SEC_BLOCK), or explicit FAIL verdicts through immediately
+    if (
+        re.search(r"--type(?:\s+|=)['\"]?(?:escalation|question)\b", no_heredoc)
+        or re.search(r"--outcome(?:\s+|=)['\"]?failed\b", no_heredoc)
+        or re.search(
+            r"\b(?:QA_VERDICT\s*:\s*FAIL|QA_REJECT|INCOMPLETE_PLAN|TEST_FAIL|SEC_BLOCK|SECURITY_VERDICT\s*:\s*BLOCK|PERF_VERDICT\s*:\s*BOTTLENECK_FOUND|BLOCKED_BY_UNKNOWN)\b",
+            cmd,
+            re.IGNORECASE,
+        )
+    ):
+        return ""
+
+    is_qa_slot = bool(
+        (cwd_slot and cwd_slot.startswith("qa-worker"))
+        or re.search(r"\b(?:QA_VERDICT\s*:\s*PASS|QA_FINAL|Worker\s+Done:\s*qa-worker)\b", cmd, re.IGNORECASE)
+    )
+    is_ui_slot = bool(
+        (cwd_slot and cwd_slot.startswith("ui-worker"))
+        or re.search(r"\b(?:UI\s+Ready|UI_READY|Worker\s+Done:\s*ui-worker)\b", cmd, re.IGNORECASE)
+    )
+    if not (is_qa_slot or is_ui_slot):
+        return ""
+
+    is_completion_send = bool(
+        re.search(r"--type(?:\s+|=)['\"]?(?:handoff|worker_done)\b", no_heredoc)
+        or re.search(r"\b(?:QA_VERDICT\s*:\s*PASS|QA_FINAL|UI\s+Ready|UI_READY)\b", cmd, re.IGNORECASE)
+    )
+    if not is_completion_send or not real_cwd or not os.path.isdir(real_cwd):
+        return ""
+
+    # Determine dispatch_start_epoch from SQLite `dispatch_contexts`
+    now_ts = time.time()
+    dispatch_start_epoch = now_ts - 1800.0
+    db_path = _find_orca_orchestration_db_path()
+    if db_path:
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+            conn.row_factory = sqlite3.Row
+            disp_id = _extract_cli_flag_value(no_heredoc, ("dispatch-id", "dispatch"))
+            from_handle = _extract_cli_flag_value(no_heredoc, ("from",))
+            row_dc = None
+            if disp_id:
+                row_dc = conn.execute(
+                    "SELECT CAST(strftime('%s', dc.created_at) AS INTEGER) AS c_ts "
+                    "FROM dispatch_contexts dc WHERE dc.id = ? LIMIT 1",
+                    (disp_id,),
+                ).fetchone()
+            if not row_dc and from_handle:
+                row_dc = conn.execute(
+                    "SELECT CAST(strftime('%s', dc.created_at) AS INTEGER) AS c_ts "
+                    "FROM dispatch_contexts dc "
+                    "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                    "WHERE dc.assignee_handle = ? OR wd.agent_terminal_handle = ? "
+                    "ORDER BY dc.created_at DESC LIMIT 1",
+                    (from_handle, from_handle),
+                ).fetchone()
+            if not row_dc:
+                row_dc = conn.execute(
+                    "SELECT CAST(strftime('%s', dc.created_at) AS INTEGER) AS c_ts "
+                    "FROM dispatch_contexts dc "
+                    "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                    "WHERE wd.worktree_id = ? ORDER BY dc.created_at DESC LIMIT 1",
+                    (real_cwd,),
+                ).fetchone()
+            if row_dc and row_dc["c_ts"]:
+                c_val = float(row_dc["c_ts"])
+                if c_val > 1e9:
+                    dispatch_start_epoch = c_val
+            conn.close()
+        except Exception:
+            pass
+
+    cutoff_ts = dispatch_start_epoch - 5.0
+    # Advance cutoff_ts past `orca-team merge-upstream` (`ORIG_HEAD` mtime) so files merely pulled in
+    # from upstream branches via `git merge` are not mistaken for screenshots/reports created by this worker.
+    try:
+        dot_git = os.path.join(real_cwd, ".git")
+        git_dir = dot_git
+        if os.path.isfile(dot_git):
+            with open(dot_git, "r", encoding="utf-8", errors="ignore") as gf:
+                first_ln = gf.readline().strip()
+            if first_ln.lower().startswith("gitdir:"):
+                raw_gd = first_ln.split(":", 1)[1].strip()
+                git_dir = raw_gd if os.path.isabs(raw_gd) else os.path.abspath(os.path.join(real_cwd, raw_gd))
+        orig_head_p = os.path.join(git_dir, "ORIG_HEAD")
+        if os.path.isfile(orig_head_p):
+            oh_mtime = os.path.getmtime(orig_head_p)
+            if oh_mtime >= dispatch_start_epoch - 5.0:
+                cutoff_ts = max(cutoff_ts, oh_mtime + 2.0)
+    except Exception:
+        pass
+
+    skip_dirs = {
+        ".git",
+        "node_modules",
+        ".next",
+        "dist",
+        "build",
+        "target",
+        "vendor",
+        ".gradle",
+        ".idea",
+        "__pycache__",
+        ".venv",
+        "venv",
+        # Static source/asset directories (not runtime screenshot directories)
+        "src",
+        "app",
+        "public",
+        "static",
+        "assets",
+        "res",
+        "android",
+        "ios",
+        "packages",
+        "lib",
+        "components",
+        "pages",
+        "views",
+        "styles",
+        "icons",
+        "images",
+        "img",
+        "media",
+        "fonts",
+        "fixtures",
+        "__snapshots__",
+    }
+    screenshot_name_re = re.compile(
+        r"(?:screen|shot|captur|verif|audit|qa|ui[-_]|page|modal|drawer|dark|light|desktop|mobile|test|after|before|live|clone|orig|rebuilt|parity)",
+        re.IGNORECASE,
+    )
+
+    # Discover JSON reports and screenshot images modified during the current dispatch (up to depth 2)
+    recent_jsons: list[str] = []
+    recent_pngs: list[str] = []
+    try:
+        for root_d, dirs, files in os.walk(real_cwd):
+            rel_d = os.path.relpath(root_d, real_cwd)
+            depth = 0 if rel_d == "." else len(rel_d.split(os.sep))
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+            if depth >= 2:
+                dirs[:] = []
+            for fname in files:
+                low = fname.lower()
+                fp = os.path.join(root_d, fname)
+                try:
+                    mtime = os.path.getmtime(fp)
+                except OSError:
+                    continue
+                if mtime < cutoff_ts:
+                    continue
+                if is_qa_slot and low.endswith(".json") and any(k in low for k in ("report", "result", "verif", "summary", "audit")):
+                    recent_jsons.append(fp)
+                elif low.endswith(".png") and (rel_d != "." or screenshot_name_re.search(low)):
+                    recent_pngs.append(fp)
+    except Exception:
+        pass
+
+    # 2. [ORCA QA REPORT-VERDICT MISMATCH GUARD]
+    if is_qa_slot and recent_jsons:
+        for jp in sorted(recent_jsons):
+            try:
+                if os.path.getsize(jp) > 5 * 1024 * 1024:
+                    continue
+                with open(jp, "r", encoding="utf-8", errors="ignore") as jf:
+                    j_obj = json.load(jf)
+                if not isinstance(j_obj, dict):
+                    continue
+                rel_jp = os.path.relpath(jp, real_cwd)
+                v_str = str(j_obj.get("verdict") or j_obj.get("status") or "").strip().upper()
+                failed_cnt = 0
+                raw_failed = j_obj.get("failed")
+                if isinstance(raw_failed, int) and not isinstance(raw_failed, bool):
+                    failed_cnt = int(raw_failed)
+                elif isinstance(j_obj.get("summary"), dict):
+                    sum_f = j_obj["summary"].get("failed")
+                    if isinstance(sum_f, int) and not isinstance(sum_f, bool):
+                        failed_cnt = int(sum_f)
+
+                failed_ids: list[str] = []
+                for arr_k in ("checks", "results", "tests", "items", "suites"):
+                    arr_v = j_obj.get(arr_k)
+                    if isinstance(arr_v, list):
+                        for item in arr_v:
+                            if isinstance(item, dict):
+                                st = str(item.get("status") or item.get("verdict") or "").strip().upper()
+                                if st in ("FAIL", "FAILED", "ERROR") or item.get("pass") is False or item.get("passed") is False:
+                                    failed_ids.append(str(item.get("id") or item.get("name") or item.get("test") or "check"))
+
+                if v_str in ("FAIL", "FAILED") or failed_cnt > 0 or failed_ids:
+                    f_detail = f" (checks FAIL: {', '.join(failed_ids[:6])})" if failed_ids else (f" (failed={failed_cnt})" if failed_cnt else "")
+                    return (
+                        f"[ORCA QA REPORT-VERDICT MISMATCH GUARD] File báo cáo '{rel_jp}' được tạo/cập nhật trong phiên này đang ghi nhận kết quả THẤT BẠI (verdict='{v_str or 'FAIL'}'{f_detail}), "
+                        f"nhưng bạn lại đang gửi tin nhắn báo cáo PASS / succeeded! "
+                        f"CẤM ngụy tạo kết quả 'QA_VERDICT: PASS' hoặc tự ý bỏ qua lỗi trong file report. "
+                        f"Cách sửa bắt buộc: Nếu lỗi là bug thật của hệ thống, hãy đổi báo cáo sang 'QA_VERDICT: FAIL' (hoặc '--type escalation' / 'QA_REJECT'); nếu file '{rel_jp}' là kết quả nháp cũ trước khi fix, hãy chạy lại test để cập nhật '{rel_jp}' đạt PASS 100% (hoặc xóa file report nháp cũ) trước khi gửi!"
+                    )
+            except Exception:
+                pass
+
+    # 3 & 4. [ORCA VISUAL BLANK-SCREEN GUARD] & [ORCA MULTIMODAL VISUAL INSPECTION GUARD]
+    valid_screenshots: list[str] = []
+    for png_p in sorted(recent_pngs):
+        uni_res = _check_png_uniformity(png_p)
+        if uni_res is not None:
+            uni_ratio, w_px, h_px = uni_res
+            if w_px >= 150 and h_px >= 150:
+                valid_screenshots.append(png_p)
+                if uni_ratio >= 0.92:
+                    rel_p = os.path.relpath(png_p, real_cwd)
+                    return (
+                        f"[ORCA VISUAL BLANK-SCREEN GUARD] Ảnh chụp màn hình '{rel_p}' ({w_px}x{h_px}px) vừa tạo có tới {uni_ratio * 100:.1f}% số dòng điểm ảnh đồng nhất (màn hình đen / trắng rỗng / sụp đổ layout)! "
+                        f"CẤM gửi báo cáo PASS / UI Ready khi ảnh screenshot thực tế bị đen hoặc trống rỗng. "
+                        f"Cách sửa bắt buộc: Dùng tool 'view_file' / 'read_file' / 'Read' để xem trực tiếp '{png_p}', kiểm tra lỗi render/layout và sửa lại UI hoặc báo cáo 'QA_VERDICT: FAIL'!"
+                    )
+
+    if valid_screenshots:
+        inspected_map: dict[str, float] = {}
+        cache_p = _visual_inspection_cache_path()
+        if os.path.isfile(cache_p):
+            try:
+                with open(cache_p, "r", encoding="utf-8") as cf:
+                    loaded = json.load(cf)
+                if isinstance(loaded, dict):
+                    inspected_map = {str(k): float(v) for k, v in loaded.items() if isinstance(v, (int, float))}
+            except Exception:
+                inspected_map = {}
+
+        def _was_inspected(p: str) -> bool:
+            rp = os.path.realpath(p)
+            bp = os.path.basename(rp)
+            min_ts = max(cutoff_ts - 120.0, os.path.getmtime(p) - 5.0)
+            return (
+                inspected_map.get(rp, 0.0) >= min_ts
+                or inspected_map.get(p, 0.0) >= min_ts
+                or inspected_map.get(bp, 0.0) >= min_ts
+            )
+
+        inspected_imgs = [p for p in valid_screenshots if _was_inspected(p)]
+        req_count = min(2, len(valid_screenshots))
+        if len(inspected_imgs) < req_count:
+            must_view = [os.path.relpath(p, real_cwd) for p in valid_screenshots if not _was_inspected(p)][:3]
+            return (
+                f"[ORCA MULTIMODAL VISUAL INSPECTION GUARD] Bạn vừa tạo/cập nhật {len(valid_screenshots)} ảnh chụp màn hình trong phiên này nhưng mới mở xem {len(inspected_imgs)}/{req_count} ảnh tối thiểu bằng mắt thần Multimodal ('view_file' / 'read_file' / 'Read')! "
+                f"CẤM báo cáo PASS / UI Ready nếu chỉ chạy script tự động mà không mở xem trực tiếp file ảnh chụp màn hình. "
+                f"Cách sửa bắt buộc ngay lúc này: Gọi tool 'view_file' / 'read_file' / 'Read' trên ít nhất {req_count - len(inspected_imgs)} file ảnh ({', '.join(must_view)}) để kiểm tra trực quan bố cục & hiển thị, sau đó mới chạy lại lệnh 'orca orchestration send'!"
+            )
+
+    return ""
+
+
 def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict, args: dict) -> str:
     """
     Prevent recurring real-world Orca CLI errors:
@@ -3120,6 +3525,7 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
     3. Chaining `orca orchestration check --wait` with `worker-start`, `worker-retain`, or `task-create`.
     4. Duplicate concurrent `orca orchestration check --wait` (`waiter_exists`) in the same workspace.
     5. Mandatory 2-Way Debate (`ask` <-> `reply`) between Leader and `critic-worker`.
+    6. Mandatory 3-Layer QA & UI Evidence Verification (`[ORCA QA & UI EVIDENCE GUARD]`).
     """
     bad_bt_flag = _has_unescaped_backtick_in_double_quoted_prose_flag(cmd)
     if bad_bt_flag:
@@ -3133,6 +3539,52 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
     critic_debate_err = _check_critic_two_way_debate_and_question_guards(cmd, sanitized_orch, payload, args)
     if critic_debate_err:
         return critic_debate_err
+
+    qa_ui_err = _check_qa_and_ui_verification_guards(cmd, sanitized_orch, payload, args)
+    if qa_ui_err:
+        return qa_ui_err
+
+    # 7. [ORCA SECRET-TOKEN LEAK GUARD] on `git commit`: prevent committing `.env` files or raw session/auth tokens in `capture/**`
+    if re.search(r"\bgit\s+commit\b", sanitized_orch) and _is_orca_managed_project(payload, args):
+        _, cwd_commit = _resolve_orca_team_bin_and_cwd(payload, args)
+        real_commit_cwd = os.path.realpath(cwd_commit) if cwd_commit else ""
+        if real_commit_cwd and os.path.isdir(real_commit_cwd):
+            try:
+                p_staged = subprocess.run(
+                    ["git", "-C", real_commit_cwd, "diff", "--cached", "--name-only"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2.5,
+                )
+                staged_files = [x.strip() for x in (p_staged.stdout or "").splitlines() if x.strip()]
+                for sf in staged_files:
+                    base_sf = os.path.basename(sf).lower()
+                    if (
+                        base_sf == ".env"
+                        or base_sf.endswith(".env")
+                        or (base_sf.startswith(".env.") and not base_sf.endswith((".example", ".sample", ".template", ".test", ".dist")))
+                    ):
+                        return (
+                            f"[ORCA SECRET-TOKEN LEAK GUARD] Phát hiện file biến môi trường nhạy cảm '{sf}' đang nằm trong git staging (`git commit`)! "
+                            f"CẤM commit file '.env' chứa secret/token vào git repository. "
+                            f"Cách sửa: Chạy `git reset HEAD -- \"{sf}\"` để gỡ file khỏi staging trước khi commit!"
+                        )
+                    full_sf = os.path.join(real_commit_cwd, sf)
+                    if os.path.isfile(full_sf) and os.path.getsize(full_sf) <= 2 * 1024 * 1024:
+                        with open(full_sf, "r", encoding="utf-8", errors="ignore") as f_cap:
+                            cap_sample = f_cap.read(256 * 1024)
+                        if re.search(
+                            r"(?:[\"']authorization[\"']\s*:\s*[\"']Bearer\s+eyJ[A-Za-z0-9_-]{20,}|-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+)?PRIVATE\s+KEY-----|\b(?:glpat-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}|sk-proj-[A-Za-z0-9_-]{30,}|AIzaSy[A-Za-z0-9_-]{33})\b)",
+                            cap_sample,
+                            re.IGNORECASE,
+                        ):
+                            return (
+                                f"[ORCA SECRET-TOKEN LEAK GUARD] Phát hiện token xác thực / API key / private key sống bên trong file '{sf}' đang chờ commit! "
+                                f"CẤM commit trực tiếp Bearer JWT / API Key / Private Key thật vào git. "
+                                f"Cách sửa: Thay thế giá trị token trong '{sf}' bằng biến môi trường hoặc chuỗi ẩn `<REDACTED_TOKEN>`, hoặc gỡ file khỏi staging (`git reset HEAD -- \"{sf}\"`) trước khi commit!"
+                            )
+            except Exception:
+                pass
 
     if "task-update" in sanitized_orch and re.search(r"\borca\s+orchestration\s+task-update\b", sanitized_orch):
         no_heredoc = _strip_quoted_heredocs(cmd)
@@ -3312,24 +3764,24 @@ def _check_orca_cli_protocol_guards(cmd: str, sanitized_orch: str, payload: dict
 
 def _maybe_rewrite_raw_check_wait_to_wait_events(cmd: str, sanitized_orch: str) -> str:
     """
-    If a Leader calls raw `orca orchestration check ... --wait ...` (without `--terminal`),
+    If a Leader calls raw `orca orchestration check ...` (with `--wait`, `--ack`, or `--run`, and without `--terminal`),
     transparently rewrite it to `orca-team wait-events [--ack <ID>] [--run <ID>] [--types "<TYPES>"]`
     so that:
-    1) `_keepalive` stderr noise and `"type": "heartbeat"` rows are stripped (preventing Antigravity `<SYSTEM_MESSAGE>` 4KB middle truncation and 230k-token `view_file(task-XX.log)` turns), and
-    2) Empty timeout wakeups while workers are still `working` are absorbed in the wrapper (preventing 5-minute Prompt Cache TTL misses).
+    1) `_keepalive` stderr noise, `"type": "heartbeat"` rows, and duplicate `payload` bodies are stripped (preventing Antigravity `<SYSTEM_MESSAGE>` 4KB/10KB truncation and 230k-token `view_file(task-XX.log)` turns), and
+    2) Empty timeout wakeups and intermediate Wave completions while peers are still `working` are coalesced in the wrapper.
     """
     if os.environ.get("ORCA_INTERNAL_WAIT") == "1":
         return ""
     stripped = sanitized_orch.strip()
     if not re.match(r"^(?:\S*/)?orca\s+orchestration\s+check\b", stripped):
         return ""
-    if not re.search(r"\s--wait\b", stripped):
-        return ""
     if re.search(r"\s--terminal(?:\s+|=|$)", stripped) or re.search(r"\s--peek\b", stripped):
+        return ""
+    if not (re.search(r"\s--wait\b", stripped) or re.search(r"\s--ack(?:\s+|=)", stripped) or re.search(r"\s--run(?:\s+|=)", stripped)):
         return ""
     if re.search(r"[;|&`\n<>]", stripped):
         return ""
-    ack_m = re.search(r"--ack(?:\s+|=)['\"]?((?:delivery|deliv)_[A-Za-z0-9_-]+)", cmd)
+    ack_m = re.search(r"--ack(?:\s+|=)['\"]?((?:dlv|delivery|deliv)_[A-Za-z0-9_-]+)", cmd)
     run_m = re.search(r"--run(?:\s+|=)['\"]?(run_[A-Za-z0-9_-]+)", cmd)
     types_m = re.search(r"--types(?:\s+|=)['\"]?([A-Za-z0-9_,-]+)", cmd)
     parts = ["orca-team", "wait-events"]
@@ -3340,6 +3792,74 @@ def _maybe_rewrite_raw_check_wait_to_wait_events(cmd: str, sanitized_orch: str) 
     if types_m and types_m.group(1) != "worker_done,escalation,question,handoff":
         parts.extend(["--types", f'"{types_m.group(1)}"'])
     return " ".join(parts)
+
+
+def _maybe_cap_worker_read_limit(cmd: str, sanitized_orch: str) -> str:
+    """
+    When `orca orchestration worker-read --dispatch <ctx>` is called without `--limit` (or with `--limit > 35`),
+    it dumps up to 70KB (100 transcript turns or 120 PTY lines) into stdout, triggering 10KB truncation on every call.
+    Transparently inject `--limit 20` (or cap `--limit` at 30) to reduce output by ~95% (70KB -> 2.8KB).
+    """
+    if not re.search(r"\borca\s+orchestration\s+worker-read\b", sanitized_orch):
+        return ""
+
+    def _cap_match(m: re.Match) -> str:
+        seg = m.group(0)
+        lim_m = re.search(r"(--limit(?:\s+|=))(\d+)", seg)
+        if lim_m:
+            try:
+                val = int(lim_m.group(2))
+                if val > 35:
+                    return seg[: lim_m.start(2)] + "25" + seg[lim_m.end(2) :]
+            except ValueError:
+                pass
+            return seg
+        return re.sub(r"(\borca\s+orchestration\s+worker-read\b)", r"\1 --limit 20", seg, count=1)
+
+    rewritten = re.sub(r"(?:\S*/)?orca\s+orchestration\s+worker-read\b[^\n;|&]*", _cap_match, cmd)
+    return rewritten if rewritten != cmd else ""
+
+
+def _maybe_bound_noisy_shell_commands(cmd: str, sanitized_orch: str) -> str:
+    """
+    Transparently bound common shell token-leak traps:
+    1) `curl ... | head -n <N>` on single-line minified JSON/XML responses dumps 200KB–500KB because `head -n` counts lines, not bytes -> append ` | head -c 4096`.
+    2) Standalone `head -n <N> <file.(json|xml|har|min.js|svg)>` on single-line files dumps 45KB–100KB -> append ` | head -c 4096`.
+    3) `mvn ... (compile|test-compile|test|package|verify|install)` without `-B`/`Slf4jMavenTransferListener` dumps 1.3MB of download progress -> inject `-B -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn`.
+    """
+    new_cmd = cmd
+    stripped = new_cmd.strip()
+    if (
+        re.search(r"\bcurl\b", sanitized_orch)
+        and re.search(r"\|\s*head\s+(?:-n\s*\d+|-\d+)\s*$", stripped)
+        and "head -c" not in stripped
+    ):
+        new_cmd = f"{stripped} | head -c 4096"
+    elif (
+        re.match(r"^head\s+(?:-n\s*\d+|-\d+)\s+\S+\.(?:json|xml|har|min\.js|svg)\s*$", stripped, re.IGNORECASE)
+        and "head -c" not in stripped
+    ):
+        new_cmd = f"{stripped} | head -c 4096"
+    elif re.match(r"^(?:\S*/)?orca\s+orchestration\s+run-list(?:\s+--json)?\s*$", stripped):
+        if "--json" in stripped:
+            new_cmd = f"{stripped} | jq '{{ok, result: {{runs: (.result.runs[:5])}}}}'"
+        else:
+            new_cmd = f"{stripped} | head -n 15"
+    elif re.match(r"^(?:\S*/)?orca\s+terminal\s+list\s+--json\s*$", stripped):
+        new_cmd = f"{stripped} | jq '{{ok, result: {{terminals: [.result.terminals[] | {{handle, title, worktreePath, branch, orphaned, connected}}]}}}}'"
+
+    if (
+        re.search(r"(?:^|[;&|()\n])\s*(?:\./)?mvn\s+(?:clean\s+)?(?:compile|test-compile|test|package|verify|install)\b", sanitized_orch)
+        and "Slf4jMavenTransferListener" not in new_cmd
+        and " -q" not in new_cmd
+    ):
+        new_cmd = re.sub(
+            r"((?:^|[;&|()\n])\s*(?:\./)?mvn)\s+",
+            r"\1 -B -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn ",
+            new_cmd,
+            count=1,
+        )
+    return new_cmd if new_cmd != cmd else ""
 
 
 def _maybe_inject_buildkit_plain_progress(cmd: str, sanitized_orch: str) -> str:
@@ -3363,7 +3883,7 @@ def _is_in_orca_meta_repo(payload: dict, args: dict) -> bool:
     """Return True if the current workspace/cwd is the `orca-multi-agent-orchestrator` repo itself."""
     candidates: list[str] = []
     if isinstance(args, dict):
-        for k in ("Cwd", "cwd", "AbsolutePath", "file_path", "filePath", "path"):
+        for k in ("Cwd", "cwd", "Path", "AbsolutePath", "file_path", "filePath", "path", "TargetFile"):
             v = args.get(k)
             if isinstance(v, str) and v.strip():
                 candidates.append(v.strip())
@@ -3428,6 +3948,51 @@ def _is_orca_managed_project(payload: dict, args: dict) -> bool:
         except Exception:
             pass
     return False
+
+
+def _is_leader_main_workspace(payload: dict, args: dict) -> bool:
+    """Return True when the caller is the Coordinator/Leader operating on the Main Repository Root of an Orca-managed project (NOT a child worker worktree)."""
+    if _is_in_orca_meta_repo(payload, args):
+        return False
+    if os.environ.get("ORCA_DISPATCH_ID") or os.environ.get("ORCA_WORKER_ROLE"):
+        return False
+    _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
+    check_dirs: list[str] = []
+    if isinstance(payload, dict):
+        c_val = payload.get("cwd")
+        if isinstance(c_val, str) and c_val.strip():
+            check_dirs.append(c_val.strip())
+        wps = payload.get("workspacePaths")
+        if isinstance(wps, list):
+            for wp in wps:
+                if isinstance(wp, str) and wp.strip():
+                    check_dirs.append(wp.strip())
+    if cwd and cwd not in check_dirs:
+        check_dirs.append(cwd)
+    found_main_orca_root = False
+    for d in check_dirs:
+        try:
+            cur = os.path.realpath(d)
+            if os.path.isfile(cur):
+                cur = os.path.dirname(cur)
+            if "/orca/workspaces/" in cur.replace("\\", "/"):
+                return False
+            for _ in range(6):
+                if not cur or cur == "/":
+                    break
+                git_dot = os.path.join(cur, ".git")
+                if os.path.isfile(git_dot):
+                    return False
+                if os.path.isdir(git_dot) and os.path.isfile(os.path.join(cur, "orca-team.json")):
+                    found_main_orca_root = True
+                    break
+                parent = os.path.dirname(cur)
+                if parent == cur:
+                    break
+                cur = parent
+        except Exception:
+            pass
+    return found_main_orca_root
 
 
 def _extract_normalized_tool_call(payload: dict) -> tuple[str, dict, str]:
@@ -3564,15 +4129,79 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
 
     if not isinstance(args, dict):
         return ""
+
+    # Block Leader in main workspace from calling figma:get_design_context or figma:get_screenshot
+    # (Each call dumps 50KB-116KB JSX/Tailwind into steps/<N>/output.txt and triggers 15+ read_file turns + CHECKPOINT compaction before Wave 1)
+    if tool_name in ("call_mcp_tool", "mcp_figma_get_design_context", "mcp_figma_get_screenshot", "get_design_context", "get_screenshot"):
+        is_figma_heavy = tool_name in ("mcp_figma_get_design_context", "mcp_figma_get_screenshot", "get_design_context", "get_screenshot")
+        if tool_name == "call_mcp_tool":
+            srv_n = str(args.get("ServerName") or args.get("server_name") or "").strip().lower()
+            m_tool = str(args.get("ToolName") or args.get("tool_name") or "").strip().lower()
+            if srv_n == "figma" and m_tool in ("get_design_context", "get_screenshot"):
+                is_figma_heavy = True
+        if is_figma_heavy and _is_leader_main_workspace(payload, args):
+            return (
+                "[ORCA TOKEN-LEAK GUARD] CẤM Leader (Coordinator) gọi trực tiếp `figma:get_design_context` hoặc `figma:get_screenshot`! "
+                "Mỗi lệnh này xả 50KB–116KB mã JSX/Tailwind thô vào `.system_generated/steps/<N>/output.txt`, khiến Leader phải đọc phân mảnh hàng chục lượt và làm tràn Context Window (CHECKPOINT compaction) trước cả khi tạo Wave 1. "
+                "Cách sửa: Leader chỉ truyền URL Figma / `nodeId` vào Task Spec để `ui-worker` hoặc `dev-worker` trực tiếp gọi `get_design_context` & `get_screenshot` bên trong worktree cô lập của Worker!"
+            )
+
     fp = str(
-        args.get("AbsolutePath")
+        args.get("Path")
+        or args.get("AbsolutePath")
         or args.get("file_path")
         or args.get("filePath")
         or args.get("path")
+        or args.get("TargetFile")
         or ""
     ).strip()
     if not fp:
         return ""
+
+    # Block Leader in main workspace from directly writing/editing project code files instead of delegating to Workers
+    if tool_name in (
+        "write_file",
+        "edit_file",
+        "write",
+        "edit",
+        "multiedit",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "writefile",
+        "strreplacefile",
+    ):
+        norm_fp = os.path.abspath(os.path.expanduser(fp))
+        is_exempt_leader_write = (
+            "/orca-multi-agent-orchestrator/" in norm_fp
+            or "/.orca/" in norm_fp
+            or "/.worktrees/" in norm_fp
+            or "/orca/workspaces/" in norm_fp
+            or os.path.basename(norm_fp) in ("orca-team.json", ".gitignore")
+        )
+        if not is_exempt_leader_write and _is_leader_main_workspace(payload, args):
+            # Verify norm_fp itself resides inside the Orca main repo root (so scratch files in /tmp/spec.md are allowed)
+            in_main_repo_tree = False
+            cur_p = os.path.dirname(norm_fp)
+            for _ in range(8):
+                if not cur_p or cur_p == "/":
+                    break
+                git_marker = os.path.join(cur_p, ".git")
+                if os.path.isfile(git_marker):
+                    in_main_repo_tree = False
+                    break
+                if os.path.isdir(git_marker) and os.path.isfile(os.path.join(cur_p, "orca-team.json")):
+                    in_main_repo_tree = True
+                    break
+                nxt_p = os.path.dirname(cur_p)
+                if nxt_p == cur_p:
+                    break
+                cur_p = nxt_p
+            if in_main_repo_tree:
+                return (
+                    f"[ORCA COORDINATOR DELEGATION GUARD] CẤM Leader trực tiếp ghi/sửa file mã nguồn dự án ('{os.path.basename(norm_fp)}') tại Main Repo! "
+                    "Việc Leader tự viết code trực tiếp làm phình Context Window hàng triệu tokens (gây 3–4 lần CHECKPOINT compaction) và phá vỡ quy trình kiểm thử độc lập của Worker + QA. "
+                    "Cách sửa: Khởi tạo Orca Run (`orca-project-init -y` / `orca orchestration run-create`), tạo Task Spec và dispatch cho `dev-worker` / `ui-worker` / `devops-worker` thực thi trong git worktree cô lập!"
+                )
 
     # Block reading internal conversation transcript JSONL/JSON files across all Agent CLIs (outside orca-multi-agent-orchestrator)
     if re.search(
@@ -3600,10 +4229,68 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
             except OSError:
                 pass
 
-    if not re.search(r"[/\\]\.system_generated[/\\]tasks[/\\]task-\d+\.log$", fp):
+    is_task_log = bool(re.search(r"[/\\]\.system_generated[/\\]tasks[/\\]task-\d+\.log$", fp))
+    is_step_output = bool(re.search(r"[/\\]\.system_generated[/\\]steps[/\\]\d+[/\\]output\.txt$", fp))
+    if not is_task_log and not is_step_output:
         return ""
 
     base_log = os.path.basename(fp)
+    if is_step_output:
+        if _is_in_orca_meta_repo(payload, args) or not os.path.isfile(fp):
+            return ""
+        try:
+            step_f_sz = os.path.getsize(fp)
+        except OSError:
+            return ""
+        if step_f_sz <= 12000:
+            return ""
+        is_leader_ctx = _is_leader_main_workspace(payload, args)
+        max_step_lines = 50 if is_leader_ctx else 90
+        max_slice_bytes = 4000 if is_leader_ctx else 6500
+        start_ln = args.get("StartLine") if args.get("StartLine") is not None else (args.get("start_line") if args.get("start_line") is not None else (args.get("offset") if args.get("offset") is not None else args.get("line_offset")))
+        end_ln = args.get("EndLine") if args.get("EndLine") is not None else args.get("end_line")
+        limit_ln = args.get("limit") if args.get("limit") is not None else args.get("n_lines")
+        byte_off = args.get("ByteOffset") if args.get("ByteOffset") is not None else args.get("byte_offset")
+        s_i = None
+        e_i = None
+        if byte_off is None and start_ln is not None and end_ln is not None:
+            try:
+                s_i = int(start_ln)
+                e_i = int(end_ln)
+            except (ValueError, TypeError):
+                s_i, e_i = None, None
+        elif byte_off is None and start_ln is not None and limit_ln is not None:
+            try:
+                s_i = int(start_ln)
+                e_i = s_i + int(limit_ln) - 1
+            except (ValueError, TypeError):
+                s_i, e_i = None, None
+        if s_i is not None and e_i is not None and s_i >= 1 and e_i >= s_i and (e_i - s_i) <= max_step_lines:
+            slice_bytes = 0
+            try:
+                with open(fp, "rb") as sf:
+                    for idx, raw_ln in enumerate(sf, start=1):
+                        if idx < s_i:
+                            continue
+                        if idx > e_i:
+                            break
+                        slice_bytes += len(raw_ln)
+                        if slice_bytes > max_slice_bytes:
+                            break
+            except OSError:
+                slice_bytes = 0
+            if slice_bytes <= max_slice_bytes:
+                return ""
+            return (
+                f"[ORCA TOKEN-LEAK GUARD] Khoảng dòng {s_i}–{e_i} của '.system_generated/steps/.../{base_log}' chứa các dòng rất dài (tổng dung lượng > {max_slice_bytes // 1000}KB, vượt ngưỡng cắt 10KB và sẽ tạo file output.txt đệ quy)! "
+                f"Cách sửa: (1) Giảm khoảng dòng xuống <= 25–30 dòng mỗi lần gọi `read_file`, HOẶC (2) dùng lệnh `python3 -c` / `jq` / `rg -n` để trích xuất đúng trường JSON/JSX cần lấy!"
+            )
+        return (
+            f"[ORCA TOKEN-LEAK GUARD] File kết quả '.system_generated/steps/.../{base_log}' có dung lượng lớn ({step_f_sz // 1024}KB)! "
+            f"CẤM gọi `read_file`/`view_file` không giới hạn dòng, truyền khoảng dòng > {max_step_lines} dòng, dùng `ByteOffset`, hoặc chỉ truyền `EndLine` mà thiếu `StartLine` (nếu thiếu `StartLine`, công cụ sẽ đọc lặp lại từ dòng 1 và bơm 46KB = ~15,000 tokens rác vào Context mỗi lượt!). "
+            f"Cách sửa bắt buộc: (1) Dùng `rg -n` hoặc `grep -n` trên file '{fp}' để tìm chính xác số dòng cần xem, sau đó (2) gọi `read_file` với ĐẦY ĐỦ cả `StartLine` VÀ `EndLine` sao cho `EndLine - StartLine <= {max_step_lines}` (và dung lượng đoạn đọc <= {max_slice_bytes // 1000}KB)!"
+        )
+
     if not _is_in_orca_meta_repo(payload, args) and os.path.isfile(fp):
         try:
             f_sz = os.path.getsize(fp)
@@ -3711,7 +4398,7 @@ def ensure_all_cli_command_guard_hooks(guard_bin: str | None = None, check_only:
         f"if [ -r '{g_bin}' ]; then ORCA_GUARD_CLIENT=gemini ORCA_GUARD_EVENT=AfterTool python3 '{g_bin}' --event AfterTool; "
         f"else printf '{{}}\\n'; cat >/dev/null 2>&1 || :; fi"
     )
-    agy_matcher = "run_command|view_file|read_file|Read|invoke_subagent|send_message|manage_task|schedule"
+    agy_matcher = "run_command|view_file|read_file|Read|write_file|edit_file|Write|Edit|MultiEdit|replace_file_content|multi_replace_file_content|call_mcp_tool|invoke_subagent|send_message|manage_task|schedule"
 
     # 1. Antigravity (~/.gemini/config/hooks.json)
     agy_path = home / ".gemini" / "config" / "hooks.json"
@@ -4084,6 +4771,8 @@ def main() -> None:
 
         _ensure_child_worktree_hygiene(payload, args)
         _ensure_watcher_for_payload(payload, event, cmd)
+        if not cmd:
+            _record_visual_image_inspection(payload, args, tool_name)
 
         if is_pre_event and not cmd:
             log_view_err = _check_unbounded_task_log_view(payload, args, tc=tc, tool_name_hint=tool_name)
@@ -4165,6 +4854,24 @@ def main() -> None:
             sys.stdout.flush()
             return
 
+        if re.search(r"(?:^|[;&|()\n]|\b(?:do|then|else|elif|env|command|sudo)\s+)\s*(?:\S*/)?orca\s+orchestration\s+task-list\b[^\n;|&]*\s--json\b(?!\s*\|\s*(?:jq|python|head|grep|rg|awk|sed)\b)", sanitized_orch):
+            reason = (
+                "[ORCA TOKEN-LEAK GUARD] CẤM gọi 'orca orchestration task-list ... --json' trực tiếp ra stdout (vì '--json' xả toàn bộ chuỗi Spec dài của mọi task trong Run, ngốn 15,000–25,000 tokens/lần)! "
+                "Cách sửa: Bỏ cờ '--json' (`orca orchestration task-list --run <RUN_ID>` chỉ tốn ~150 tokens) hoặc dùng `orca-team plan show --run <RUN_ID>`."
+            )
+            sys.stdout.write(_deny_json(reason))
+            sys.stdout.flush()
+            return
+
+        if re.search(r"(?:^|[;&|()\n]|\b(?:do|then|else|elif|env|command|sudo)\s+)\s*(?:\S*/)?orca\s+skills\s+get\b[^\n;|&]*\s--full\b(?!\s*\|\s*(?:jq|python|head|grep|rg|awk|sed)\b)", sanitized_orch):
+            reason = (
+                "[ORCA TOKEN-LEAK GUARD] CẤM gọi 'orca skills get ... --full' trực tiếp ra stdout (vì '--full' xả 46,961 bytes = ~15,650 tokens cẩm nang CLI làm vượt ngưỡng cắt 10KB và tràn Context Window)! "
+                "Cách sửa: Dùng `orca-team kb` (ví dụ `orca-team kb 01` đến `06`) hoặc dùng cờ `--compact` thay cho `--full`."
+            )
+            sys.stdout.write(_deny_json(reason))
+            sys.stdout.flush()
+            return
+
         # Guard 5b: Orca CLI Protocol & Shell Quoting Guards (backticks in --body "...", task-update --spec/--status canceled, && check --wait, waiter_exists, sleep polling)
         proto_reason = _check_orca_cli_protocol_guards(cmd[:200000], sanitized_orch, payload, args)
         if proto_reason:
@@ -4225,6 +4932,16 @@ def main() -> None:
             if _emit_rewritten_cmd(rewritten_wait, block_on_kimi_reason=kimi_wait_msg):
                 return
 
+        # Auto-Upgrade 1b: Transparently inject `--limit 20` on `orca orchestration worker-read` without `--limit` (saving 67KB/call)
+        rewritten_wread = _maybe_cap_worker_read_limit(cmd[:200000], sanitized_orch)
+        if rewritten_wread:
+            kimi_wread_msg = (
+                f"[ORCA TOKEN-LEAK GUARD] CẤM gọi 'orca orchestration worker-read' không có '--limit' (xả tới 70KB = ~23,300 tokens)! "
+                f"Hãy thêm '--limit 20': `{rewritten_wread}`"
+            )
+            if _emit_rewritten_cmd(rewritten_wread, block_on_kimi_reason=kimi_wread_msg):
+                return
+
         # Guard 6: Wave-Order Gate & Run-Scoped Elastic Worktree Guard on `worker-start`
         collision_reason = _check_hardcoded_worker_start_collision(cmd[:200000], payload, args)
         if collision_reason:
@@ -4236,6 +4953,12 @@ def main() -> None:
         rewritten_buildkit = _maybe_inject_buildkit_plain_progress(cmd[:200000], sanitized_orch)
         if rewritten_buildkit:
             if _emit_rewritten_cmd(rewritten_buildkit):
+                return
+
+        # Auto-Upgrade 3: Transparently bound single-line JSON/XML `curl|head -n`, `head -n <file.json>`, and noisy `mvn` transfer logs
+        rewritten_noisy = _maybe_bound_noisy_shell_commands(cmd[:200000], sanitized_orch)
+        if rewritten_noisy:
+            if _emit_rewritten_cmd(rewritten_noisy):
                 return
 
         # Trigger automatic post-release tab sweep when Leader runs `orca orchestration worker-release`
