@@ -2676,30 +2676,10 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
         print("❌ Thiếu lệnh cần chạy cho 'orca-team verify -- <cmd...>'.", file=sys.stderr)
         sys.exit(2)
 
-    # Item 5: Reject shell chaining/redirection tokens and trivial no-op binaries (never run with shell=True)
-    forbidden_ops = {"||", "&&", ";", "|", ">", ">>", "<", "&", "2>&1", "1>&2"}
-    for tok_c in cmd_tokens:
-        if tok_c in forbidden_ops or any(op in tok_c for op in ("||", "&&", ";", "|", "$(", "`")):
-            print(
-                f"❌ [ORCA VERIFY GUARD] CẤM dùng toán tử nối chuỗi/chuyển hướng shell ('{tok_c}') trong 'orca-team verify'! "
-                "Lệnh kiểm thử phải được thực thi trực tiếp (shell=False) không qua ống dẫn che giấu mã lỗi.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-
-    exe_base = os.path.basename(cmd_tokens[0].strip()).lower()
-    noop_bins = {"true", "false", ":", "echo", "printf", "cat", "ls", "pwd", "sleep", "whoami", "date", "env", "export", "head", "tail", "wc", "touch"}
-    if exe_base in noop_bins:
-        print(
-            f"❌ [ORCA VERIFY GUARD] CẤM dùng lệnh no-op / không phải trình chạy test ('{cmd_tokens[0]}') trong 'orca-team verify'!",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    info = resolve_run_upstream_branches(work_dir, run_id=run_id, dispatch_id=dispatch_id, task_id=task_id)
-    eff_run = info.get("runId") or run_id or "default"
-    eff_did = dispatch_id or "default"
-    main_root = Path(info.get("mainRoot") or work_dir)
+    scripts_dir = Path(__file__).resolve().parent
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import orca_critic_gate as cg
 
     cmd_str = " ".join(cmd_tokens)
     if not kind:
@@ -2708,10 +2688,21 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
             kind = "lint"
         elif any(k in low_c for k in ("typecheck", "tsc", "mypy", "pyright")):
             kind = "typecheck"
-        elif any(k in low_c for k in ("build", "compile")):
+        elif any(k in low_c for k in ("build", "compile", "py_compile", "compileall")):
             kind = "build"
         else:
             kind = "test"
+
+    # C-FIX-13 & C-FIX-19: Strict Runner Allowlist (replaces denylist)
+    allowed_ok, allow_err = cg.validate_runner_allowlist(cmd_tokens, kind)
+    if not allowed_ok:
+        print(f"❌ {allow_err}", file=sys.stderr)
+        sys.exit(2)
+
+    info = resolve_run_upstream_branches(work_dir, run_id=run_id, dispatch_id=dispatch_id, task_id=task_id)
+    eff_run = info.get("runId") or run_id or "default"
+    eff_did = dispatch_id or "default"
+    main_root = Path(info.get("mainRoot") or work_dir)
 
     t0 = time.time()
     try:
@@ -2721,6 +2712,7 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
             shell=False,
             capture_output=True,
             text=True,
+            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
         )
     except FileNotFoundError:
         print(f"❌ Không tìm thấy tệp thực thi '{cmd_tokens[0]}'.", file=sys.stderr)
@@ -2796,6 +2788,14 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
         )
         eff_exit = 2
 
+    # C-FIX-14: Compute test_tree_hash over all test files and test configs
+    test_tree_hash, test_files = cg.compute_test_tree_hash(work_dir)
+
+    ev_base = Path(os.environ.get("ORCA_EVIDENCE_DIR", "").strip() or str(Path.home() / ".orca" / "evidence"))
+    ev_dir = ev_base / eff_run
+    ev_dir.mkdir(parents=True, exist_ok=True)
+    secret_bytes, _ = cg.get_or_create_hmac_secret(ev_base, create_if_missing=True)
+
     row = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "run_id": eff_run,
@@ -2806,7 +2806,7 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
         "kind": kind,
         "cmd": list(cmd_tokens),
         "cmd_str": cmd_str,
-        "cmd_hash": hashlib.sha256(cmd_str.encode("utf-8")).hexdigest()[:16],
+        "cmd_hash": cg.canonical_cmd_hash(cmd_tokens),
         "cwd": str(work_dir),
         "head_sha": head_sha,
         "dirty": dirty,
@@ -2815,19 +2815,21 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
         "tests_total": total_cnt,
         "tests_failed": failed_cnt,
         "failed": failed_cnt,
+        "test_tree_hash": test_tree_hash,
+        "test_files": test_files,
         "duration_ms": dur_ms,
         "stdout_tail_hash": hashlib.sha256(combined_out[-4096:].encode("utf-8", errors="ignore")).hexdigest()[:16],
         "artifacts": [],
         "require_tdd": require_tdd,
         "source": "recorder",
     }
+    if secret_bytes:
+        row["row_hmac"] = cg.compute_row_hmac(row, secret_bytes)
     row_line = json.dumps(row, ensure_ascii=False) + "\n"
 
-    ev_base = Path(os.environ.get("ORCA_EVIDENCE_DIR", "").strip() or str(Path.home() / ".orca" / "evidence"))
-    ev_dir = ev_base / eff_run
-    ev_dir.mkdir(parents=True, exist_ok=True)
     ev_file = ev_dir / f"{eff_did}.jsonl"
-    with open(ev_file, "a", encoding="utf-8") as f:
+    fd = os.open(str(ev_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(row_line)
     try:
         os.chmod(ev_file, 0o600)
@@ -3041,37 +3043,43 @@ def cmd_gate(args: list, caller_dir: Path | None = None):
             print(f"   Lựa chọn: {json.dumps(opts, ensure_ascii=False)}")
         return
 
-    # Discover gate commands from orca-team.json or project manifest
-    cfg = load_config(work_dir) or {}
-    gate_cmds: list[tuple[str, str]] = []
-    custom_gates = cfg.get("gateCommands")
-    if isinstance(custom_gates, list) and custom_gates:
-        for item in custom_gates:
-            if isinstance(item, dict) and item.get("cmd"):
-                gate_cmds.append((str(item.get("kind") or "test"), str(item["cmd"])))
-            elif isinstance(item, str) and item.strip():
-                gate_cmds.append(("test", item.strip()))
-    elif (work_dir / "package.json").is_file():
+    # C-FIX-17: Discover canonical gate commands as token lists from contracts.json, orca-team.json, or repo manifest
+    scripts_dir = Path(__file__).resolve().parent
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import orca_critic_gate as cg
+
+    info = resolve_run_upstream_branches(work_dir, run_id=run_id, dispatch_id=dispatch_id, task_id=task_id)
+    eff_run = info.get("runId") or run_id or "default"
+    main_root = Path(info.get("mainRoot") or work_dir)
+    cfg = load_config(work_dir) or load_config(main_root) or {}
+
+    contracts_obj = None
+    contracts_p = main_root / ".orca" / "runs" / eff_run / "contracts.json"
+    if contracts_p.is_file():
         try:
-            pkg = json.loads((work_dir / "package.json").read_text(encoding="utf-8", errors="ignore"))
-            scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
-            if "lint" in scripts:
-                gate_cmds.append(("lint", "npm run lint"))
-            if "typecheck" in scripts:
-                gate_cmds.append(("typecheck", "npm run typecheck"))
-            if "test" in scripts:
-                gate_cmds.append(("test", "npm test"))
+            contracts_obj = json.loads(contracts_p.read_text(encoding="utf-8", errors="ignore"))
         except Exception:
-            pass
-    elif (work_dir / "pyproject.toml").is_file() or (work_dir / "pytest.ini").is_file() or (work_dir / "tests").is_dir():
-        gate_cmds.append(("test", f"{sys.executable} -m unittest discover -s tests"))
+            contracts_obj = None
+
+    gate_cmds: list[tuple[str, list[str]]] = cg.resolve_canonical_gate_commands(
+        work_dir, main_root, contracts_obj, cfg
+    )
 
     if not gate_cmds:
-        gate_cmds.append(("test", "git status --porcelain"))
+        print(
+            "❌ [ORCA GATE GUARD] Không tìm thấy lệnh kiểm thử chuẩn (canonical gate command) từ manifest dự án "
+            "(tests/, package.json, pyproject.toml, pytest.ini, go.mod, Cargo.toml) hoặc 'gateCommands' trong orca-team.json!\n"
+            "Hướng dẫn: Khai báo 'gateCommands' trong orca-team.json với giá trị 'cmd' dạng mảng token, ví dụ:\n"
+            '  "gateCommands": [{"kind": "test", "cmd": ["python3", "-m", "unittest", "discover", "-s", "tests"]}]',
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     results = []
     overall_rc = 0
-    for g_kind, g_cmd in gate_cmds:
+    for g_kind, g_tokens in gate_cmds:
+        g_cmd_str = " ".join(g_tokens)
         v_args = [sys.executable, str(Path(__file__).resolve()), "--path", str(work_dir), "verify"]
         if run_id:
             v_args += ["--run", run_id]
@@ -3079,9 +3087,9 @@ def cmd_gate(args: list, caller_dir: Path | None = None):
             v_args += ["--dispatch-id", dispatch_id]
         if task_id:
             v_args += ["--task-id", task_id]
-        v_args += ["--kind", g_kind, "--", g_cmd]
+        v_args += ["--kind", g_kind, "--", *g_tokens]
         p = subprocess.run(v_args, cwd=str(work_dir), capture_output=True, text=True)
-        results.append({"kind": g_kind, "cmd": g_cmd, "exitCode": p.returncode, "output": ((p.stdout or "") + (p.stderr or ""))[-400:]})
+        results.append({"kind": g_kind, "cmd": g_cmd_str, "exitCode": p.returncode, "output": ((p.stdout or "") + (p.stderr or ""))[-400:]})
         if p.returncode != 0:
             overall_rc = p.returncode
             break
@@ -5437,12 +5445,23 @@ def cmd_plan(args: list, caller_dir: Path = None):
         contracts_list = cg.contract_lines(formatted_plan)
         computed_hash = cg.plan_hash(formatted_plan)
         computed_risk = cg.compute_risk(items_extracted, contracts_list)
+        resolved_gates = cg.resolve_canonical_gate_commands(main_root, main_root, None, load_config(main_root) or {})
+        canon_test_toks = cg.normalize_cmd_tokens(
+            next((toks for k, toks in resolved_gates if k == "test"), ["python3", "-m", "unittest", "discover", "-s", "tests"])
+        )
+        canon_test_hash = cg.canonical_cmd_hash(canon_test_toks)
         items_v2 = [
             {
                 "id": it["id"],
                 "description": it["description"],
                 "files": it["files"],
                 "axes": ["ownership", "dbApiCompat"],
+                "verify_cmd": canon_test_toks,
+                "cmd_hash": canon_test_hash,
+                "verify": {
+                    "cmd": " ".join(canon_test_toks),
+                    "test_pattern": rf"(?i)\btest[_\-]?{it['id'].lower()}\b",
+                },
             }
             for it in items_extracted
         ]
@@ -5452,6 +5471,8 @@ def cmd_plan(args: list, caller_dir: Path = None):
             "planHash": computed_hash,
             "riskLevel": computed_risk,
             "contracts": contracts_list,
+            "verify_cmd": canon_test_toks,
+            "test_allowlist": [],
             "items": items_v2,
         }
 

@@ -26,6 +26,7 @@ import os
 import re
 import select
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -4376,8 +4377,24 @@ def _verify_qa_evidence_ledger_and_ancestry(
     except Exception as exc:
         return f"[ORCA GIT-ANCESTRY ERROR] Không thể xác minh trạng thái Git/ancestry ({exc}). Thực thi Fail-Closed!"
 
-    # Load expected [P1..Pn] and acceptance contracts from master-plan.md & contracts.json (Item 2 & 3)
-    contract_acceptance_cmds: list[str] = []
+    cg = _load_critic_gate_module()
+    if cg is None:
+        return "[ORCA LEDGER-INTEGRITY GUARD] Không thể tải mô-đun orca_critic_gate. Thực thi Fail-Closed!"
+
+    # Load expected [P1..Pn], test_allowlist, and item test_patterns from master-plan.md & contracts.json (C-FIX-13..15)
+    c_obj: dict = {}
+    cfg_obj: dict = {}
+    if project_root:
+        cfg_p = os.path.join(project_root, "orca-team.json")
+        if os.path.isfile(cfg_p):
+            try:
+                loaded_cfg = json.loads(open(cfg_p, "r", encoding="utf-8", errors="ignore").read())
+                if isinstance(loaded_cfg, dict):
+                    cfg_obj = loaded_cfg
+            except Exception:
+                pass
+    item_test_patterns: dict[str, str] = {}
+    test_allowlist: set[str] = set()
     contract_cmd_hashes: set[str] = set()
     if run_id and project_root:
         plan_md_p = os.path.join(project_root, ".orca", "runs", run_id, "master-plan.md")
@@ -4391,8 +4408,12 @@ def _verify_qa_evidence_ledger_and_ancestry(
         contracts_p = os.path.join(project_root, ".orca", "runs", run_id, "contracts.json")
         if os.path.isfile(contracts_p):
             try:
-                c_obj = json.loads(open(contracts_p, "r", encoding="utf-8", errors="ignore").read())
-                if isinstance(c_obj, dict):
+                loaded_c = json.loads(open(contracts_p, "r", encoding="utf-8", errors="ignore").read())
+                if isinstance(loaded_c, dict):
+                    c_obj = loaded_c
+                    for al_f in c_obj.get("test_allowlist") or []:
+                        if isinstance(al_f, str) and al_f.strip():
+                            test_allowlist.add(al_f.strip().replace("\\", "/").lstrip("./"))
                     for pk in c_obj.get("plan_items") or []:
                         if isinstance(pk, str) and re.match(r"^P\d+$", pk.strip()):
                             expected_plan_items.add(pk.strip())
@@ -4401,27 +4422,31 @@ def _verify_qa_evidence_ledger_and_ancestry(
                             ipk = str(item.get("id") or "").strip()
                             if re.match(r"^P\d+$", ipk):
                                 expected_plan_items.add(ipk)
-                            icmd = str(item.get("cmd") or item.get("acceptance_cmd") or "").strip()
-                            if icmd:
-                                contract_acceptance_cmds.append(icmd)
-                                contract_cmd_hashes.add(hashlib.sha256(icmd.encode("utf-8")).hexdigest()[:16])
+                                v_obj = item.get("verify")
+                                pat = ""
+                                if isinstance(v_obj, dict):
+                                    pat = str(v_obj.get("test_pattern") or "").strip()
+                                if not pat:
+                                    pat = str(item.get("test_pattern") or "").strip()
+                                if pat:
+                                    item_test_patterns[ipk] = pat
                             ihash = str(item.get("cmd_hash") or "").strip()
                             if ihash:
                                 contract_cmd_hashes.add(ihash)
-                    for ac in c_obj.get("acceptance_cmds") or []:
-                        if isinstance(ac, str) and ac.strip():
-                            contract_acceptance_cmds.append(ac.strip())
-                            contract_cmd_hashes.add(hashlib.sha256(ac.strip().encode("utf-8")).hexdigest()[:16])
                     for ch in c_obj.get("required_cmd_hashes") or []:
                         if isinstance(ch, str) and ch.strip():
                             contract_cmd_hashes.add(ch.strip())
             except Exception:
                 pass
+    for pk in expected_plan_items:
+        if pk not in item_test_patterns:
+            item_test_patterns[pk] = rf"(?i)\btest[_\-]?{pk.lower()}\b"
 
     # Item 1: Only read ledger files from ~/.orca/evidence (or ORCA_EVIDENCE_DIR) — never from worktree or project/.orca
     target_files: list[str] = []
     env_ev_dir = os.environ.get("ORCA_EVIDENCE_DIR", "").strip()
     ev_root = env_ev_dir if env_ev_dir else os.path.join(os.path.expanduser("~"), ".orca", "evidence")
+    ev_base_dir = os.path.dirname(ev_root) if os.path.isfile(ev_root) else ev_root
     if os.path.isfile(ev_root):
         target_files.append(ev_root)
     elif os.path.isdir(ev_root):
@@ -4429,11 +4454,33 @@ def _verify_qa_evidence_ledger_and_ancestry(
             os.path.join(ev_root, run_id or "default", f"{disp_id}.jsonl") if disp_id else "",
             os.path.join(ev_root, f"{disp_id}.jsonl") if disp_id else "",
         ):
-            if cand and os.path.isfile(cand) and cand not in target_files:
+            if cand and os.path.exists(cand) and cand not in target_files:
                 target_files.append(cand)
 
+    # C-FIX-18: Check stat (not symlink, owner == getuid(), mode == 0600) on ledger files
+    ledger_stat_errors: list[str] = []
     ledger_rows: list[dict] = []
     for lf_p in target_files:
+        try:
+            st = os.lstat(lf_p)
+            if stat.S_ISLNK(st.st_mode):
+                ledger_stat_errors.append(
+                    f"[ORCA LEDGER-INTEGRITY GUARD] File ledger '{lf_p}' là symlink! Thực thi Fail-Closed."
+                )
+                continue
+            if st.st_uid != os.getuid():
+                ledger_stat_errors.append(
+                    f"[ORCA LEDGER-INTEGRITY GUARD] File ledger '{lf_p}' không thuộc UID hiện tại ({st.st_uid} != {os.getuid()})!"
+                )
+                continue
+            if (st.st_mode & 0o777) != 0o600:
+                ledger_stat_errors.append(
+                    f"[ORCA LEDGER-INTEGRITY GUARD] File ledger '{lf_p}' có quyền truy cập không an toàn ({oct(st.st_mode & 0o777)} != 0o600)! "
+                    "Bắt buộc tạo qua 'orca-team verify'."
+                )
+        except Exception as exc:
+            ledger_stat_errors.append(f"[ORCA LEDGER-INTEGRITY GUARD] Không thể lstat ledger '{lf_p}': {exc}")
+            continue
         try:
             with open(lf_p, "r", encoding="utf-8", errors="ignore") as lf:
                 for raw_ln in lf:
@@ -4449,6 +4496,9 @@ def _verify_qa_evidence_ledger_and_ancestry(
                         continue
         except Exception:
             continue
+
+    if not ledger_rows and ledger_stat_errors:
+        return ledger_stat_errors[0]
 
     if not ledger_rows:
         return (
@@ -4486,10 +4536,25 @@ def _verify_qa_evidence_ledger_and_ancestry(
             )
         qa_rows.append(r)
 
-    # Evaluate chronological sequence per command/key for latest exit status, head_sha, dirty, tests_total, and TDD red->green
+    if ledger_stat_errors:
+        return ledger_stat_errors[0]
+
+    # C-FIX-18: Verify HMAC signature on every ledger row
+    secret_bytes, sec_err = cg.get_or_create_hmac_secret(ev_base_dir, create_if_missing=False)
+    if sec_err or not secret_bytes:
+        return sec_err or "[ORCA LEDGER-INTEGRITY GUARD] Thiếu khóa HMAC .hmac_secret hợp lệ!"
+    for r in qa_rows:
+        row_copy = {k: v for k, v in r.items() if k != "_file"}
+        if not cg.verify_row_hmac(row_copy, secret_bytes):
+            return (
+                "[ORCA LEDGER-INTEGRITY GUARD] Chữ ký HMAC ('row_hmac') của dòng bằng chứng trong ledger KHÔNG HỢP LỆ hoặc bị sửa tay! "
+                "CẤM chỉnh sửa trực tiếp file evidence.jsonl; bắt buộc chạy qua 'orca-team verify'."
+            )
+
+    # C-FIX-19 & C-FIX-16: Runner allowlist & kind-aware chronological evaluation
+    rows_by_key: dict[str, list[dict]] = {}
     latest_by_key: dict[str, dict] = {}
     history_by_key: dict[str, list[int]] = {}
-    noop_bins = {"true", "false", ":", "echo", "printf", "cat", "ls", "pwd", "sleep", "whoami", "date", "env", "export", "head", "tail", "wc", "touch"}
     for r in qa_rows:
         cmd_v = r.get("cmd")
         if isinstance(cmd_v, list):
@@ -4500,22 +4565,34 @@ def _verify_qa_evidence_ledger_and_ancestry(
             cmd_tokens_r = cmd_str.split()
         if not cmd_tokens_r:
             return "[ORCA QA EVIDENCE LEDGER GUARD] Dòng bằng chứng trong ledger có trường 'cmd' rỗng!"
-        exe_b = os.path.basename(cmd_tokens_r[0]).lower()
-        if exe_b in noop_bins or any(op in cmd_str for op in ("||", ";", "|", "$(", "`")):
+        if any(op in cmd_str for op in ("||", ";", "|", "$(", "`")):
             return (
-                f"[ORCA QA EVIDENCE LEDGER GUARD] Lệnh ghi trong ledger ('{cmd_str}') là lệnh no-op hoặc dùng toán tử shell che giấu lỗi! "
-                "Chỉ chấp nhận lệnh trình chạy test thực tế."
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Lệnh ghi trong ledger ('{cmd_str}') chứa toán tử shell che giấu lỗi!"
             )
-        key = str(r.get("cmd_hash") or cmd_str or r.get("kind") or "default")
+        r_kind = str(r.get("kind") or "test").strip().lower()
+        allowed_ok, allowed_err = cg.validate_runner_allowlist(cmd_tokens_r, r_kind)
+        if not allowed_ok:
+            return allowed_err
+        expected_hash = cg.canonical_cmd_hash(cmd_tokens_r)
+        row_hash = str(r.get("cmd_hash") or "").strip()
+        if row_hash != expected_hash:
+            return (
+                f"[ORCA LEDGER-INTEGRITY GUARD] Trường 'cmd_hash' ({row_hash}) không khớp với mã băm chuẩn ({expected_hash}) của lệnh '{cmd_str}'!"
+            )
+        key = f"{r_kind}:{expected_hash}"
         raw_exit = r.get("exit_code") if r.get("exit_code") is not None else r.get("exit")
         exit_code = int(raw_exit) if isinstance(raw_exit, (int, float)) and not isinstance(raw_exit, bool) else 1
+        rows_by_key.setdefault(key, []).append(r)
         history_by_key.setdefault(key, []).append(exit_code)
         latest_by_key[key] = r
 
-    covered_plan_items: set[str] = set()
     verified_cmd_hashes: set[str] = set()
+    has_test_kind = False
 
     for key, last_r in latest_by_key.items():
+        r_kind = str(last_r.get("kind") or "test").strip().lower()
+        if r_kind == "test":
+            has_test_kind = True
         raw_exit = last_r.get("exit_code") if last_r.get("exit_code") is not None else last_r.get("exit")
         exit_code = int(raw_exit) if isinstance(raw_exit, (int, float)) and not isinstance(raw_exit, bool) else 1
         failed_n = int(last_r.get("tests_failed") or last_r.get("failed") or 0)
@@ -4530,58 +4607,139 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 "[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger ghi nhận worktree đang bẩn (dirty!=false) lúc chạy test! "
                 "Hãy commit sạch mọi thay đổi rồi chạy lại 'orca-team verify' trước khi báo PASS."
             )
-        raw_total = last_r.get("tests_total")
-        if raw_total is None or not isinstance(raw_total, (int, float)) or isinstance(raw_total, bool) or int(raw_total) <= 0:
+        # C-FIX-16: tests_total > 0 only required for kind == "test"
+        if r_kind == "test":
+            raw_total = last_r.get("tests_total")
+            if raw_total is None or not isinstance(raw_total, (int, float)) or isinstance(raw_total, bool) or int(raw_total) <= 0:
+                return (
+                    f"[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger thiếu 'tests_total' hoặc 'tests_total={raw_total}' (<= 0, không có test nào chạy)! "
+                    "CẤM báo cáo PASS khi chưa có test thực tế nào được thực thi."
+                )
+        # C-FIX-18: Exact 40-hex SHA match (no prefix match)
+        row_sha = str(last_r.get("head_sha") or "").strip().lower()
+        if not row_sha or not re.fullmatch(r"[0-9a-f]{40}", row_sha):
             return (
-                f"[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger thiếu 'tests_total' hoặc 'tests_total={raw_total}' (<= 0, không có test nào chạy)! "
-                "CẤM báo cáo PASS khi chưa có test thực tế nào được thực thi."
+                f"[ORCA QA EVIDENCE LEDGER GUARD] Dòng bằng chứng trong Evidence Ledger có 'head_sha={row_sha}' không phải 40 ký tự hex đầy đủ! "
+                "Thực thi Fail-Closed: Cấm rút gọn hoặc bỏ trống commit SHA."
             )
-        row_sha = str(last_r.get("head_sha") or "").strip()
-        if not row_sha:
-            return (
-                "[ORCA QA EVIDENCE LEDGER GUARD] Dòng bằng chứng trong Evidence Ledger thiếu 'head_sha' (rỗng)! "
-                "Thực thi Fail-Closed: Bắt buộc phải có commit SHA thật khớp với HEAD hiện tại."
-            )
-        is_stale_marker = row_sha.lower().startswith(("old", "stale", "outdated", "000000"))
-        sha_mismatch = bool(
-            not current_head_sha.startswith(row_sha)
-            and not row_sha.startswith(current_head_sha)
-        )
-        if is_stale_marker or sha_mismatch:
+        if row_sha != current_head_sha.lower():
             return (
                 f"[ORCA QA EVIDENCE LEDGER GUARD] Bằng chứng trong Evidence Ledger có commit 'head_sha={row_sha}' "
                 f"CŨ / KHÁC với HEAD hiện tại ('{current_head_sha}')! "
                 f"Mọi lần sửa code hoặc commit mới đều làm vô hiệu hóa kết quả test cũ. "
                 f"Cách sửa bắt buộc: Chạy lại 'orca-team verify' trên commit HEAD hiện tại trước khi báo PASS!"
             )
-        for pi in last_r.get("plan_items") or []:
-            if isinstance(pi, str) and pi.strip():
-                for m_p in re.findall(r"P\d+", pi.strip()):
-                    covered_plan_items.add(m_p)
         if last_r.get("cmd_hash"):
             verified_cmd_hashes.add(str(last_r.get("cmd_hash")))
 
-    # Item 3: Verify 100% [P1..Pn] Plan Item Coverage (A05)
-    if expected_plan_items:
-        missing_p = sorted(expected_plan_items - covered_plan_items, key=lambda x: int(x[1:]) if x[1:].isdigit() else 999)
-        if missing_p:
-            return (
-                f"[ORCA PLAN-COVERAGE GUARD] Evidence Ledger chưa phủ đủ 100% hạng mục Plan của Run '{run_id}' "
-                f"(thiếu bằng chứng cho: {', '.join(missing_p)})! "
-                f"Cách sửa bắt buộc: Chạy 'orca-team verify --run {run_id} --dispatch-id {disp_id or '<DID>'} --plan-items {','.join(sorted(expected_plan_items))} -- <lệnh test>'!"
-            )
+    if not has_test_kind:
+        return (
+            "[ORCA QA EVIDENCE LEDGER GUARD] Evidence Ledger chỉ có lệnh build/lint/typecheck mà CHƯA có lệnh kiểm thử (kind='test') nào! "
+            "Bắt buộc chạy ít nhất 1 bộ kiểm thử thực tế qua 'orca-team verify'."
+        )
 
-    # Item 8: TDD Red -> Green required by default (unless ORCA_REQUIRE_TDD=0)
+    # C-FIX-16: TDD Red -> Green required ONLY for kind == "test" (unless ORCA_REQUIRE_TDD=0)
     require_tdd = os.environ.get("ORCA_REQUIRE_TDD", "1").strip() != "0"
     if require_tdd:
         for key, seq in history_by_key.items():
+            last_r = latest_by_key[key]
+            r_kind = str(last_r.get("kind") or "test").strip().lower()
+            if r_kind != "test":
+                continue
             if not (len(seq) >= 2 and any(x != 0 for x in seq[:-1]) and seq[-1] == 0):
                 return (
-                    f"[ORCA TDD GUARD] Hạng mục/lệnh '{key}' chưa có đủ chuỗi bằng chứng TDD Red→Green "
+                    f"[ORCA TDD GUARD] Bộ kiểm thử '{key}' chưa có đủ chuỗi bằng chứng TDD Red→Green "
                     f"(cần ít nhất 1 dòng exit_code!=0 trước và 1 dòng exit_code=0 sau cùng cmd_hash trong ledger)!"
                 )
 
-    # Item 2 & 3: Verify contracts.json cmd_hash & re-run acceptance/test commands at PASS time (anti-same-UID forgery)
+    # C-FIX-14: Test-Tree Integrity (compare live worktree test_tree_hash with red/green rows & merge-base main HEAD)
+    live_test_hash, live_test_files = cg.compute_test_tree_hash(real_cwd)
+    if not live_test_hash or not live_test_files:
+        return (
+            "[ORCA TEST-INTEGRITY GUARD] Không tìm thấy file kiểm thử hợp lệ trong worktree! "
+            "Thực thi Fail-Closed: Dự án bắt buộc phải có file test thật."
+        )
+    for key, r_list in rows_by_key.items():
+        green_r = r_list[-1]
+        if str(green_r.get("kind") or "test").strip().lower() != "test":
+            continue
+        green_t_hash = str(green_r.get("test_tree_hash") or "").strip()
+        if green_t_hash != live_test_hash:
+            return (
+                f"[ORCA TEST-INTEGRITY GUARD] Mã băm cây kiểm thử ('test_tree_hash={green_t_hash}') trong ledger "
+                f"KHÔNG KHỚP với file test hiện tại trên đĩa ('{live_test_hash}')!"
+            )
+        red_rows = [rr for rr in r_list[:-1] if int(rr.get("exit_code") if rr.get("exit_code") is not None else 1) != 0]
+        for red_r in red_rows:
+            red_t_hash = str(red_r.get("test_tree_hash") or "").strip()
+            if red_t_hash != live_test_hash:
+                changed_test_files: list[str] = []
+                red_sha = str(red_r.get("head_sha") or "").strip()
+                if red_sha and re.fullmatch(r"[0-9a-f]{40}", red_sha.lower()):
+                    try:
+                        df_p = subprocess.run(
+                            ["git", "-C", real_cwd, "diff", "--name-only", red_sha, current_head_sha],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if df_p.returncode == 0:
+                            for f_ln in (df_p.stdout or "").splitlines():
+                                f_clean = f_ln.strip().replace("\\", "/").lstrip("./")
+                                if f_clean and cg.is_test_file_path(f_clean):
+                                    changed_test_files.append(f_clean)
+                    except Exception:
+                        pass
+                if not changed_test_files:
+                    changed_test_files = list(live_test_files)
+                disallowed = [f for f in changed_test_files if f not in test_allowlist]
+                if disallowed:
+                    return (
+                        f"[ORCA TEST-INTEGRITY GUARD] Phát hiện sửa đổi file kiểm thử giữa pha RED và GREEN "
+                        f"ngoài danh sách cho phép (test_allowlist): {', '.join(disallowed)}! "
+                        f"CẤM làm yếu assert hoặc sửa bài test để ép xanh kết quả."
+                    )
+
+    # Also check git diff against merge-base main/master HEAD for pre-existing test files modified outside test_allowlist
+    for base_ref in ("main", "master"):
+        try:
+            mb_p = subprocess.run(
+                ["git", "-C", real_cwd, "merge-base", base_ref, "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if mb_p.returncode == 0 and (mb_p.stdout or "").strip():
+                mb_sha = (mb_p.stdout or "").strip()
+                if mb_sha.lower() != current_head_sha.lower():
+                    ls_p = subprocess.run(
+                        ["git", "-C", real_cwd, "ls-tree", "-r", "--name-only", mb_sha],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    base_files = {
+                        ln.strip().replace("\\", "/").lstrip("./")
+                        for ln in (ls_p.stdout or "").splitlines()
+                        if ln.strip()
+                    }
+                    df_p = subprocess.run(
+                        ["git", "-C", real_cwd, "diff", "--name-only", mb_sha, current_head_sha],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if df_p.returncode == 0:
+                        mod_tests = [
+                            ln.strip().replace("\\", "/").lstrip("./")
+                            for ln in (df_p.stdout or "").splitlines()
+                            if ln.strip()
+                            and cg.is_test_file_path(ln.strip())
+                            and ln.strip().replace("\\", "/").lstrip("./") in base_files
+                            and ln.strip().replace("\\", "/").lstrip("./") not in test_allowlist
+                        ]
+                        if mod_tests:
+                            return (
+                                f"[ORCA TEST-INTEGRITY GUARD] Phát hiện file kiểm thử gốc trên nhánh '{base_ref}' bị sửa đổi "
+                                f"ngoài 'contracts.json.test_allowlist': {', '.join(mod_tests)}!"
+                            )
+                break
+        except Exception:
+            pass
+
+    # C-FIX-13: Resolve canonical gate commands ONLY from contracts.json / orca-team.json / repo manifests (NEVER from ledger!)
     if contract_cmd_hashes:
         missing_hashes = contract_cmd_hashes - verified_cmd_hashes
         if missing_hashes:
@@ -4589,45 +4747,77 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 f"[ORCA CONTRACT-HASH GUARD] Evidence Ledger thiếu cmd_hash bắt buộc trong contracts.json ({', '.join(sorted(missing_hashes))})!"
             )
 
-    cmds_to_rerun: list[tuple[list[str], str]] = []
-    seen_rerun: set[str] = set()
-    for acc_cmd in contract_acceptance_cmds:
-        toks = acc_cmd.split()
-        if toks:
-            s_key = " ".join(toks)
-            if s_key not in seen_rerun:
-                seen_rerun.add(s_key)
-                cmds_to_rerun.append((toks, real_cwd))
-    for last_r in latest_by_key.values():
-        cmd_v = last_r.get("cmd")
-        toks = [str(x) for x in cmd_v if str(x).strip()] if isinstance(cmd_v, list) else str(cmd_v or "").split()
-        if toks:
-            s_key = " ".join(toks)
-            if s_key not in seen_rerun:
-                seen_rerun.add(s_key)
-                r_cwd = str(last_r.get("cwd") or "").strip()
-                if not r_cwd or not os.path.isdir(r_cwd):
-                    r_cwd = real_cwd
-                cmds_to_rerun.append((toks, r_cwd))
+    canonical_cmds = cg.resolve_canonical_gate_commands(
+        real_cwd, project_root or real_cwd, contracts_obj=c_obj, cfg_obj=cfg_obj
+    )
+    if not canonical_cmds:
+        return (
+            "[ORCA CANONICAL-TEST GUARD] Không thể xác định lệnh kiểm thử chuẩn (canonical test command)! "
+            "Thực thi Fail-Closed: hãy khai báo 'gateCommands' (dạng list token) trong 'orca-team.json' hoặc 'verify_cmd' trong 'contracts.json'."
+        )
 
-    for acc_tokens, run_cwd in cmds_to_rerun:
-        acc_cmd_str = " ".join(acc_tokens)
+    canonical_test_cmds = [(k, toks) for k, toks in canonical_cmds if k == "test"]
+    if not canonical_test_cmds:
+        return "[ORCA CANONICAL-TEST GUARD] Không tìm thấy lệnh kiểm thử chuẩn (kind='test') trong dự án!"
+
+    for g_kind, g_tokens in canonical_test_cmds:
+        c_hash = cg.canonical_cmd_hash(g_tokens)
+        if c_hash not in verified_cmd_hashes:
+            return (
+                f"[ORCA CANONICAL-TEST GUARD] Evidence Ledger chưa ghi nhận kết quả của lệnh kiểm thử chuẩn "
+                f"'{' '.join(g_tokens)}' (cmd_hash={c_hash})! "
+                f"CẤM chạy script/test tự chế thay cho bộ test chuẩn của dự án."
+            )
+
+    # Also include any verified build/lint/typecheck commands from latest_by_key (validated against allowlist above)
+    cmds_to_rerun: list[tuple[str, list[str]]] = list(canonical_cmds)
+    seen_hashes = {cg.canonical_cmd_hash(toks) for _, toks in cmds_to_rerun}
+    for last_r in latest_by_key.values():
+        rk = str(last_r.get("kind") or "test").strip().lower()
+        if rk in ("build", "lint", "typecheck"):
+            cmd_v = last_r.get("cmd")
+            toks = [str(x) for x in cmd_v if str(x).strip()] if isinstance(cmd_v, list) else str(cmd_v or "").split()
+            ch = cg.canonical_cmd_hash(toks)
+            if toks and ch not in seen_hashes:
+                seen_hashes.add(ch)
+                cmds_to_rerun.append((rk, toks))
+
+    combined_test_outputs: list[str] = []
+    total_live_passed = 0
+
+    for g_kind, acc_tokens in cmds_to_rerun:
+        exec_tokens = list(acc_tokens)
+        # Ensure verbose test name output for C-FIX-15 pattern matching
+        if g_kind == "test":
+            norm_toks = cg.normalize_cmd_tokens(exec_tokens)
+            if (
+                (len(norm_toks) >= 3 and norm_toks[0] == "python3" and norm_toks[1] == "-m" and norm_toks[2] in ("unittest", "pytest"))
+                or (norm_toks and norm_toks[0] == "pytest")
+                or (len(norm_toks) >= 2 and norm_toks[0] == "go" and norm_toks[1] == "test")
+            ):
+                if "-v" not in exec_tokens and "--verbose" not in exec_tokens:
+                    exec_tokens.append("-v")
+        acc_cmd_str = " ".join(exec_tokens)
         try:
             acc_p = subprocess.run(
-                acc_tokens,
-                cwd=run_cwd,
+                exec_tokens,
+                cwd=real_cwd,
                 shell=False,
                 capture_output=True,
                 text=True,
                 timeout=600,
+                env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
             )
             if acc_p.returncode != 0:
                 return (
-                    f"[ORCA ACCEPTANCE RERUN GUARD] Guard tự chạy lại lệnh kiểm thử '{acc_cmd_str}' "
+                    f"[ORCA ACCEPTANCE RERUN GUARD] Guard tự chạy lại lệnh chuẩn '{acc_cmd_str}' (kind={g_kind}) "
                     f"tại thời điểm PASS và nhận kết quả THẤT BẠI (exit_code={acc_p.returncode})! "
-                    f"CẤM giả mạo ledger khi test thực tế vẫn đang fail."
+                    f"CẤM giả mạo ledger khi kiểm thử/build thực tế đang fail."
                 )
+            if g_kind != "test":
+                continue
             combined_live = (acc_p.stdout or "") + "\n" + (acc_p.stderr or "")
+            combined_test_outputs.append(combined_live)
             live_passed = 0
             live_failed = 0
             for m_p in re.finditer(r"\b(\d+)\s+(?:passed|passing)\b", combined_live, re.IGNORECASE):
@@ -4648,14 +4838,33 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 live_passed = max(live_passed, gradle_ok)
             if live_failed > 0 or live_passed <= 0:
                 return (
-                    f"[ORCA ACCEPTANCE RERUN GUARD] Guard tự chạy lại lệnh '{acc_cmd_str}' tại thời điểm PASS "
-                    f"nhưng không ghi nhận được test nào PASS (live_passed={live_passed}, live_failed={live_failed})! "
-                    f"Thực thi Zero-Trust chống giả mạo cùng-UID: lệnh kiểm thử phải thực sự chạy và in kết quả > 0 test passed."
+                    f"[ORCA ACCEPTANCE RERUN GUARD] Guard tự chạy lại lệnh kiểm thử chuẩn '{acc_cmd_str}' tại thời điểm PASS "
+                    f"nhưng không ghi nhận được test nào PASS (live_passed={live_passed}, live_failed={live_failed})!"
                 )
+            total_live_passed += live_passed
         except Exception as exc:
             return (
-                f"[ORCA ACCEPTANCE RERUN GUARD] Không thể thực thi lệnh kiểm thử '{acc_cmd_str}' tại thời điểm PASS ({exc})! "
-                f"Thực thi Fail-Closed chống giả mạo ledger."
+                f"[ORCA ACCEPTANCE RERUN GUARD] Không thể thực thi lệnh chuẩn '{acc_cmd_str}' tại thời điểm PASS ({exc})! "
+                f"Thực thi Fail-Closed."
+            )
+
+    # C-FIX-15: Verify 100% [P1..Pn] coverage by matching each item's test_pattern in live test output
+    if expected_plan_items:
+        full_live_out = "\n".join(combined_test_outputs)
+        missing_p: list[str] = []
+        for pk in sorted(expected_plan_items, key=lambda x: int(x[1:]) if x[1:].isdigit() else 999):
+            pat = item_test_patterns.get(pk) or rf"(?i)\btest[_\-]?{pk.lower()}\b"
+            try:
+                if not re.search(pat, full_live_out):
+                    missing_p.append(pk)
+            except re.error:
+                if pat not in full_live_out:
+                    missing_p.append(pk)
+        if missing_p or total_live_passed < len(expected_plan_items):
+            missing_label = ", ".join(missing_p) if missing_p else f"số test chạy ({total_live_passed}) < số hạng mục ({len(expected_plan_items)})"
+            return (
+                f"[ORCA PLAN-COVERAGE GUARD] thiếu test thật cho {missing_label} "
+                f"(output kiểm thử live không khớp test_pattern của đủ 100% hạng mục [P1..Pn] trong contracts.json)!"
             )
 
     return ""

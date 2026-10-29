@@ -237,6 +237,14 @@ Nếu bạn muốn xóa sạch toàn bộ các lệnh CLI (`orca-team`, `orca-pr
 
 ---
 
+## 🛡️ Zero-Trust QA & Critic Gate (`C-FIX-01..C-FIX-19`)
+
+* **Canonical Test Execution (`C-FIX-13`, `C-FIX-17`, `C-FIX-19`):** Guard (`orca-command-guard.py`) **không bao giờ** lấy lệnh `cmd` từ `evidence.jsonl` để thực thi (ngăn chặn Confused Deputy / RCE). Lệnh kiểm thử chỉ được phân giải từ `contracts.json` (`verify_cmd` / `items[].verify.cmd`), `orca-team.json` (`gateCommands` dạng mảng token), hoặc manifest gốc của repo (`package.json`, `pytest.ini`, `pyproject.toml`, `tests/`, `go.mod`, `Cargo.toml`) và bắt buộc thuộc allowlist trình chạy test chuẩn.
+* **Test-Tree Integrity (`C-FIX-14`) & Pattern Coverage (`C-FIX-15`):** `orca-team verify` ghi nhận `test_tree_hash` (SHA-256 toàn bộ file test/config). Guard kiểm tra sự toàn vẹn của file test giữa pha RED và GREEN cũng như so với `merge-base main HEAD` (chỉ cho phép sửa file test nằm trong `contracts.json.test_allowlist` được Critic duyệt), đồng thời đối chiếu output thực thi live với `test_pattern` của từng hạng mục `[P1..Pn]`.
+* **Ledger Integrity & Lưu ý Mô hình Đe dọa Cùng-UID (`C-FIX-18`):** Mỗi dòng ledger yêu cầu `head_sha` đủ 40 ký tự hex (cấm khớp tiền tố), quyền file `0600` (không phải symlink, đúng `uid`), và chữ ký `row_hmac = HMAC-SHA256(secret, row)` với khóa tại `~/.orca/evidence/.hmac_secret` (`0600`). *Lưu ý bảo mật:* Vì tiến trình của agent chạy cùng UID với người dùng nên về mặt lý thuyết agent cùng UID vẫn có thể đọc `.hmac_secret`; do đó `row_hmac` đóng vai trò **tăng chi phí giả mạo và phát hiện sửa đổi trực tiếp**, trong khi chốt chặn quyết định là **Canonical Live Re-run + Test-Tree Hash + Merge-Base Diff**.
+
+---
+
 ## 📖 Đọc Thêm
 
 * [Kiến Trúc Hệ Thống (Architecture)](./docs/architecture.md)

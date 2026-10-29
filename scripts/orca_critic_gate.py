@@ -9,8 +9,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
+import os
 import re
+import secrets
+import shlex
+import stat
 import sys
 import unicodedata
 from pathlib import Path
@@ -590,6 +595,378 @@ def validate_consensus_file(
             )
 
     return violations
+
+
+# ======================================================================
+# C-FIX-13 .. C-FIX-19: Canonical Runner Allowlist, Test-Tree Integrity,
+# Ledger HMAC & Canonical Gate Command Resolution
+# ======================================================================
+
+FORBIDDEN_SHELL_OPS = {"||", "&&", ";", "|", ">", ">>", "<", "&", "2>&1", "1>&2"}
+FORBIDDEN_BINARIES = {
+    "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish",
+    "env", "eval", "exec", "source", "true", "false", ":", "echo",
+    "printf", "cat", "ls", "pwd", "sleep", "whoami", "date", "export",
+    "head", "tail", "wc", "touch", "rm", "cp", "mv", "chmod", "chown",
+    "id", "uname", "hostname",
+}
+
+
+def normalize_cmd_tokens(cmd_tokens: list[str]) -> list[str]:
+    """Normalize command tokens (e.g. map any python/python3 interpreter path to 'python3') for stable hashing."""
+    if not cmd_tokens:
+        return []
+    out = [str(x).strip() for x in cmd_tokens if str(x).strip()]
+    if not out:
+        return []
+    exe_b = os.path.basename(out[0]).lower()
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?", exe_b):
+        out[0] = "python3"
+    elif exe_b in ("pytest", "py.test"):
+        out[0] = "pytest"
+    return out
+
+
+def canonical_cmd_hash(cmd_tokens: list[str]) -> str:
+    """Compute 16-hex SHA-256 hash over normalized command tokens."""
+    norm = normalize_cmd_tokens(cmd_tokens)
+    s = " ".join(norm)
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+
+def validate_runner_allowlist(cmd_tokens: list[str], kind: str = "test") -> tuple[bool, str]:
+    """
+    C-FIX-13 & C-FIX-19: Strict allowlist validation for `orca-team verify` and Guard.
+    Rejects shell wrappers (bash/sh/zsh), inline flags (-c, -e), relative scripts (./x.sh),
+    and arbitrary scripts (`python3 fake.py`). Only permits canonical test/build/lint runners.
+    """
+    if not isinstance(cmd_tokens, list) or not cmd_tokens:
+        return False, "[ORCA VERIFY RUNNER ALLOWLIST] Lệnh kiểm thử rỗng!"
+
+    tokens = [str(x).strip() for x in cmd_tokens if str(x).strip()]
+    if not tokens:
+        return False, "[ORCA VERIFY RUNNER ALLOWLIST] Lệnh kiểm thử rỗng!"
+
+    cmd_str = " ".join(tokens)
+    for tok in tokens:
+        if tok in FORBIDDEN_SHELL_OPS or any(op in tok for op in ("||", "&&", ";", "|", "$(", "`")):
+            return (
+                False,
+                f"[ORCA VERIFY GUARD] CẤM dùng toán tử nối chuỗi/chuyển hướng shell ('{tok}') trong 'orca-team verify'!",
+            )
+
+    t0 = tokens[0]
+    exe = os.path.basename(t0).lower()
+
+    if (t0.startswith("./") or t0.startswith("../")) and exe != "gradlew":
+        return (
+            False,
+            f"[ORCA VERIFY RUNNER ALLOWLIST] CẤM thực thi script đường dẫn tương đối ('{t0}')! Chỉ chấp nhận trình chạy chuẩn trong allowlist.",
+        )
+
+    if exe in FORBIDDEN_BINARIES:
+        return (
+            False,
+            f"[ORCA VERIFY RUNNER ALLOWLIST] CẤM dùng shell wrapper hoặc lệnh hệ thống ('{t0}') làm trình chạy kiểm thử! "
+            "Allowlist hợp lệ: pytest, python3 -m unittest|pytest, npm/pnpm/yarn/bun test, npx jest|vitest|playwright, go test, cargo test, dotnet test, mvn/gradle test, ctest, make test.",
+        )
+
+    for tok in tokens[1:]:
+        if tok in ("-c", "-e", "--eval", "--command") or (tok.startswith("-c") and exe != "pytest"):
+            return (
+                False,
+                f"[ORCA VERIFY RUNNER ALLOWLIST] CẤM dùng cờ thực thi mã inline ('{tok}') trong '{cmd_str}'! "
+                "Mọi bài test phải nằm trong cây thư mục test chuẩn của dự án và chạy qua test runner allowlist.",
+            )
+
+    eff_kind = (kind or "test").strip().lower()
+    if eff_kind == "test":
+        # 1. pytest
+        if exe in ("pytest", "py.test"):
+            return True, ""
+        # 2. python -m unittest|pytest
+        if re.fullmatch(r"python(?:3(?:\.\d+)?)?", exe):
+            if len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] in ("unittest", "pytest"):
+                return True, ""
+            return (
+                False,
+                f"[ORCA VERIFY RUNNER ALLOWLIST] Lệnh Python '{cmd_str}' bị từ chối! "
+                "Khi chạy test với Python, bắt buộc dùng 'python3 -m unittest ...' hoặc 'python3 -m pytest ...' (CẤM chạy trực tiếp file .py tự tạo).",
+            )
+        # 3. npm / pnpm / yarn / bun test
+        if exe in ("npm", "pnpm", "yarn", "bun"):
+            if len(tokens) >= 2 and (
+                tokens[1] in ("test", "t", "tst")
+                or (len(tokens) >= 3 and tokens[1] == "run" and tokens[2].startswith("test"))
+            ):
+                return True, ""
+        # 4. npx jest|vitest|playwright|mocha|cypress
+        if exe == "npx":
+            if len(tokens) >= 2 and tokens[1] in ("jest", "vitest", "playwright", "mocha", "cypress"):
+                return True, ""
+        # 5. Direct test runners
+        if exe in ("jest", "vitest", "playwright", "mocha", "cypress", "ctest"):
+            return True, ""
+        # 6. go / cargo / dotnet test
+        if exe in ("go", "cargo", "dotnet"):
+            if len(tokens) >= 2 and tokens[1] == "test":
+                return True, ""
+        # 7. mvn / gradle / gradlew test|check
+        if exe in ("mvn", "gradle", "gradlew"):
+            if len(tokens) >= 2 and any(x in ("test", "check") for x in tokens[1:]):
+                return True, ""
+        # 8. make test|check
+        if exe == "make":
+            if len(tokens) >= 2 and tokens[1] in ("test", "check"):
+                return True, ""
+        return (
+            False,
+            f"[ORCA VERIFY RUNNER ALLOWLIST] Lệnh '{cmd_str}' không thuộc allowlist trình chạy test chuẩn! "
+            "Allowlist hợp lệ: pytest, python3 -m unittest|pytest, npm/pnpm/yarn/bun test, npx jest|vitest|playwright, go test, cargo test, dotnet test, mvn/gradle test, ctest, make test.",
+        )
+
+    # kind in ("build", "lint", "typecheck")
+    if eff_kind in ("build", "lint", "typecheck"):
+        if exe in ("npm", "pnpm", "yarn", "bun"):
+            if len(tokens) >= 2 and (
+                tokens[1] in ("build", "lint", "typecheck", "check", "compile")
+                or (
+                    len(tokens) >= 3
+                    and tokens[1] == "run"
+                    and any(tokens[2].startswith(p) for p in ("build", "lint", "typecheck", "check", "compile"))
+                )
+            ):
+                return True, ""
+        if exe == "npx":
+            if len(tokens) >= 2 and tokens[1] in ("tsc", "eslint", "prettier", "biome", "ruff", "flake8", "mypy", "pyright"):
+                return True, ""
+        if re.fullmatch(r"python(?:3(?:\.\d+)?)?", exe):
+            if len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] in ("py_compile", "compileall", "ruff", "flake8", "mypy", "black"):
+                return True, ""
+        if exe in ("ruff", "flake8", "mypy", "pyright", "eslint", "tsc", "prettier", "biome"):
+            return True, ""
+        if exe in ("go", "cargo", "dotnet", "make", "mvn", "gradle", "gradlew"):
+            if len(tokens) >= 2 and tokens[1] in ("build", "vet", "check", "clippy", "lint", "typecheck", "compile", "assemble"):
+                return True, ""
+        return (
+            False,
+            f"[ORCA VERIFY RUNNER ALLOWLIST] Lệnh {eff_kind} '{cmd_str}' không thuộc allowlist chuẩn "
+            "(npm/pnpm/yarn/bun run build|lint|typecheck, python3 -m py_compile|ruff|flake8|mypy, npx tsc|eslint, cargo/go build|check)!",
+        )
+
+    return False, f"[ORCA VERIFY RUNNER ALLOWLIST] Loại kiểm thử kind='{eff_kind}' không hợp lệ!"
+
+
+def is_test_file_path(rel_path: str) -> bool:
+    """Return True if a relative POSIX file path is a test file or test runner configuration."""
+    p = str(rel_path or "").strip().replace("\\", "/").lstrip("./")
+    if not p:
+        return False
+    parts = [x.lower() for x in p.split("/") if x]
+    if any(x in (".git", ".orca", ".orca-cache", "node_modules", "__pycache__", ".pytest_cache", ".venv", "venv", "dist", "build") for x in parts):
+        return False
+    base = parts[-1]
+    if base.endswith((".pyc", ".pyo", ".pyd")) or base == ".ds_store":
+        return False
+    if any(d in ("tests", "test", "__tests__", "spec", "e2e") for d in parts[:-1]):
+        return True
+    if (
+        re.match(r"^test_.*\.(?:py|ts|tsx|js|jsx|go|rs)$", base, re.IGNORECASE)
+        or re.match(r"^.*_test\.(?:py|go|rs)$", base, re.IGNORECASE)
+        or re.match(r"^.*\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs|py)$", base, re.IGNORECASE)
+    ):
+        return True
+    if base in (
+        "pytest.ini",
+        "pyproject.toml",
+        "tox.ini",
+        "tsconfig.spec.json",
+    ) or re.match(r"^(?:jest|vitest|playwright)\.config\..+$", base, re.IGNORECASE):
+        return True
+    return False
+
+
+def compute_test_tree_hash(repo_dir: Path | str) -> tuple[str, list[str]]:
+    """
+    C-FIX-14: Compute SHA-256 hash of all test files and test configs in `repo_dir`.
+    Returns (hash_str, sorted_rel_paths). If no test files exist, returns ("", []).
+    """
+    root = Path(repo_dir).resolve()
+    if not root.is_dir():
+        return "", []
+    ignore_dirs = {".git", ".orca", ".orca-cache", "node_modules", "__pycache__", ".pytest_cache", ".venv", "venv", "dist", "build"}
+    matched_files: list[str] = []
+    for cur_root, dirs, files in os.walk(root):
+        dirs[:] = sorted([d for d in dirs if d not in ignore_dirs and not d.startswith(".orca")])
+        for fn in sorted(files):
+            fp = Path(cur_root) / fn
+            try:
+                rel_p = fp.relative_to(root).as_posix()
+            except Exception:
+                continue
+            if is_test_file_path(rel_p):
+                matched_files.append(rel_p)
+    matched_files.sort()
+    if not matched_files:
+        return "", []
+    h = hashlib.sha256()
+    for rel_p in matched_files:
+        fp = root / rel_p
+        try:
+            raw_b = fp.read_bytes()
+        except Exception:
+            raw_b = b""
+        h.update(rel_p.encode("utf-8") + b"\0" + hashlib.sha256(raw_b).digest() + b"\n")
+    return f"sha256:{h.hexdigest()}", matched_files
+
+
+def get_or_create_hmac_secret(ev_base_dir: Path | str, create_if_missing: bool = True) -> tuple[bytes | None, str]:
+    """
+    C-FIX-18: Load or create 0600 HMAC secret in `ev_base_dir/.hmac_secret`.
+    Verifies file is not a symlink, belongs to current UID, and has mode 0600.
+    Returns (secret_bytes, error_reason).
+    """
+    base = Path(ev_base_dir)
+    sec_path = base / ".hmac_secret"
+    if not sec_path.exists():
+        if not create_if_missing:
+            return None, f"[ORCA LEDGER-INTEGRITY GUARD] Không tìm thấy khóa HMAC ('{sec_path}')! Ledger chưa được ký bởi orca-team verify."
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(sec_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as sf:
+                sf.write(secrets.token_hex(32))
+            os.chmod(str(sec_path), 0o600)
+        except Exception as exc:
+            return None, f"[ORCA LEDGER-INTEGRITY GUARD] Không thể khởi tạo khóa HMAC ('{exc}')!"
+
+    try:
+        st = os.lstat(str(sec_path))
+        if stat.S_ISLNK(st.st_mode):
+            return None, f"[ORCA LEDGER-INTEGRITY GUARD] Khóa HMAC '{sec_path}' là symlink bất hợp lệ!"
+        if st.st_uid != os.getuid():
+            return None, f"[ORCA LEDGER-INTEGRITY GUARD] Khóa HMAC '{sec_path}' không thuộc UID hiện tại ({st.st_uid} != {os.getuid()})!"
+        if (st.st_mode & 0o777) != 0o600:
+            return None, f"[ORCA LEDGER-INTEGRITY GUARD] Quyền file khóa HMAC '{sec_path}' không đúng 0600 ({oct(st.st_mode & 0o777)})!"
+        raw = sec_path.read_text(encoding="utf-8").strip()
+        if len(raw) < 32:
+            return None, f"[ORCA LEDGER-INTEGRITY GUARD] Khóa HMAC '{sec_path}' bị hỏng hoặc quá ngắn!"
+        return raw.encode("utf-8"), ""
+    except Exception as exc:
+        return None, f"[ORCA LEDGER-INTEGRITY GUARD] Không thể đọc khóa HMAC '{sec_path}' ({exc})!"
+
+
+def compute_row_hmac(row: dict[str, Any], secret: bytes) -> str:
+    """Compute HMAC-SHA256 for a ledger row (excluding `row_hmac` and internal `_file` keys)."""
+    clean = {k: v for k, v in row.items() if k not in ("row_hmac", "_file")}
+    canon = json.dumps(clean, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hmac.new(secret, canon, hashlib.sha256).hexdigest()
+
+
+def verify_row_hmac(row: dict[str, Any], secret: bytes) -> bool:
+    """Constant-time verification of `row_hmac` on a ledger row."""
+    sig = str(row.get("row_hmac") or "").strip()
+    if not sig or not re.fullmatch(r"[0-9a-f]{64}", sig):
+        return False
+    expected = compute_row_hmac(row, secret)
+    return hmac.compare_digest(sig, expected)
+
+
+def resolve_canonical_gate_commands(
+    worktree_dir: Path | str,
+    main_root: Path | str | None = None,
+    contracts_obj: dict[str, Any] | None = None,
+    cfg_obj: dict[str, Any] | None = None,
+) -> list[tuple[str, list[str]]]:
+    """
+    C-FIX-13 & C-FIX-17: Resolve canonical (kind, cmd_tokens) pairs from:
+    1) contracts.json (`verify_cmd` or `items[].verify.cmd`),
+    2) orca-team.json (`gateCommands` with list-of-tokens `cmd`),
+    3) repository manifests in `worktree_dir` (fallback `main_root`).
+    Never reads from ledger and never falls back to `git status --porcelain`.
+    """
+    wt = Path(worktree_dir).resolve() if worktree_dir else Path.cwd().resolve()
+    mr = Path(main_root).resolve() if main_root else wt
+    resolved: list[tuple[str, list[str]]] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    def _add(k: str, toks: list[str]) -> None:
+        clean_t = [str(x).strip() for x in toks if str(x).strip()]
+        if not clean_t:
+            return
+        ok, _ = validate_runner_allowlist(clean_t, k)
+        if not ok:
+            return
+        norm_key = (k, " ".join(normalize_cmd_tokens(clean_t)))
+        if norm_key not in seen_keys:
+            seen_keys.add(norm_key)
+            resolved.append((k, clean_t))
+
+    # 1. From contracts.json
+    if isinstance(contracts_obj, dict):
+        top_v = contracts_obj.get("verify_cmd")
+        if isinstance(top_v, list) and top_v:
+            _add("test", [str(x) for x in top_v])
+        elif isinstance(top_v, str) and top_v.strip():
+            _add("test", shlex.split(top_v.strip()))
+        for it in contracts_obj.get("items") or []:
+            if isinstance(it, dict):
+                v_obj = it.get("verify")
+                if isinstance(v_obj, dict) and v_obj.get("cmd"):
+                    vc = v_obj["cmd"]
+                    toks = [str(x) for x in vc] if isinstance(vc, list) else shlex.split(str(vc))
+                    _add("test", toks)
+                elif it.get("verify_cmd"):
+                    vc = it["verify_cmd"]
+                    toks = [str(x) for x in vc] if isinstance(vc, list) else shlex.split(str(vc))
+                    _add("test", toks)
+
+    # 2. From orca-team.json `gateCommands`
+    if isinstance(cfg_obj, dict):
+        g_cmds = cfg_obj.get("gateCommands")
+        if isinstance(g_cmds, list):
+            for entry in g_cmds:
+                if isinstance(entry, dict) and entry.get("cmd"):
+                    k = str(entry.get("kind") or "test").strip().lower()
+                    raw_c = entry["cmd"]
+                    toks = [str(x) for x in raw_c] if isinstance(raw_c, list) else shlex.split(str(raw_c))
+                    _add(k, toks)
+
+    # 3. From repository manifests (prefer worktree_dir if it has a manifest/tests, else main_root)
+    has_test_cmd = any(k == "test" for k, _ in resolved)
+    if not has_test_cmd:
+        for cand_dir in (wt, mr):
+            if not cand_dir.is_dir():
+                continue
+            pkg_p = cand_dir / "package.json"
+            if pkg_p.is_file():
+                try:
+                    pkg = json.loads(pkg_p.read_text(encoding="utf-8", errors="ignore"))
+                    scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+                    if "lint" in scripts:
+                        _add("lint", ["npm", "run", "lint"])
+                    if "typecheck" in scripts:
+                        _add("typecheck", ["npm", "run", "typecheck"])
+                    if "test" in scripts:
+                        _add("test", ["npm", "test"])
+                        break
+                except Exception:
+                    pass
+            if (cand_dir / "pytest.ini").is_file():
+                _add("test", [sys.executable, "-m", "pytest"])
+                break
+            if (cand_dir / "pyproject.toml").is_file() or (cand_dir / "tests").is_dir() or (cand_dir / "test").is_dir():
+                t_dir = "tests" if (cand_dir / "tests").is_dir() or not (cand_dir / "test").is_dir() else "test"
+                _add("test", [sys.executable, "-m", "unittest", "discover", "-s", t_dir])
+                break
+            if (cand_dir / "go.mod").is_file():
+                _add("test", ["go", "test", "./..."])
+                break
+            if (cand_dir / "Cargo.toml").is_file():
+                _add("test", ["cargo", "test"])
+                break
+
+    return resolved
 
 
 def _cli_main(argv: list[str]) -> int:
