@@ -5759,6 +5759,7 @@ def cmd_plan(args: list, caller_dir: Path = None):
                 if t_role == "critic" and t_h:
                     critic_dids.append(str(r["did"]))
                     critic_handles.add(t_h)
+                    critic_handles.add(f"dispatch:{r['did']}")
 
             msgs = conn.execute(
                 "SELECT rowid AS r_idx, * FROM messages WHERE run_id = ? ORDER BY created_at ASC, rowid ASC",
@@ -5810,7 +5811,10 @@ def cmd_plan(args: list, caller_dir: Path = None):
         replies = [
             m for m in msgs
             if str(m["id"] or "") in expected_answer_to_challenge
-            and str(m["from_handle"] or "").lower() in ("leader", "coordinator", "orca")
+            and (
+                str(m["from_handle"] or "").lower() in ("leader", "coordinator", "orca")
+                or str(m["from_handle"] or "").startswith("run:")
+            )
             and str(m["to_handle"] or "") in critic_handles
             and str(m["thread_id"] or "") == expected_answer_to_challenge[str(m["id"] or "")]
             and len(str(m["body"] or "").strip()) >= 60

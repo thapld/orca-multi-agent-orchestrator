@@ -3724,6 +3724,7 @@ def _check_critic_two_way_debate_and_question_guards(
                             if is_critic_role and t_h:
                                 critic_dids_db.add(str(r_c["id"]))
                                 critic_handles_db.add(t_h)
+                                critic_handles_db.add(f"dispatch:{r_c['id']}")
 
                     cons_critic_did = str((cons_obj or {}).get("criticDispatchId") or "").strip()
                     if not critic_dids_db or not critic_handles_db or (cons_critic_did and cons_critic_did not in critic_dids_db):
@@ -3786,7 +3787,10 @@ def _check_critic_two_way_debate_and_question_guards(
                         ).fetchone()
                         if (
                             not m_row
-                            or str(m_row["from_handle"] or "").lower() not in ("leader", "coordinator", "orca")
+                            or (
+                                str(m_row["from_handle"] or "").lower() not in ("leader", "coordinator", "orca")
+                                and not str(m_row["from_handle"] or "").startswith("run:")
+                            )
                             or str(m_row["to_handle"] or "") not in critic_handles_db
                             or rid not in expected_ans_to_ch
                             or str(m_row["thread_id"] or "") != expected_ans_to_ch[rid]
