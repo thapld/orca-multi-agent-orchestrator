@@ -5687,6 +5687,20 @@ def cmd_plan(args: list, caller_dir: Path = None):
                 except Exception:
                     continue
 
+        if not (run_dir / "plan-draft.contracts.json").is_file() or not (run_dir / "plan-draft.md").is_file():
+            _append_critic_audit({"ok": False, "error": "missing_plan_draft_artifacts"})
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "missing_plan_draft_artifacts",
+                        "message": "[ORCA PLAN BINDING GUARD] Thiếu plan-draft.contracts.json / plan-draft.md do 'orca-team plan draft' khởi tạo!",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            sys.exit(2)
+
         plan_txt = ""
         for pp in (run_dir / "master-plan.md", run_dir / "plan-draft.md"):
             if pp.is_file():
@@ -5788,12 +5802,15 @@ def cmd_plan(args: list, caller_dir: Path = None):
             q_status = str(q["status"] or "").strip().lower()
             q_mid = str(q["message_id"] or "").strip()
             q_ans = str(q["answer_message_id"] or "").strip()
+            q_cat = str(q["created_at"] or "").strip()
+            q_aat = str(q["answered_at"] or "").strip()
             if (
                 q_did in critic_dids
                 and q_asker in critic_handles
                 and q_status in ("answered", "resolved", "closed")
                 and q_mid
                 and q_ans
+                and (not (q_cat and q_aat) or q_aat > q_cat)
             ):
                 qt_by_challenge[q_mid] = dict(q)
 

@@ -3070,6 +3070,51 @@ def _check_critic_bash_readonly_guard(cmd: str, no_heredoc: str, cwd_slot: str) 
     return ""
 
 
+def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> str:
+    """
+    C-FIX-35 & C-FIX-36: Best-effort Bash-hook defense blocking direct SQLite CLI / script mutations
+    against orchestration databases (`orchestration.db`, `messages`, `question_threads`, `orca_policy_anchors`).
+    """
+    sql_dml_re = re.compile(r"\b(?:INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|TRUNCATE|ATTACH|VACUUM)\b", re.IGNORECASE)
+    orch_tbl_re = re.compile(
+        r"\b(?:orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages)\b",
+        re.IGNORECASE,
+    )
+    if re.search(r"\bsqlite3\b", no_heredoc) and sql_dml_re.search(cmd):
+        return (
+            "[ORCA DB-INTEGRITY GUARD] CẤM dùng sqlite3 CLI để chạy lệnh ghi/sửa đổi cơ sở dữ liệu "
+            "(INSERT/UPDATE/DELETE/DROP/ALTER) qua Bash!"
+        )
+    if re.search(r"\b(?:cp|mv|rm|dd|install|rsync|ln)\b", no_heredoc) and (
+        re.search(r"\*\.db\b|orchestration\.db\b|Application\s+Support/orca", cmd, re.IGNORECASE)
+    ):
+        return "[ORCA DB-INTEGRITY GUARD] CẤM sao chép, ghi đè hoặc xóa file cơ sở dữ liệu (*.db) của Orca qua Bash!"
+    if re.search(r"\bsqlite3\b", cmd) and (
+        sql_dml_re.search(cmd) or orch_tbl_re.search(cmd) or re.search(r"\.connect\s*\(", cmd)
+    ):
+        return (
+            "[ORCA DB-INTEGRITY GUARD] CẤM ghi trực tiếp hoặc sửa đổi cơ sở dữ liệu điều phối "
+            "(orchestration.db) qua sqlite3/python! Mọi bản tin và trạng thái điều phối bắt buộc phải đi qua CLI chính thức của Orca."
+        )
+    if re.search(r"\b(?:python3?|node|ruby|perl|php|sh|bash|zsh)\b", no_heredoc):
+        for m_tok in re.finditer(r"['\"]?([/\w.\-~]+(?:\.py|\.js|\.sh|\.rb|\.pl))['\"]?", no_heredoc):
+            cand_p = os.path.expanduser(m_tok.group(1))
+            if not os.path.isabs(cand_p) and real_cwd:
+                cand_p = os.path.join(real_cwd, cand_p)
+            if os.path.isfile(cand_p):
+                try:
+                    if os.path.getsize(cand_p) <= 262144:
+                        scr_txt = open(cand_p, "r", encoding="utf-8", errors="ignore").read()
+                        if re.search(r"\bsqlite3\b", scr_txt) and (sql_dml_re.search(scr_txt) or orch_tbl_re.search(scr_txt)):
+                            return (
+                                f"[ORCA DB-INTEGRITY GUARD] CẤM chạy script '{m_tok.group(1)}' can thiệp trực tiếp "
+                                "vào cơ sở dữ liệu điều phối (sqlite3 DML / orchestration.db)!"
+                            )
+                except Exception:
+                    pass
+    return ""
+
+
 def _check_critic_two_way_debate_and_question_guards(
     cmd: str, sanitized_orch: str, payload: dict, args: dict
 ) -> str:
@@ -3091,16 +3136,10 @@ def _check_critic_two_way_debate_and_question_guards(
     if ro_err:
         return _handle_critic_gate_violation(ro_err, "", cmd)
 
-    # C-FIX-35: Block direct SQLite mutations targeting orchestration.db via Bash
-    if re.search(r"orchestration\.db\b", cmd, re.IGNORECASE) and (
-        re.search(r"\b(?:INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|TRUNCATE)\b", cmd, re.IGNORECASE)
-        or re.search(r"\bsqlite3\.connect\s*\(", cmd)
-    ):
-        return _handle_critic_gate_violation(
-            "[ORCA DB-INTEGRITY GUARD] CẤM ghi trực tiếp hoặc sửa đổi cơ sở dữ liệu điều phối (orchestration.db) qua sqlite3/python! Mọi bản tin và trạng thái điều phối bắt buộc phải đi qua CLI chính thức của Orca.",
-            "",
-            cmd,
-        )
+    # C-FIX-35 & C-FIX-36: Block direct SQLite mutations / script tampering targeting orchestration DB via Bash
+    db_err = _check_db_integrity_bash_guard(cmd, no_heredoc, real_cwd)
+    if db_err:
+        return _handle_critic_gate_violation(db_err, "", cmd)
 
     if not re.search(r"\borca(?:-team)?\b", sanitized_orch):
         return ""
@@ -3674,9 +3713,9 @@ def _check_critic_two_way_debate_and_question_guards(
                                         contracts_obj = loaded_c
                             except Exception:
                                 pass
-                    if not isinstance(contracts_obj, dict):
+                    if not isinstance(contracts_obj, dict) or not (draft_contracts_p and os.path.isfile(draft_contracts_p)):
                         return _handle_critic_gate_violation(
-                            f"[ORCA PLAN BINDING GUARD] Thiếu contracts.json cho Run '{explicit_run_id or 'active'}'! Chạy 'orca-team plan draft' và Critic Consensus trước.",
+                            f"[ORCA PLAN BINDING GUARD] Thiếu contracts.json / plan-draft.contracts.json cho Run '{explicit_run_id or 'active'}'! Chạy 'orca-team plan draft' và Critic Consensus trước.",
                             explicit_run_id,
                             cmd,
                         )
@@ -3768,7 +3807,7 @@ def _check_critic_two_way_debate_and_question_guards(
                         )
 
                     qt_rows_db = conn.execute(
-                        "SELECT message_id, dispatch_id, asker_handle, status, answer_message_id FROM question_threads WHERE run_id = ?",
+                        "SELECT message_id, dispatch_id, asker_handle, status, answer_message_id, created_at, answered_at FROM question_threads WHERE run_id = ?",
                         (explicit_run_id,),
                     ).fetchall()
                     qt_by_challenge: dict[str, dict] = {}
@@ -3778,12 +3817,15 @@ def _check_critic_two_way_debate_and_question_guards(
                         q_st = str(q_r["status"] or "").strip().lower()
                         q_mid = str(q_r["message_id"] or "").strip()
                         q_ans = str(q_r["answer_message_id"] or "").strip()
+                        q_cat = str(q_r["created_at"] or "").strip()
+                        q_aat = str(q_r["answered_at"] or "").strip()
                         if (
                             q_did in critic_dids_db
                             and q_asker in critic_handles_db
                             and q_st in ("answered", "resolved", "closed")
                             and q_mid
                             and q_ans
+                            and (not (q_cat and q_aat) or q_aat > q_cat)
                         ):
                             qt_by_challenge[q_mid] = dict(q_r)
 
@@ -5160,6 +5202,36 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 return False
             return True
 
+        def _has_substantive_source_diff(r_sha: str, g_sha: str, rel_p: str) -> bool:
+            p_clean = rel_p.strip().replace("\\", "/").lstrip("./")
+            if not _is_non_doc_source_file(p_clean):
+                return False
+            try:
+                old_p = subprocess.run(["git", "-C", real_cwd, "show", f"{r_sha}:{p_clean}"], capture_output=True, text=True, timeout=5)
+                new_p = subprocess.run(["git", "-C", real_cwd, "show", f"{g_sha}:{p_clean}"], capture_output=True, text=True, timeout=5)
+                if old_p.returncode != 0 or new_p.returncode != 0:
+                    return True
+                old_src = old_p.stdout or ""
+                new_src = new_p.stdout or ""
+                if p_clean.lower().endswith(".py"):
+                    import ast
+                    try:
+                        if ast.dump(ast.parse(old_src), include_attributes=False) == ast.dump(ast.parse(new_src), include_attributes=False):
+                            return False
+                    except Exception:
+                        pass
+                def _strip_comments_ws(s: str) -> list[str]:
+                    out: list[str] = []
+                    for ln in s.splitlines():
+                        st = ln.strip()
+                        if not st or st.startswith(("#", "//", "/*", "*", "*/", "--")):
+                            continue
+                        out.append(st)
+                    return out
+                return _strip_comments_ws(old_src) != _strip_comments_ws(new_src)
+            except Exception:
+                return True
+
         for key, r_list in rows_by_key.items():
             green_r = r_list[-1]
             if str(green_r.get("kind") or "test").strip().lower() != "test":
@@ -5185,7 +5257,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                 src_changed = [
                                     ln.strip()
                                     for ln in (df_src.stdout or "").splitlines()
-                                    if _is_non_doc_source_file(ln)
+                                    if _has_substantive_source_diff(r_sha, green_sha, ln)
                                 ]
                                 if src_changed:
                                     has_code_progression = True
@@ -5195,8 +5267,8 @@ def _verify_qa_evidence_ledger_and_ancestry(
                             break
                 if not has_code_progression:
                     return (
-                        f"[ORCA TDD-PROGRESSION GUARD] Chuỗi TDD RED→GREEN của '{key}' không có thay đổi mã nguồn thực tế "
-                        f"giữa pha RED và GREEN (head_sha='{green_sha[:12]}', chỉ có commit tài liệu/rác hoặc không đổi code)! "
+                        f"[ORCA TDD-PROGRESSION GUARD] Chuỗi TDD RED→GREEN của '{key}' không có thay đổi mã nguồn thực chất "
+                        f"giữa pha RED và GREEN (head_sha='{green_sha[:12]}', chỉ có commit tài liệu/comment/whitespace hoặc không đổi AST code)! "
                         "Bài kiểm thử phụ thuộc trạng thái ngoại lai ngoài git thay vì kiểm thử thay đổi code thực tế."
                     )
 
