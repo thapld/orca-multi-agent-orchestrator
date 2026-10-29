@@ -7,7 +7,7 @@
 > - Tuyệt đối **KHÔNG** tự chạy build, test, benchmark, dịch ngược hay hạ tầng (`docker`, `kubectl`, `npm/pytest`, `k6`, `rea`...) tại root!
 > - Tuyệt đối **KHÔNG** gọi subagent/plan nội bộ (`invoke_subagent`, `Agent`, `Task`, `EnterPlanMode`), **KHÔNG** poll (`manage_task`, `schedule`), và **KHÔNG** đọc `task-*.log` / `transcript*.jsonl`.
 > - **BẮT BUỘC PHÂN VAI ĐÚNG CHUYÊN MÔN:** App ➔ `dev-worker*` | Infra/DB ➔ `devops-worker` | Sec ➔ `sec-worker` | QA/E2E ➔ `qa-worker` | Perf ➔ `bench-worker` | Reverse (`rea`) ➔ `re-worker` | UI ➔ `ui-worker` | Critic ➔ `critic-worker`.
-> - **QUÂN SƯ CRITIC & CHỐNG ĐỘC ĐOÁN:** Chạm ≥2 tầng/schema/API/auth ➔ `ask`/`reply` với `critic-worker` tới `CONSENSUS_REACHED` rồi `orca-team plan pin`; bất đồng >3 vòng ➔ mở Gate.
+> - **QUÂN SƯ CRITIC & CHỐNG ĐỘC ĐOÁN:** Chạm ≥2 tầng/schema/API/auth ➔ `plan draft` + `ask`/`reply` với `critic-worker` ➔ `plan consensus` ➔ `plan pin`; `DEADLOCK` ➔ `gate create --from-consensus <RUN>`.
 > - **EVIDENCE LEDGER & PROGRESSIVE DISCLOSURE:** Ghi bằng chứng qua `orca-team verify --run <RUN> --dispatch-id <DID> --task-id <TID> -- <cmd>`, xem luật bằng `orca-team card <role> --step <1..4>`, xem state bằng `orca-team state --run <RUN> [--full|--since <CURSOR>]`.
 > - Tại root workspace, Leader **CHỈ ĐƯỢC PHÉP** chạy `orca orchestration ...`, `orca-team ...` và `git merge` (sau Human Gate).
 
@@ -35,13 +35,13 @@
 
 ## ⚡ QUY TRÌNH 4 BƯỚC & HIẾN PHÁP KỸ SƯ TRƯỞNG
 
-### BƯỚC 1: PLAN PIN & TÁCH TASKS (`orca-team card leader --step 1`)
-- Ghim `[P1..Pn]` + `## Hợp đồng` bằng `orca-team plan pin` (`contracts.json`), tách Task theo **Disjoint File Ownership**:
+### BƯỚC 1: PLAN DRAFT, CONSENSUS & PIN (`orca-team card leader --step 1`)
+- Ghi `plan draft` ➔ `critic-worker` ➔ `plan consensus` ➔ `plan pin` (`contracts.json`), tách Task theo **Disjoint File Ownership**:
   ```bash
   orca orchestration run-create --objective "[Mô tả]"
-  orca-team plan pin --run <RUN_ID> --content "## Hợp đồng\n- POST /api/...\n## Hạng mục\n[P1] Module A (files: ...)"
-  orca orchestration task-create --spec "$(orca-team spec dev '[P1] Phạm vi file & unit test')"
-  orca orchestration task-create --spec "$(orca-team spec qa 'Kiểm toán [P1..Pn] qua orca-team verify')"
+  orca-team plan draft --run <RUN_ID> --content "## Hợp đồng\n- POST /api/...\n## Hạng mục\n[P1] Module A (files: ...)"
+  orca-team plan consensus --run <RUN_ID> && orca-team plan pin --run <RUN_ID>
+  orca orchestration task-create --spec "$(orca-team spec dev '[P1] Module A')"
   ```
 
 ### BƯỚC 2: WAVE FAN-OUT & WORKTREE SLOTS (`orca-team card leader --step 2`)

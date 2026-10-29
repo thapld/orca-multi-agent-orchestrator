@@ -2760,29 +2760,169 @@ def _extract_cli_flag_value(cmd_text: str, flag_names: tuple[str, ...]) -> str:
     return m.group(3) or ""
 
 
+def _load_critic_gate_module():
+    """Load scripts/orca_critic_gate.py from the same directory as this guard."""
+    import importlib.util
+
+    gate_p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orca_critic_gate.py")
+    if not os.path.isfile(gate_p):
+        raise RuntimeError(f"Missing orca_critic_gate.py at {gate_p}")
+    spec = importlib.util.spec_from_file_location("orca_critic_gate", gate_p)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Cannot create spec for orca_critic_gate.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _handle_critic_gate_violation(
+    violation_msg: str,
+    run_id: str = "",
+    cmd_str: str = "",
+    plan_hash_val: str = "",
+) -> str:
+    """
+    C-FIX-05..09 / C16: Support ORCA_CRITIC_GATE_MODE=off|shadow|enforce (default: enforce).
+    In shadow mode, write to ~/.orca/evidence/critic-gate/would_block.jsonl and return '' (ALLOW).
+    """
+    if not violation_msg:
+        return ""
+    mode = os.environ.get("ORCA_CRITIC_GATE_MODE", "enforce").strip().lower()
+    if mode == "off":
+        return ""
+    if mode == "shadow":
+        try:
+            ev_base = os.environ.get("ORCA_EVIDENCE_DIR", "").strip() or os.path.join(
+                os.path.expanduser("~"), ".orca", "evidence"
+            )
+            cg_dir = os.path.join(ev_base, "critic-gate")
+            os.makedirs(cg_dir, exist_ok=True)
+            wb_file = os.path.join(cg_dir, "would_block.jsonl")
+            entry = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "run": run_id or "default",
+                "cmd": (cmd_str or "")[:300],
+                "planHash": plan_hash_val,
+                "violations": [violation_msg],
+                "action": "would_block",
+            }
+            with open(wb_file, "a", encoding="utf-8") as wf:
+                wf.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        _log_guard_decision("would_block", violation_msg, cmd_str, "critic-gate")
+        return ""
+    return violation_msg
+
+
+def _resolve_critic_run_dir(real_cwd: str, payload: dict, args: dict, run_id: str) -> tuple[str, str]:
+    """Return (project_root, run_dir) for a given run_id and cwd."""
+    candidates_root: list[str] = []
+    if real_cwd:
+        cur = real_cwd
+        for _ in range(6):
+            if os.path.isfile(os.path.join(cur, "orca-team.json")) or os.path.isdir(os.path.join(cur, ".orca", "runs")):
+                if cur not in candidates_root:
+                    candidates_root.append(cur)
+            nxt = os.path.dirname(cur)
+            if nxt == cur:
+                break
+            cur = nxt
+    ws_list = (payload.get("workspacePaths") if isinstance(payload, dict) else None) or []
+    for wp in ws_list:
+        if isinstance(wp, str) and wp.strip():
+            rp = os.path.realpath(wp.strip())
+            if rp not in candidates_root:
+                candidates_root.append(rp)
+    if real_cwd and real_cwd not in candidates_root:
+        candidates_root.append(real_cwd)
+
+    eff_run = (run_id or "").strip()
+    for root_cand in candidates_root:
+        if eff_run:
+            rd = os.path.join(root_cand, ".orca", "runs", eff_run)
+            if os.path.isdir(rd):
+                return root_cand, rd
+        else:
+            runs_parent = os.path.join(root_cand, ".orca", "runs")
+            if os.path.isdir(runs_parent):
+                subs = [
+                    os.path.join(runs_parent, d)
+                    for d in os.listdir(runs_parent)
+                    if os.path.isdir(os.path.join(runs_parent, d))
+                ]
+                if subs:
+                    subs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                    return root_cand, subs[0]
+
+    proj_root = candidates_root[0] if candidates_root else (real_cwd or "")
+    return proj_root, (os.path.join(proj_root, ".orca", "runs", eff_run or "default") if proj_root else "")
+
+
+def _check_critic_bash_readonly_guard(cmd: str, no_heredoc: str, cwd_slot: str) -> str:
+    """
+    C-FIX-08: Enforce read-only for critic-worker in Bash commands.
+    Blocks git commit/apply/checkout/restore/stash, sed -i, rm/mv/cp/redirection outside .orca/runs/<run>/critic/.
+    """
+    if not (cwd_slot and cwd_slot.startswith("critic-worker")):
+        return ""
+    if os.environ.get("ORCA_CRITIC_GATE_MODE", "enforce").strip().lower() == "off":
+        return ""
+
+    # 1. Block git mutating commands
+    if re.search(
+        r"\bgit\s+(?:commit|apply|checkout|restore|stash|merge|rebase|cherry-pick|reset|clean|am|mv|rm)\b",
+        no_heredoc,
+    ):
+        return "[ORCA CRITIC READ-ONLY GUARD] critic-worker chỉ được ghi dưới .orca/runs/<run>/critic/."
+
+    # 2. Block in-place file editors (sed -i, perl -i)
+    if re.search(r"\b(?:sed|perl)\b[^\n;|&]*\s-[a-zA-Z]*i\b", no_heredoc):
+        return "[ORCA CRITIC READ-ONLY GUARD] critic-worker chỉ được ghi dưới .orca/runs/<run>/critic/."
+
+    # 3. Block rm / mv / cp / touch / tee / redirection targeting outside .orca/runs/<run>/critic/
+    for m_red in re.finditer(r"(?:>|>>|\btee\s+(?:-a\s+)?)\s*['\"]?([^\s'\";|&]+)", no_heredoc):
+        target_p = m_red.group(1).strip()
+        if target_p in ("/dev/null", "/dev/stderr", "/dev/stdout") or target_p.startswith("&"):
+            continue
+        if not re.search(r"(?:^|[/\\])\.orca[/\\]runs[/\\][^/\\]+[/\\]critic[/\\]", target_p):
+            return "[ORCA CRITIC READ-ONLY GUARD] critic-worker chỉ được ghi dưới .orca/runs/<run>/critic/."
+
+    for m_rm in re.finditer(r"\b(?:rm|mv|cp|touch)\b\s+(?:-[a-zA-Z]+\s+)*['\"]?([^\s'\";|&]+)", no_heredoc):
+        target_p = m_rm.group(1).strip()
+        if not target_p or target_p.startswith("-"):
+            continue
+        if not re.search(r"(?:^|[/\\])\.orca[/\\]runs[/\\][^/\\]+[/\\]critic[/\\]", target_p):
+            return "[ORCA CRITIC READ-ONLY GUARD] critic-worker chỉ được ghi dưới .orca/runs/<run>/critic/."
+
+    return ""
+
+
 def _check_critic_two_way_debate_and_question_guards(
     cmd: str, sanitized_orch: str, payload: dict, args: dict
 ) -> str:
     """
-    Enforce mandatory 2-way debate (`ask` <-> `reply`) between Leader and `critic-worker`:
-    1. `[ORCA CRITIC 2-WAY DEBATE GUARD]`:
-       - Block chaining `orca orchestration ask` and `orca orchestration send` in the same command.
-       - Block `critic-worker` from sending `handoff` (`Critic Consensus` / `Critic Deadlock`) or `worker_done`
-         unless at least 1 `question_threads` row from that Critic dispatch has been `answered` by Leader (`reply`).
-    2. `[ORCA CRITIC REVIEW DEPTH GUARD]`:
-       - Block Leader from calling `orca orchestration reply` to a Critic question with a superficial body (< 60 chars).
-    3. `[ORCA REPLY GUARD]`:
-       - Block Leader from calling `orca orchestration send --to dispatch:<did>` when `<did>` has a `pending` question in `question_threads`
-         (must use `orca orchestration reply --id <msg_id>` so the blocking `ask` wakes up).
-    4. `[ORCA PENDING-QUESTION GUARD]`:
-       - Block Leader from calling `orca-team plan pin`, `orca orchestration worker-start`, or `orca-team wait-events` (after question was already delivered)
-         while a `status = 'pending'` question from a worker in the active Run remains unanswered.
+    Enforce mandatory 2-way debate (`ask` <-> `reply`) and Critic Consensus Gate (`C-FIX-01`..`C-FIX-12`):
+    - C-FIX-05: Validate Critic review JSON (coverage, quota, resolution, independence).
+    - C-FIX-06: Plan hash & message-log provenance binding on `plan pin` and `worker-start`.
+    - C-FIX-07: Deadlock escalation guard.
+    - C-FIX-08: Critic read-only enforcement.
+    - C-FIX-09: Independent hypothesis before first `ask`.
+    - C15: Fail-closed when `question_threads` is missing or internal error occurs on critic/pin/worker-start.
+    - C16: Support `ORCA_CRITIC_GATE_MODE=off|shadow|enforce`.
     """
+    no_heredoc = _strip_quoted_heredocs(cmd)
+    raw_cwd_in, real_cwd, cwd_slot = _detect_caller_slot_safe(payload, args, cmd)
+
+    # C-FIX-08: Bash read-only check for critic-worker (applies even if command does not mention `orca`)
+    ro_err = _check_critic_bash_readonly_guard(cmd, no_heredoc, cwd_slot)
+    if ro_err:
+        return _handle_critic_gate_violation(ro_err, "", cmd)
+
     if not re.search(r"\borca(?:-team)?\b", sanitized_orch):
         return ""
-    no_heredoc = _strip_quoted_heredocs(cmd)
 
-    # 1a. Block chaining `orca orchestration ask` and `orca orchestration send` in the same command
+    # 1a. Block chaining `orca orchestration ask` and `orca orchestration send` in the same command (C13)
     if re.search(r"\borca\s+orchestration\s+ask\b", sanitized_orch) and re.search(
         r"\borca\s+orchestration\s+send\b", sanitized_orch
     ):
@@ -2793,8 +2933,18 @@ def _check_critic_two_way_debate_and_question_guards(
             "Pha 2: Chỉ SAU KHI lệnh 'ask' trả về câu trả lời của Leader và hai bên đã thống nhất 100%, ở lượt (turn) tiếp theo mới được chạy 'orca orchestration send --type handoff ... && orca orchestration send --type worker_done ...'."
         )
 
+    is_critic_cmd = bool(
+        (cwd_slot and cwd_slot.startswith("critic-worker"))
+        or re.search(r"--from(?:\s+|=)['\"]?critic-worker\b", no_heredoc, re.IGNORECASE)
+        or re.search(r"\b(?:Critic\s+Consensus|Critic\s+Deadlock|CRITIC_VERDICT|CRITIC_CHALLENGE)\b", no_heredoc, re.IGNORECASE)
+    )
+    is_plan_pin = bool(re.search(r"\borca-team\b[^\n;|&]*\bplan\s+pin\b", sanitized_orch))
+    is_worker_start = bool(re.search(r"\borca\s+orchestration\s+worker-start\b", sanitized_orch))
+
     db_path = _find_orca_orchestration_db_path()
     if not db_path:
+        if is_critic_cmd or is_plan_pin:
+            return "[ORCA CRITIC FAIL-CLOSED GUARD] Không tìm thấy cơ sở dữ liệu orchestration.db để xác minh Critic Gate!"
         return ""
 
     try:
@@ -2802,24 +2952,49 @@ def _check_critic_two_way_debate_and_question_guards(
 
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
         conn.row_factory = sqlite3.Row
-    except Exception:
+    except Exception as exc:
+        if is_critic_cmd or is_plan_pin:
+            return f"[ORCA CRITIC FAIL-CLOSED GUARD] Không thể kết nối orchestration.db ({exc})!"
         return ""
 
     try:
-        raw_cwd_in = str(
-            args.get("Cwd")
-            or args.get("cwd")
-            or (payload.get("cwd") if isinstance(payload, dict) else "")
-            or ""
-        ).strip()
-        _, cwd = _resolve_orca_team_bin_and_cwd(payload, args)
-        real_cwd = os.path.realpath(cwd) if cwd else ""
-        cwd_slot = (
-            _extract_canonical_worker_slot(os.path.basename(raw_cwd_in.rstrip("/")))
-            or (_extract_canonical_worker_slot(os.path.basename(real_cwd)) if real_cwd else "")
-        )
+        # C-FIX-09 (C09): Require hypothesis.json before Critic's first `orca orchestration ask` (for risk >= medium)
+        if re.search(r"\borca\s+orchestration\s+ask\b", sanitized_orch) and is_critic_cmd:
+            ask_run_id = _extract_cli_flag_value(no_heredoc, ("run", "run-id"))
+            ask_disp_id = _extract_cli_flag_value(no_heredoc, ("dispatch-id", "dispatch"))
+            if not ask_run_id and ask_disp_id:
+                r_ask_dc = conn.execute("SELECT run_id FROM dispatch_contexts WHERE id = ? LIMIT 1", (ask_disp_id,)).fetchone()
+                if r_ask_dc:
+                    ask_run_id = str(r_ask_dc["run_id"] or "")
+            if not ask_run_id:
+                r_act_r = conn.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+                if r_act_r:
+                    ask_run_id = str(r_act_r["id"] or "")
 
-        # 1b. Critic 2-Way Debate Guard on `orca orchestration send`
+            _, ask_run_dir = _resolve_critic_run_dir(real_cwd, payload, args, ask_run_id)
+            if ask_run_dir:
+                cg_mod = _load_critic_gate_module()
+                plan_txt_ask = ""
+                for pf_name in ("plan-draft.md", "master-plan.md"):
+                    pf_cand = os.path.join(ask_run_dir, pf_name)
+                    if os.path.isfile(pf_cand):
+                        plan_txt_ask = open(pf_cand, "r", encoding="utf-8", errors="ignore").read()
+                        break
+                if plan_txt_ask:
+                    risk_ask = cg_mod.compute_risk(cg_mod.extract_items(plan_txt_ask), cg_mod.contract_lines(plan_txt_ask))
+                else:
+                    risk_ask = {"level": "high", "reasons": ["default_high"]}
+                if str(risk_ask.get("level") or "high").lower() in ("medium", "high"):
+                    hyp_json_p = os.path.join(ask_run_dir, "critic", "hypothesis.json")
+                    wt_hyp_p = os.path.join(real_cwd, ".orca", "runs", ask_run_id or "default", "critic", "hypothesis.json") if real_cwd else ""
+                    if not os.path.isfile(hyp_json_p) and not (wt_hyp_p and os.path.isfile(wt_hyp_p)):
+                        return _handle_critic_gate_violation(
+                            f"[ORCA CRITIC INDEPENDENCE GUARD] Quân sư critic-worker bắt buộc phải ghi .orca/runs/{ask_run_id or '<run>'}/critic/hypothesis.md và hypothesis.json TRƯỚC lần 'orca orchestration ask' đầu tiên (risk={risk_ask.get('level')})!",
+                            ask_run_id,
+                            cmd,
+                        )
+
+        # 1b. Critic 2-Way Debate Guard + Review Schema/Coverage/Quota/Resolution/Independence on `orca orchestration send`
         if re.search(r"\borca\s+orchestration\s+send\b", sanitized_orch):
             has_handoff_or_done = bool(
                 re.search(r"--type(?:\s+|=)['\"]?(?:handoff|worker_done)\b", no_heredoc)
@@ -2859,15 +3034,17 @@ def _check_critic_two_way_debate_and_question_guards(
                     )
 
             if has_handoff_or_done and not is_failed_done_only:
+                expanded_send, _ = _expand_inline_cat_substitutions(cmd, real_cwd)
                 is_critic_sender = bool(
                     (cwd_slot and cwd_slot.startswith("critic-worker"))
+                    or re.search(r"--from(?:\s+|=)['\"]?critic-worker\b", no_heredoc, re.IGNORECASE)
                     or re.search(
                         r"\b(?:Critic\s+Consensus|Critic\s+Deadlock|CRITIC_VERDICT|Worker\s+Done:\s*critic-worker)\b",
-                        no_heredoc,
+                        expanded_send,
                         re.IGNORECASE,
                     )
                 )
-                resolved_run_id = ""
+                resolved_run_id = _extract_cli_flag_value(no_heredoc, ("run", "run-id"))
                 if disp_id:
                     r_dc = conn.execute(
                         "SELECT dc.run_id, dc.task_id, dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id, t.spec "
@@ -2878,7 +3055,7 @@ def _check_critic_two_way_debate_and_question_guards(
                         (disp_id,),
                     ).fetchone()
                     if r_dc:
-                        resolved_run_id = str(r_dc["run_id"] or "")
+                        resolved_run_id = resolved_run_id or str(r_dc["run_id"] or "")
                         task_id = task_id or str(r_dc["task_id"] or "")
                         from_handle = (
                             from_handle
@@ -2900,6 +3077,7 @@ def _check_critic_two_way_debate_and_question_guards(
                             is_critic_sender = True
 
                 if is_critic_sender:
+                    is_critic_cmd = True
                     if not disp_id and from_handle:
                         r_fh = conn.execute(
                             "SELECT dc.id, dc.run_id, dc.task_id "
@@ -2915,28 +3093,40 @@ def _check_critic_two_way_debate_and_question_guards(
                             task_id = task_id or str(r_fh["task_id"] or "")
 
                     q_rows = []
-                    if disp_id and from_handle:
+                    if resolved_run_id and disp_id and from_handle:
                         q_rows = conn.execute(
-                            "SELECT message_id, status, answered_at, answer_message_id FROM question_threads "
-                            "WHERE dispatch_id = ? OR asker_handle = ? ORDER BY created_at DESC",
+                            "SELECT message_id, status, answered_at, answer_message_id, created_at FROM question_threads "
+                            "WHERE (run_id = ? OR run_id IS NULL) AND (dispatch_id = ? OR asker_handle = ?) ORDER BY created_at ASC",
+                            (resolved_run_id, disp_id, from_handle),
+                        ).fetchall()
+                    elif disp_id and from_handle:
+                        q_rows = conn.execute(
+                            "SELECT message_id, status, answered_at, answer_message_id, created_at FROM question_threads "
+                            "WHERE dispatch_id = ? OR asker_handle = ? ORDER BY created_at ASC",
                             (disp_id, from_handle),
                         ).fetchall()
                     elif disp_id:
                         q_rows = conn.execute(
-                            "SELECT message_id, status, answered_at, answer_message_id FROM question_threads "
-                            "WHERE dispatch_id = ? ORDER BY created_at DESC",
+                            "SELECT message_id, status, answered_at, answer_message_id, created_at FROM question_threads "
+                            "WHERE dispatch_id = ? ORDER BY created_at ASC",
                             (disp_id,),
+                        ).fetchall()
+                    elif resolved_run_id and from_handle:
+                        q_rows = conn.execute(
+                            "SELECT message_id, status, answered_at, answer_message_id, created_at FROM question_threads "
+                            "WHERE (run_id = ? OR run_id IS NULL) AND asker_handle = ? ORDER BY created_at ASC",
+                            (resolved_run_id, from_handle),
                         ).fetchall()
                     elif from_handle:
                         q_rows = conn.execute(
-                            "SELECT message_id, status, answered_at, answer_message_id FROM question_threads "
-                            "WHERE asker_handle = ? ORDER BY created_at DESC",
+                            "SELECT message_id, status, answered_at, answer_message_id, created_at FROM question_threads "
+                            "WHERE asker_handle = ? ORDER BY created_at ASC",
                             (from_handle,),
                         ).fetchall()
                     elif resolved_run_id:
                         q_rows = conn.execute(
-                            "SELECT message_id, status, answered_at, answer_message_id FROM question_threads "
-                            "WHERE run_id = ? ORDER BY created_at DESC",
+                            "SELECT message_id, status, answered_at, answer_message_id, created_at FROM question_threads "
+                            "WHERE run_id = ? ORDER BY created_at ASC",
                             (resolved_run_id,),
                         ).fetchall()
 
@@ -2957,13 +3147,13 @@ def _check_critic_two_way_debate_and_question_guards(
                         "",
                     )
 
-                    # Fallback check in `messages` table if `question_threads` had no rows
+                    # Fallback check in `messages` table if `question_threads` exists but had 0 rows for this handle
                     if total_q == 0 and (disp_id or from_handle):
                         sender_handles = [h for h in (f"dispatch:{disp_id}" if disp_id else "", from_handle) if h]
                         if sender_handles:
                             ph = ",".join("?" for _ in sender_handles)
                             m_q = conn.execute(
-                                f"SELECT id FROM messages WHERE type = 'question' AND from_handle IN ({ph}) ORDER BY created_at DESC",
+                                f"SELECT id, created_at FROM messages WHERE type = 'question' AND from_handle IN ({ph}) ORDER BY created_at ASC",
                                 tuple(sender_handles),
                             ).fetchall()
                             total_q = len(m_q)
@@ -2996,9 +3186,137 @@ def _check_critic_two_way_debate_and_question_guards(
                             f"orca orchestration ask --from {from_hint} {resume_flag}--timeout-ms 900000 --json"
                         )
 
-        # 2. Critic Review Depth Guard on Leader's `orca orchestration reply`
+                    # C-FIX-05: Validate Critic review JSON on handoff / verdict send
+                    has_verdict_marker = bool(
+                        re.search(
+                            r"\b(?:CRITIC_VERDICT|CONSENSUS_REACHED|Critic\s+Consensus|Critic\s+Deadlock|DEADLOCK|CHANGES_REQUIRED)\b",
+                            expanded_send,
+                            re.IGNORECASE,
+                        )
+                        or re.search(r"--type(?:\s+|=)['\"]?handoff\b", no_heredoc)
+                    )
+                    if has_verdict_marker:
+                        cg_mod = _load_critic_gate_module()
+                        _, c_run_dir = _resolve_critic_run_dir(real_cwd, payload, args, resolved_run_id)
+                        plan_text_c = ""
+                        for pf_n in ("master-plan.md", "plan-draft.md"):
+                            for base_d in (
+                                os.path.join(real_cwd, ".orca", "runs", resolved_run_id or "default") if real_cwd else "",
+                                c_run_dir,
+                            ):
+                                if base_d and os.path.isfile(os.path.join(base_d, pf_n)):
+                                    plan_text_c = open(os.path.join(base_d, pf_n), "r", encoding="utf-8", errors="ignore").read()
+                                    break
+                            if plan_text_c:
+                                break
+                        if not plan_text_c:
+                            return _handle_critic_gate_violation(
+                                f"[ORCA PLAN BINDING GUARD] Không tìm thấy master-plan.md hoặc plan-draft.md cho Run '{resolved_run_id or 'active'}' (fail-closed)!",
+                                resolved_run_id,
+                                cmd,
+                            )
+
+                        fenced_blocks = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", expanded_send, re.IGNORECASE)
+                        review_obj = None
+                        if fenced_blocks:
+                            try:
+                                review_obj = json.loads(fenced_blocks[-1])
+                            except Exception:
+                                review_obj = None
+                        if review_obj is None:
+                            # Also try raw JSON object containing "schema": "orca.critic.review/v1"
+                            m_raw_j = re.search(r"(\{[\s\S]*?\"orca\.critic\.review/v1\"[\s\S]*\})", expanded_send)
+                            if m_raw_j:
+                                try:
+                                    review_obj = json.loads(m_raw_j.group(1))
+                                except Exception:
+                                    review_obj = None
+                        if not isinstance(review_obj, dict):
+                            return _handle_critic_gate_violation(
+                                "[ORCA CRITIC SCHEMA GUARD] Critic handoff bắt buộc phải chứa khối ```json ... ``` chuẩn schema 'orca.critic.review/v1'!",
+                                resolved_run_id,
+                                cmd,
+                            )
+
+                        items_c = cg_mod.extract_items(plan_text_c)
+                        contracts_c = cg_mod.contract_lines(plan_text_c)
+                        risk_c = cg_mod.compute_risk(items_c, contracts_c)
+
+                        # Load hypothesis.json and verify createdAt < first ask created_at
+                        hyp_obj = None
+                        for base_d in (
+                            os.path.join(real_cwd, ".orca", "runs", resolved_run_id or "default") if real_cwd else "",
+                            c_run_dir,
+                        ):
+                            hp = os.path.join(base_d, "critic", "hypothesis.json") if base_d else ""
+                            if hp and os.path.isfile(hp):
+                                try:
+                                    hyp_obj = json.loads(open(hp, "r", encoding="utf-8", errors="ignore").read())
+                                    break
+                                except Exception:
+                                    pass
+
+                        if isinstance(hyp_obj, dict) and q_rows:
+                            first_ask_ts = str(q_rows[0]["created_at"] or "").strip()
+                            hyp_ts = str(hyp_obj.get("createdAt") or "").strip()
+                            if first_ask_ts and hyp_ts and hyp_ts > first_ask_ts:
+                                return _handle_critic_gate_violation(
+                                    f"[ORCA CRITIC INDEPENDENCE GUARD] hypothesis.json được tạo SAU lần ask đầu tiên (hypothesis={hyp_ts} > ask={first_ask_ts})! Phải lập giả thuyết độc lập TRƯỚC khi đọc plan/ask.",
+                                    resolved_run_id,
+                                    cmd,
+                                    str(review_obj.get("planHash") or ""),
+                                )
+
+                        # Gather valid reply IDs from messages and question_threads
+                        valid_reply_ids: set[str] = set()
+                        for qr in q_rows:
+                            if qr["answer_message_id"]:
+                                valid_reply_ids.add(str(qr["answer_message_id"]))
+                            if str(qr["status"] or "") == "answered" and qr["message_id"]:
+                                valid_reply_ids.add(str(qr["message_id"]))
+                        if resolved_run_id:
+                            rep_rows = conn.execute(
+                                "SELECT id FROM messages WHERE run_id = ? AND (type IN ('reply','answer') OR LOWER(COALESCE(subject,'')) LIKE 're:%' OR LOWER(COALESCE(subject,'')) LIKE '%reply%')",
+                                (resolved_run_id,),
+                            ).fetchall()
+                            for rr in rep_rows:
+                                valid_reply_ids.add(str(rr["id"]))
+
+                        viols = cg_mod.validate_review(review_obj, plan_text_c, risk_c, valid_reply_ids=valid_reply_ids)
+                        viols.extend(cg_mod.validate_independence(review_obj, plan_text_c, hyp_obj, risk_c))
+
+                        if viols:
+                            return _handle_critic_gate_violation(
+                                viols[0],
+                                resolved_run_id,
+                                cmd,
+                                str(review_obj.get("planHash") or ""),
+                            )
+
+                        # If verdict == DEADLOCK, record deadlock=true in critic/audit.jsonl so C-FIX-07 blocks plan pin
+                        if str(review_obj.get("verdict") or "") == "DEADLOCK" and c_run_dir:
+                            try:
+                                os.makedirs(os.path.join(c_run_dir, "critic"), exist_ok=True)
+                                with open(os.path.join(c_run_dir, "critic", "audit.jsonl"), "a", encoding="utf-8") as af:
+                                    af.write(
+                                        json.dumps(
+                                            {
+                                                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                                "runId": resolved_run_id,
+                                                "planHash": review_obj.get("planHash"),
+                                                "verdict": "DEADLOCK",
+                                                "deadlock": True,
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                        + "\n"
+                                    )
+                            except Exception:
+                                pass
+
+        # 2. Critic Review Depth Guard on Leader's `orca orchestration reply` (C12)
         if re.search(r"\borca\s+orchestration\s+reply\b", sanitized_orch):
-            reply_id = _extract_cli_flag_value(no_heredoc, ("id", "message-id"))
+            reply_id = _extract_cli_flag_value(no_heredoc, ("id", "message-id", "thread", "thread-id"))
             reply_body = _extract_cli_flag_value(no_heredoc, ("body",))
             if reply_id:
                 q_info = conn.execute(
@@ -3022,27 +3340,36 @@ def _check_critic_two_way_debate_and_question_guards(
                         or "[ROLE: PRINCIPAL RESEARCH, ADVERSARIAL CRITIC" in t_spec_str
                     ):
                         is_critic_q = True
-                if is_critic_q and len(reply_body.strip()) < 60:
-                    return (
-                        f"[ORCA CRITIC REVIEW DEPTH GUARD] Nội dung trả lời 'orca orchestration reply --id {reply_id}' cho Quân sư 'critic-worker' quá ngắn ({len(reply_body.strip())} ký tự < 60 ký tự tối thiểu)! "
+                if is_critic_q and len(reply_body.strip()) < 80:
+                    return _handle_critic_gate_violation(
+                        f"[ORCA CRITIC REVIEW DEPTH GUARD] Nội dung trả lời 'orca orchestration reply --id {reply_id}' cho Quân sư 'critic-worker' quá ngắn ({len(reply_body.strip())} ký tự < 80 ký tự tối thiểu)! "
                         f"CẤM trả lời qua loa ('ok', 'đồng ý') khi tranh biện kiến trúc 2 chiều. "
-                        f"Cách sửa bắt buộc: Trả lời chi tiết (>= 60 ký tự) xác nhận rõ: (1) Chấp thuận hay phản biện các điểm `file:line` của Critic, "
-                        f"(2) Chốt Checklist `[P1..Pn]` + phân chia Disjoint File Ownership giữa các `dev-worker*`, và (3) Ranh giới vai trò (`dev`/`devops`/`qa`/`sec`)."
+                        f"Cách sửa bắt buộc: Trả lời chi tiết (>= 80 ký tự) xác nhận rõ: (1) Chấp thuận hay phản biện các điểm `file:line` của Critic, "
+                        f"(2) Chốt Checklist `[P1..Pn]` + phân chia Disjoint File Ownership giữa các `dev-worker*`, và (3) Ranh giới vai trò (`dev`/`devops`/`qa`/`sec`).",
+                        "",
+                        cmd,
                     )
 
-        # 4. Pending-Question Guard on Leader (`orca-team plan pin`, `orca orchestration worker-start`, or `wait-events` after question already read)
+        # 4. Pending-Question Guard + C-FIX-06 Plan Binding + C-FIX-07 Deadlock Guard on Leader (`orca-team plan pin`, `orca orchestration worker-start`, or `wait-events`)
         is_in_main_root = bool(real_cwd and not cwd_slot)
-        if is_in_main_root:
-            is_plan_pin = bool(re.search(r"\borca-team\b[^\n;|&]*\bplan\s+pin\b", sanitized_orch))
-            is_worker_start = bool(re.search(r"\borca\s+orchestration\s+worker-start\b", sanitized_orch))
+        if is_in_main_root or is_plan_pin or is_worker_start:
             is_wait_events = bool(
                 re.search(r"\borca\s+orchestration\s+check\b[^\n;|&]*\s--wait\b", sanitized_orch)
                 or re.search(r"\borca-team\b[^\n;|&]*\b(?:wait-events|check-wait)\b", sanitized_orch)
             )
             if is_plan_pin or is_worker_start or is_wait_events:
-                explicit_run_id = _extract_cli_flag_value(no_heredoc, ("run",))
+                explicit_run_id = _extract_cli_flag_value(no_heredoc, ("run", "run-id"))
+                ws_disp_id = _extract_cli_flag_value(no_heredoc, ("dispatch-id", "dispatch"))
+                ws_task_id = _extract_cli_flag_value(no_heredoc, ("task-id", "task"))
+                if not explicit_run_id and ws_disp_id:
+                    r_ws_d = conn.execute("SELECT run_id FROM dispatch_contexts WHERE id = ? LIMIT 1", (ws_disp_id,)).fetchone()
+                    if r_ws_d:
+                        explicit_run_id = str(r_ws_d["run_id"] or "")
+                if not explicit_run_id and ws_task_id:
+                    r_ws_t = conn.execute("SELECT run_id FROM tasks WHERE id = ? LIMIT 1", (ws_task_id,)).fetchone()
+                    if r_ws_t:
+                        explicit_run_id = str(r_ws_t["run_id"] or "")
                 if not explicit_run_id:
-                    # Find latest run associated with this workspace that has active dispatches or pending questions
                     r_active = conn.execute(
                         "SELECT dc.run_id FROM dispatch_contexts dc "
                         "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
@@ -3052,6 +3379,10 @@ def _check_critic_two_way_debate_and_question_guards(
                     ).fetchone()
                     if r_active:
                         explicit_run_id = str(r_active["run_id"] or "")
+                if not explicit_run_id:
+                    r_latest_run = conn.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+                    if r_latest_run:
+                        explicit_run_id = str(r_latest_run["id"] or "")
 
                 if explicit_run_id:
                     pend_qs = conn.execute(
@@ -3102,8 +3433,185 @@ def _check_critic_two_way_debate_and_question_guards(
                                 f"orca orchestration reply --id {p_mid} --body \"<Nội dung phản biện/quyết định chi tiết >= 60 ký tự>\" --json\n"
                                 f"Sau khi chạy 'reply' xong, bạn mới gọi 'orca-team wait-events' để chờ kết quả tiếp theo từ '{p_wt}'!"
                             )
-    except Exception:
-        pass
+
+                # C-FIX-06 & C-FIX-07: Plan Binding & Deadlock Escalation on `plan pin` and `worker-start` (dev/ui)
+                is_starting_critic_or_re = bool(
+                    is_worker_start
+                    and re.search(r"\b(?:critic-worker|criticSpecialist|critic|re-worker|reSpecialist)\b", no_heredoc)
+                )
+                if is_plan_pin or (is_worker_start and not is_starting_critic_or_re):
+                    cg_mod = _load_critic_gate_module()
+                    proj_root_p, pin_run_dir = _resolve_critic_run_dir(real_cwd, payload, args, explicit_run_id)
+
+                    # Legacy override check (only if no critic dispatch exists in run and before cutoff)
+                    legacy_env = os.environ.get("ORCA_CRITIC_GATE_LEGACY", "").strip() == "1"
+                    if legacy_env and explicit_run_id:
+                        has_critic_dc = conn.execute(
+                            "SELECT 1 FROM dispatch_contexts dc LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                            "WHERE dc.run_id = ? AND (wd.worktree_id LIKE '%critic%' OR dc.assignee_handle LIKE '%critic%') LIMIT 1",
+                            (explicit_run_id,),
+                        ).fetchone()
+                        if not has_critic_dc:
+                            return ""
+
+                    # 1. Check Deadlock flag in audit.jsonl or consensus.json (C-FIX-07 / C07)
+                    audit_p = os.path.join(pin_run_dir, "critic", "audit.jsonl") if pin_run_dir else ""
+                    if audit_p and os.path.isfile(audit_p):
+                        try:
+                            audit_lines = [ln.strip() for ln in open(audit_p, "r", encoding="utf-8", errors="ignore") if ln.strip()]
+                            if audit_lines:
+                                last_aud = json.loads(audit_lines[-1])
+                                if isinstance(last_aud, dict) and (
+                                    last_aud.get("deadlock") is True or str(last_aud.get("verdict") or "") == "DEADLOCK"
+                                ):
+                                    unres_list = last_aud.get("unresolvedObjections") or []
+                                    claim_hint = unres_list[0].get("claim") if (unres_list and isinstance(unres_list[0], dict)) else "unresolved blocker"
+                                    item_hint = unres_list[0].get("item") if (unres_list and isinstance(unres_list[0], dict)) else "P1"
+                                    return _handle_critic_gate_violation(
+                                        f"[ORCA CRITIC DEADLOCK GUARD] Còn bất đồng chưa giải quyết ([{item_hint}]: {claim_hint}). "
+                                        f"Mở human gate: orca-team gate create --from-consensus {explicit_run_id or '<run>'} "
+                                        f"--question \"Critic bất đồng [{item_hint}]: {claim_hint}. Chọn hướng?\" --options '[\"A\",\"B\",\"human_review\"]'",
+                                        explicit_run_id,
+                                        cmd,
+                                    )
+                        except Exception:
+                            pass
+
+                    contracts_p = os.path.join(pin_run_dir, "contracts.json") if pin_run_dir else ""
+                    draft_contracts_p = os.path.join(pin_run_dir, "plan-draft.contracts.json") if pin_run_dir else ""
+                    contracts_obj = None
+                    for cp_cand in (contracts_p, draft_contracts_p):
+                        if cp_cand and os.path.isfile(cp_cand):
+                            try:
+                                contracts_obj = json.loads(open(cp_cand, "r", encoding="utf-8", errors="ignore").read())
+                                break
+                            except Exception:
+                                pass
+                    if not isinstance(contracts_obj, dict):
+                        return _handle_critic_gate_violation(
+                            f"[ORCA PLAN BINDING GUARD] Thiếu contracts.json cho Run '{explicit_run_id or 'active'}'! Chạy 'orca-team plan draft' và Critic Consensus trước.",
+                            explicit_run_id,
+                            cmd,
+                        )
+
+                    # Read current plan text (from --file / --content if passed to plan pin, else master-plan.md / plan-draft.md)
+                    plan_candidates: list[str] = []
+                    pin_file_arg = _extract_cli_flag_value(no_heredoc, ("file", "f"))
+                    pin_content_arg = _extract_cli_flag_value(no_heredoc, ("content", "c", "body"))
+                    if is_plan_pin and pin_file_arg and os.path.isfile(os.path.expanduser(pin_file_arg)):
+                        plan_candidates.append(open(os.path.expanduser(pin_file_arg), "r", encoding="utf-8", errors="ignore").read())
+                    elif is_plan_pin and pin_content_arg:
+                        plan_candidates.append(pin_content_arg.replace("\\n", "\n"))
+                    for pf_name in ("master-plan.md", "plan-draft.md"):
+                        pf_p = os.path.join(pin_run_dir, pf_name) if pin_run_dir else ""
+                        if pf_p and os.path.isfile(pf_p):
+                            plan_candidates.append(open(pf_p, "r", encoding="utf-8", errors="ignore").read())
+
+                    if not plan_candidates:
+                        return _handle_critic_gate_violation(
+                            f"[ORCA PLAN BINDING GUARD] Không tìm thấy file kế hoạch (master-plan.md / plan-draft.md) cho Run '{explicit_run_id}'!",
+                            explicit_run_id,
+                            cmd,
+                        )
+
+                    cons_p = os.path.join(pin_run_dir, "consensus.json") if pin_run_dir else ""
+                    if not (cons_p and os.path.isfile(cons_p)):
+                        h_now = cg_mod.plan_hash(plan_candidates[0])
+                        return _handle_critic_gate_violation(
+                            f"[ORCA PLAN BINDING GUARD] Chưa có Critic Consensus cho plan_hash {h_now} (Run '{explicit_run_id}').",
+                            explicit_run_id,
+                            cmd,
+                            h_now,
+                        )
+
+                    try:
+                        cons_obj = json.loads(open(cons_p, "r", encoding="utf-8", errors="ignore").read())
+                    except Exception:
+                        cons_obj = None
+
+                    for p_txt in plan_candidates:
+                        c_viols = cg_mod.validate_consensus_file(cons_obj, contracts_obj, p_txt)
+                        if c_viols:
+                            return _handle_critic_gate_violation(
+                                c_viols[0],
+                                explicit_run_id,
+                                cmd,
+                                cg_mod.plan_hash(p_txt),
+                            )
+
+                    # Verify messageIds provenance in SQLite DB (C05)
+                    msg_ids = (cons_obj or {}).get("messageIds") or {}
+                    ch_ids = [str(x) for x in (msg_ids.get("challenges") or []) if str(x).strip()]
+                    rp_ids = [str(x) for x in (msg_ids.get("replies") or []) if str(x).strip()]
+                    fin_id = str(msg_ids.get("final") or "").strip()
+
+                    critic_handles_db: set[str] = {"critic-worker"}
+                    if explicit_run_id:
+                        dc_c_rows = conn.execute(
+                            "SELECT dc.id, dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id, t.spec "
+                            "FROM dispatch_contexts dc "
+                            "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                            "LEFT JOIN tasks t ON t.id = dc.task_id "
+                            "WHERE dc.run_id = ?",
+                            (explicit_run_id,),
+                        ).fetchall()
+                        for r_c in dc_c_rows:
+                            if (
+                                "critic" in str(r_c["worktree_id"] or "")
+                                or "critic" in str(r_c["assignee_handle"] or "")
+                                or "critic" in str(r_c["agent_terminal_handle"] or "")
+                                or "[ROLE: PRINCIPAL RESEARCH, ADVERSARIAL CRITIC" in str(r_c["spec"] or "")
+                            ):
+                                if r_c["assignee_handle"]:
+                                    critic_handles_db.add(str(r_c["assignee_handle"]))
+                                if r_c["agent_terminal_handle"]:
+                                    critic_handles_db.add(str(r_c["agent_terminal_handle"]))
+                                critic_handles_db.add(f"dispatch:{r_c['id']}")
+
+                    for cid in ch_ids:
+                        m_row = conn.execute("SELECT from_handle, type FROM messages WHERE id = ? LIMIT 1", (cid,)).fetchone()
+                        if not m_row or str(m_row["type"] or "").lower() != "question" or str(m_row["from_handle"] or "") not in critic_handles_db:
+                            return _handle_critic_gate_violation(
+                                f"[ORCA CONSENSUS PROVENANCE GUARD] consensus.json không khớp message log (thiếu {cid} / sai sender).",
+                                explicit_run_id,
+                                cmd,
+                                str(cons_obj.get("planHash") or ""),
+                            )
+
+                    for rid in rp_ids:
+                        m_row = conn.execute("SELECT from_handle, type, subject FROM messages WHERE id = ? LIMIT 1", (rid,)).fetchone()
+                        if not m_row or (
+                            str(m_row["type"] or "").lower() not in ("reply", "answer")
+                            and "re:" not in str(m_row["subject"] or "").lower()
+                            and "reply" not in str(m_row["subject"] or "").lower()
+                        ):
+                            return _handle_critic_gate_violation(
+                                f"[ORCA CONSENSUS PROVENANCE GUARD] consensus.json không khớp message log (thiếu {rid} / sai sender).",
+                                explicit_run_id,
+                                cmd,
+                                str(cons_obj.get("planHash") or ""),
+                            )
+
+                    f_row = conn.execute("SELECT from_handle, type, body, payload FROM messages WHERE id = ? LIMIT 1", (fin_id,)).fetchone()
+                    if (
+                        not f_row
+                        or str(f_row["type"] or "").lower() not in ("handoff", "worker_done")
+                        or str(f_row["from_handle"] or "") not in critic_handles_db
+                    ):
+                        return _handle_critic_gate_violation(
+                            f"[ORCA CONSENSUS PROVENANCE GUARD] consensus.json không khớp message log (thiếu {fin_id} / sai sender).",
+                            explicit_run_id,
+                            cmd,
+                            str(cons_obj.get("planHash") or ""),
+                        )
+
+    except Exception as exc:
+        if is_critic_cmd or is_plan_pin or is_worker_start:
+            return _handle_critic_gate_violation(
+                f"[ORCA CRITIC FAIL-CLOSED GUARD] Lỗi nội bộ khi xác minh Critic Gate ({exc})! Thực thi Fail-Closed.",
+                "",
+                cmd,
+            )
     finally:
         try:
             conn.close()
@@ -3711,6 +4219,8 @@ def _verify_qa_evidence_ledger_and_ancestry(
                     if not task_id:
                         task_id = str(row["task_id"] or "")
                     wt_raw = str(row["worktree_id"] or "").strip()
+                    if "::" in wt_raw:
+                        wt_raw = wt_raw.split("::", 1)[1].strip()
                     if wt_raw.startswith("path:"):
                         wt_raw = wt_raw[5:].strip()
                     if wt_raw:
@@ -3733,6 +4243,8 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 ).fetchall()
                 for wr in w_rows:
                     wt_id = str(wr["worktree_id"] or "")
+                    if "::" in wt_id:
+                        wt_id = wt_id.split("::", 1)[1].strip()
                     if wt_id.startswith("path:"):
                         wt_id = wt_id[5:]
                     if not disp_id and wt_id and os.path.realpath(wt_id) == os.path.realpath(real_cwd):
@@ -3754,11 +4266,14 @@ def _verify_qa_evidence_ledger_and_ancestry(
     if db_worktree_path:
         project_root = os.path.dirname(db_worktree_path.rstrip("/"))
         if os.path.realpath(real_cwd) != os.path.realpath(db_worktree_path):
-            return (
-                f"[ORCA WORKTREE-MISMATCH GUARD] Lệnh báo cáo của '{disp_id or cwd_slot}' được thực thi từ thư mục '{real_cwd}', "
-                f"không khớp với worktree được cấp phát '{db_worktree_path}'! "
-                f"Thực thi Fail-Closed: CẤM chạy lệnh gửi báo cáo từ thư mục ngoài worktree của slot!"
-            )
+            if (".gemini" in real_cwd or not real_cwd) and os.path.isdir(db_worktree_path):
+                real_cwd = db_worktree_path
+            else:
+                return (
+                    f"[ORCA WORKTREE-MISMATCH GUARD] Lệnh báo cáo của '{disp_id or cwd_slot}' được thực thi từ thư mục '{real_cwd}', "
+                    f"không khớp với worktree được cấp phát '{db_worktree_path}'! "
+                    f"Thực thi Fail-Closed: CẤM chạy lệnh gửi báo cáo từ thư mục ngoài worktree của slot!"
+                )
 
     # Reject any self-written evidence.jsonl inside the worktree (A01)
     for forbidden_local_ev in (
@@ -4074,7 +4589,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 f"[ORCA CONTRACT-HASH GUARD] Evidence Ledger thiếu cmd_hash bắt buộc trong contracts.json ({', '.join(sorted(missing_hashes))})!"
             )
 
-    cmds_to_rerun: list[list[str]] = []
+    cmds_to_rerun: list[tuple[list[str], str]] = []
     seen_rerun: set[str] = set()
     for acc_cmd in contract_acceptance_cmds:
         toks = acc_cmd.split()
@@ -4082,7 +4597,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
             s_key = " ".join(toks)
             if s_key not in seen_rerun:
                 seen_rerun.add(s_key)
-                cmds_to_rerun.append(toks)
+                cmds_to_rerun.append((toks, real_cwd))
     for last_r in latest_by_key.values():
         cmd_v = last_r.get("cmd")
         toks = [str(x) for x in cmd_v if str(x).strip()] if isinstance(cmd_v, list) else str(cmd_v or "").split()
@@ -4090,14 +4605,17 @@ def _verify_qa_evidence_ledger_and_ancestry(
             s_key = " ".join(toks)
             if s_key not in seen_rerun:
                 seen_rerun.add(s_key)
-                cmds_to_rerun.append(toks)
+                r_cwd = str(last_r.get("cwd") or "").strip()
+                if not r_cwd or not os.path.isdir(r_cwd):
+                    r_cwd = real_cwd
+                cmds_to_rerun.append((toks, r_cwd))
 
-    for acc_tokens in cmds_to_rerun:
+    for acc_tokens, run_cwd in cmds_to_rerun:
         acc_cmd_str = " ".join(acc_tokens)
         try:
             acc_p = subprocess.run(
                 acc_tokens,
-                cwd=real_cwd,
+                cwd=run_cwd,
                 shell=False,
                 capture_output=True,
                 text=True,
@@ -4125,6 +4643,9 @@ def _verify_qa_evidence_ledger_and_ancestry(
             tap_ok = len(re.findall(r"(?m)^ok\s+\d+\b", combined_live))
             if tap_ok:
                 live_passed = max(live_passed, tap_ok)
+            gradle_ok = len(re.findall(r"\bPASSED\b", combined_live))
+            if gradle_ok:
+                live_passed = max(live_passed, gradle_ok)
             if live_failed > 0 or live_passed <= 0:
                 return (
                     f"[ORCA ACCEPTANCE RERUN GUARD] Guard tự chạy lại lệnh '{acc_cmd_str}' tại thời điểm PASS "
@@ -5139,10 +5660,12 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
     if not fp:
         return ""
 
-    # Block Leader in main workspace from directly writing/editing project code files instead of delegating to Workers
+    # Block Leader in main workspace from directly writing/editing project code files instead of delegating to Workers,
+    # and enforce C-FIX-08 Read-Only Guard for critic-worker
     if tool_name in (
         "write_file",
         "edit_file",
+        "write_to_file",
         "write",
         "edit",
         "multiedit",
@@ -5150,8 +5673,24 @@ def _check_unbounded_task_log_view(payload: dict, args: dict, tc: dict | None = 
         "multi_replace_file_content",
         "writefile",
         "strreplacefile",
+        "apply_patch",
+        "create_file",
     ):
-        norm_fp = os.path.abspath(os.path.expanduser(fp))
+        _, real_cwd_f, cwd_slot_f = _detect_caller_slot_safe(payload, args, "")
+        norm_fp = (
+            os.path.abspath(os.path.expanduser(fp))
+            if os.path.isabs(os.path.expanduser(fp))
+            else os.path.abspath(os.path.join(real_cwd_f or os.getcwd(), os.path.expanduser(fp)))
+        )
+        if cwd_slot_f and cwd_slot_f.startswith("critic-worker"):
+            if not re.search(r"[/\\]\.orca[/\\]runs[/\\][^/\\]+[/\\]critic[/\\]", norm_fp) and not re.search(
+                r"(?:^|[/\\])\.orca[/\\]runs[/\\][^/\\]+[/\\]critic[/\\]", fp
+            ):
+                return _handle_critic_gate_violation(
+                    "[ORCA CRITIC READ-ONLY GUARD] critic-worker chỉ được ghi dưới .orca/runs/<run>/critic/.",
+                    "",
+                    f"{tool_name} {fp}",
+                )
         is_exempt_leader_write = (
             "/orca-multi-agent-orchestrator/" in norm_fp
             or "/.orca/" in norm_fp

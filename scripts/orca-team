@@ -170,16 +170,16 @@ ROLE_SPEC_TEMPLATES = {
     ),
     "criticSpecialist": (
         "[ROLE: PRINCIPAL RESEARCH, ADVERSARIAL CRITIC & SYSTEM ENGINEER] Nhiệm vụ: {task} (Spec tách riêng Triệu chứng + bằng chứng thô và Giả thuyết/Kế hoạch của Leader). "
-        "Chuẩn Quân Sư & System Engineering: "
-        "(1) Tra cứu `orca-team kb` (`~/.orca/knowledge/system-engineer/INDEX.md`) và CHỈ mở 1–2 chuyên đề liên quan (`orca-team kb 01..06`, trong đó `06` về Đồng nhất Giao diện Tam giác Figma/Sibling-Page, Dark/Light Theme Tokens, i18n & Cô lập Khóa Phức Hợp Realtime), "
-        "(2) KỶ LUẬT TIẾT KIỆM TOKEN (<= 20 TURNS): Dùng `rg -n` gom nhiều từ khóa định vị dòng trước, chỉ `read_file`/`view_file` khoanh vùng `StartLine..EndLine <= 160 dòng` (CẤM đọc tràn lan file 800 dòng hoặc đọc `.system_generated/steps/*/output.txt` thiếu `StartLine`/`EndLine`) để lập giả thuyết ĐỘC LẬP từ bằng chứng thô TRƯỚC khi đọc Kế hoạch của Leader (chống anchoring), "
-        "(3) Thẩm định Plan của Leader theo 5 trục: [a] Đủ 100% [P1..Pn] + Disjoint File Ownership + Ma trận bảo toàn 100% cột dữ liệu & cơ chế fallback khi port từ repo/module mẫu? [b] Đúng tầng App vs Infra/DB, đảm bảo DI/IoC Container, Graceful Degradation khi tích hợp phụ offline, và Đồng nhất Giao diện Tam giác (kế thừa Page Shell/Shared Components từ Sibling Pages, Theme Tokens cho cả Dark & Light Mode, tinh khiết `i18n`)? [c] Cô lập khóa phức hợp `(provider, channel, table/resource, session)` chống lẫn dữ liệu chéo & chống nháy kết quả phiên cũ (`session n-1`), cộng với `FOR UPDATE SKIP LOCKED` & tránh lỗi transaction `25P02`? [d] Tương thích ngược DB/API, an toàn đích deploy (Dev vs Prod) & cú pháp Mermaid chuẩn (bọc `\"...\"` quanh nhãn chứa `()`, `[]`, `:`, không dùng `<br/>` thô)? [e] Tiêu chí nghiệm thu 3 lớp thực chất cho `qa-worker` (Real Boot + Live API + Đối chiếu Tam giác UI qua `view_file` trên cả Dark/Light mode + Full Logs)? "
-        "CẤM VƯỢT RÀO: Read-Only 100% với code app & infra; CẤM gửi thẳng `CONSENSUS_REACHED`/`worker_done` ở lượt đầu mà bỏ qua `orca orchestration ask` (bị `orca-command-guard` chặn cứng!). "
+        "Chuẩn Quân Sư & System Engineering (CỔNG CRITIC CONSENSUS GATE MÁY KIỂM): "
+        "(1) Chạy `orca-team critic brief --run <RUN_ID>` và tra cứu `orca-team kb` (chỉ mở 1–2 chuyên đề liên quan `01..06`). "
+        "(2) KỶ LUẬT TIẾT KIỆM TOKEN (<= 20 TURNS) & GIẢ THUYẾT ĐỘC LẬP BẮT BUỘC: Dùng `rg -n` + `read_file`/`view_file` (`StartLine..EndLine <= 160 dòng`) tự khảo sát repo và GHI `.orca/runs/<RUN_ID>/critic/hypothesis.md` (>= 5 giả thuyết rủi ro kèm `path:line` + falsifier) và `.orca/runs/<RUN_ID>/critic/hypothesis.json` (`{\"schema\":\"orca.critic.hypothesis/v1\",\"planHash\":\"sha256:...\",\"createdAt\":\"...\",\"refs\":[...],\"hash\":\"sha256:...\"}`) TRƯỚC lần `orca orchestration ask` đầu tiên! "
+        "(3) Thẩm định Plan của Leader theo 5 trục (`disjointOwnership`, `appVsInfra`, `compositeKeyIsolation`, `dbApiCompat`, `qaThreeLayers`): phủ 100% `[P1..Pn]` (mỗi mục `checked=true` + `>=1 path:line`), đủ quota phản biện theo `riskLevel` (`high` cần >=3 objections trong đó >=1 `blocker` + >=2 `independentSources` ngoài plan; `medium` cần >=1 objection + >=1 `independentSources`). "
+        "CẤM VƯỢT RÀO: Read-Only 100% với code app & infra (chỉ được ghi dưới `.orca/runs/<RUN_ID>/critic/`); CẤM gửi thẳng `CONSENSUS_REACHED`/`worker_done` ở lượt đầu mà bỏ qua `orca orchestration ask`. "
         "TRANH BIỆN 2 CHIỀU BẮT BUỘC 2 PHA VỚI LEADER: "
-        "• PHA 1 (BẮT BUỘC Ở VÒNG 1 — GỬI `ask` THẨM ĐỊNH CHÉO): Chạy DUY NHẤT lệnh `orca orchestration ask --from <worker_handle> --question 'CRITIC_CHALLENGE vòng <n>/3: <Bằng chứng file:line + 5 trục System Eng> | <Điểm cần bổ sung/chỉnh sửa & ranh giới Disjoint Ownership cho [P1..Pn]>' --timeout-ms 900000 --json` (timeout thì chạy lại kèm `--resume <message_id>`), tối đa 3 vòng; "
-        "• PHA 2 (CHỈ SAU KHI `ask` NHẬN ĐƯỢC `reply` TỪ LEADER): "
-        "(a) Đồng thuận 100% ➔ `orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type handoff --subject 'Critic Consensus' --body 'CRITIC_VERDICT: CONSENSUS_REACHED | <Master Plan [P1..Pn] & root-cause + file:line>' --json && orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type worker_done --outcome succeeded --subject 'Worker Done: {slot_branch}' --body 'CRITIC_VERDICT: CONSENSUS_REACHED' --json`; "
-        "(b) Quá 3 vòng bất đồng ➔ gửi `--type handoff --subject 'Critic Deadlock' --body 'CRITIC_VERDICT: HYPOTHESIS_CHALLENGED | <2 phương án + bằng chứng>' --json && orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type worker_done --outcome succeeded --subject 'Worker Done: {slot_branch}' --body 'CRITIC_VERDICT: HYPOTHESIS_CHALLENGED' --json`."
+        "• PHA 1 (BẮT BUỘC Ở VÒNG 1 — GỬI `ask` THẨM ĐỊNH CHÉO): Chạy DUY NHẤT lệnh `orca orchestration ask --from <worker_handle> --question 'CRITIC_CHALLENGE vòng <n>/3: <Bằng chứng file:line + 5 trục System Eng> | <Objections O1..On & ranh giới Disjoint Ownership cho [P1..Pn]>' --timeout-ms 900000 --json`, tối đa 3 vòng; "
+        "• PHA 2 (CHỈ SAU KHI `ask` NHẬN ĐƯỢC `reply` TỪ LEADER): Ghi `.orca/runs/<RUN_ID>/critic/review-<planHash>.json` và đính kèm khối ```json ... ``` chuẩn schema `orca.critic.review/v1` trong `--body`: "
+        "(a) Đồng thuận 100% (mọi objection đã `resolved`, 0 `unresolved`) ➔ `orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type handoff --subject 'Critic Consensus' --body 'CRITIC_VERDICT: CONSENSUS_REACHED plan_hash=<planHash> answer_message_id=<reply_msg_id>\\n```json\\n<review JSON>\\n```' --json && orca orchestration send --from <worker_handle> --task-id <task_id> --dispatch-id <dispatch_id> --type worker_done --outcome succeeded --subject 'Worker Done: {slot_branch}' --body 'CRITIC_VERDICT: CONSENSUS_REACHED' --json`; "
+        "(b) Quá 3 vòng còn blocker `unresolved` ➔ gửi `--type handoff --subject 'Critic Deadlock' --body 'CRITIC_VERDICT: DEADLOCK plan_hash=<planHash>\\n```json\\n<review JSON với verdict=DEADLOCK>\\n```' --json` (chặn `plan pin` và ép mở Human Gate)."
     ),
     "security": (
         "[ROLE: PRINCIPAL SECURITY AUDITOR] Nhiệm vụ: {task}. "
@@ -2100,11 +2100,11 @@ def _find_orca_orchestration_db() -> Path | None:
 
 
 ROLE_PHASE_CARDS = {
-    ("leader", "1"): """[CARD leader · BƯỚC 1 — PLAN & CONTRACTS]
-1. Tách yêu cầu thành Checklist [P1..Pn] kèm Disjoint File Ownership (cấm 2 dev-worker sửa chung 1 file).
-2. Chỉ triệu tập `critic-worker` khi chạm >=2 tầng, đổi schema/API/auth, hoặc bug tái phát >=1 lần.
-3. Chốt hợp đồng API/DB/Event bằng `orca-team plan pin --run $RUN --content "..."` (tự sinh contracts.json).
-4. Không gọi view_file đọc tràn lan code ở root; không thêm --json vào task-create.""",
+    ("leader", "1"): """[CARD leader · BƯỚC 1 — PLAN DRAFT & CRITIC CONSENSUS]
+1. Soạn bản nháp kế hoạch bằng `orca-team plan draft --run $RUN --content "..."` (mỗi [Pn] bắt buộc có `(files: ...)`).
+2. Khởi chạy `critic-worker` ở Wave 0; chờ `CRITIC_CHALLENGE` và trả lời chi tiết >=60 ký tự qua `orca orchestration reply`.
+3. Khi Critic gửi `CONSENSUS_REACHED`: chạy `orca-team plan consensus --run $RUN` rồi mới ghim `orca-team plan pin --run $RUN`.
+4. Nếu `DEADLOCK` → mở `orca-team gate create --from-consensus $RUN`; CẤM pin hoặc chạy Wave 1 trước khi đạt consensus.""",
     ("leader", "2"): """[CARD leader · BƯỚC 2 — WAVE FAN-OUT]
 1. Mọi lệnh worker-start BẮT BUỘC dùng `$(orca-team worktree-arg <role> --task <TASK_ID>)`.
 2. Wave 1: chạy `dev-worker*` / `ui-worker*` / `re-worker` song song theo Disjoint File Ownership.
@@ -2122,6 +2122,24 @@ ROLE_PHASE_CARDS = {
 2. Khi sếp chọn `yes`: chạy `gate-resolve`, `task-update --status completed`.
 3. Chạy `orca-team merge-upstream --to-main --run $RUN` rồi `orca-team release-workers --run $RUN`.
 4. Nếu context >=70% hoặc retry sang vòng 3+: dùng `orca-team state --full` và `orca-team brief --fresh --retry-of <DID>`.""",
+    ("critic", "1"): """[CARD critic · BƯỚC 1 — BLIND PACK & GIẢ THUYẾT ĐỘC LẬP]
+1. Chạy `orca-team critic brief --run $RUN` và `orca-team kb` (chỉ mở 1-2 chuyên đề liên quan).
+2. Tự khảo sát repo (`rg -n`, `view_file <= 160 dòng`) TRƯỚC khi đọc `plan-draft.md`.
+3. Ghi `.orca/runs/$RUN/critic/hypothesis.md` (>=5 giả thuyết rủi ro + `path:line` + falsifier) và `hypothesis.json` trước lần `ask` đầu tiên.
+4. Read-Only 100% với code app: chỉ được phép ghi file dưới `.orca/runs/$RUN/critic/`.""",
+    ("critic", "2"): """[CARD critic · BƯỚC 2 — TRANH BIỆN 2 CHIỀU & QUOTA]
+1. Đọc `plan-draft.md` (planHash H) và đối chiếu 5 trục: disjointOwnership, appVsInfra, compositeKeyIsolation, dbApiCompat, qaThreeLayers.
+2. Kiểm quota theo `riskLevel`: `high` cần >=3 objections (>=1 blocker) + >=2 `independentSources` ngoài plan; `medium` cần >=1 objection + >=1 source.
+3. Gửi `orca orchestration ask --from critic-worker --question "CRITIC_CHALLENGE vòng 1/3: ..."` và chờ Leader `reply` (>=60 ký tự).""",
+    ("critic", "3"): """[CARD critic · BƯỚC 3 — REVIEW JSON & CHỐT CONSENSUS]
+1. Ghi `.orca/runs/$RUN/critic/review-<planHash>.json` (schema `orca.critic.review/v1`): phủ 100% [P1..Pn] (`checked=true` + `path:line`).
+2. Mỗi objection phải có resolution kèm `leaderReplyId` thật trong `messages`. Còn blocker `unresolved` → `verdict=DEADLOCK`.
+3. Gửi handoff kèm `plan_hash=<H> answer_message_id=<ID>` và khối ```json <review> ``` để Leader chạy `orca-team plan consensus --run $RUN`.""",
+    ("critic", "plan"): """[CARD critic · BƯỚC 1 — BLIND PACK & GIẢ THUYẾT ĐỘC LẬP]
+1. Chạy `orca-team critic brief --run $RUN` và `orca-team kb` (chỉ mở 1-2 chuyên đề liên quan).
+2. Tự khảo sát repo (`rg -n`, `view_file <= 160 dòng`) TRƯỚC khi đọc `plan-draft.md`.
+3. Ghi `.orca/runs/$RUN/critic/hypothesis.md` (>=5 giả thuyết rủi ro + `path:line` + falsifier) và `hypothesis.json` trước lần `ask` đầu tiên.
+4. Read-Only 100% với code app: chỉ được phép ghi file dưới `.orca/runs/$RUN/critic/`.""",
     ("qa", "verify"): """[CARD qa · VERIFY — điều kiện để được gửi QA_VERDICT: PASS]
 Bắt buộc có, nếu thiếu bất kỳ mục nào thì gửi QA_REJECT/FAIL:
 1. Bảng đối chiếu [P1..Pn] X/X: mỗi mục ghi file:line thật từ `git diff main...HEAD`.
@@ -2150,10 +2168,6 @@ CẤM: sửa code app, xóa/skip test, nới assert, thu hẹp cửa sổ log.""
 1. Chạy `orca-team merge-upstream --role devops` và khởi chạy dịch vụ/container thật (DI/IoC, DB migration, healthcheck).
 2. Quét TOÀN BỘ Runtime Logs từ lúc start (CẤM dùng `--since` ngắn cắt lỗi).
 3. Chỉ sửa Docker/K8s/DB/CI; CẤM sửa business logic của Dev.""",
-    ("critic", "plan"): """[CARD critic · ADVERSARIAL PLAN CRITIQUE]
-1. Tra cứu `orca-team kb` (chỉ mở 1-2 chuyên đề liên quan) và lập giả thuyết độc lập từ bằng chứng file:line.
-2. BẮT BUỘC gửi `orca orchestration ask` (`CRITIC_CHALLENGE`) ở Pha 1; CẤM gửi thẳng `CONSENSUS_REACHED` ở lượt đầu.
-3. Thẩm định 5 trục: [P1..Pn] + Disjoint Ownership, App vs Infra/DI, Composite-Key Isolation, DB/API compat, QA 3 lớp.""",
     ("re", "implement"): """[CARD re · CLEAN-ROOM REVERSE ENGINEERING]
 1. Kích hoạt đúng skill: `reverse-engineer-anything` (binary/APK), `reverse-clone-website` (web 1:1), `game-reverse-reconstruct`.
 2. Read-Only với code app; trích xuất Clean-Room Spec, API/WS contract & asset gốc sạch (cấm cắt ảnh có sẵn chữ làm nền).
@@ -2757,6 +2771,7 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
         r"Ran\s+(\d+)\s+tests?\b",
         r"ℹ\s+pass\s+(\d+)",
         r"tests\s*=\s*['\"]?(\d+)",
+        r"(\d+)\s+unit\s+test\s+classes\s+executed",
     ):
         m_pass = re.search(pat_p, combined_out, re.IGNORECASE)
         if m_pass:
@@ -2767,8 +2782,9 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
     if passed_cnt == 0:
         go_ok = re.findall(r"(?:^|\n)ok\s+\S+", combined_out)
         tap_ok = re.findall(r"(?:^|\n)ok\s+\d+\b", combined_out)
-        if go_ok or tap_ok:
-            passed_cnt = max(len(go_ok), len(tap_ok))
+        passed_matches = re.findall(r"\bPASSED\b", combined_out)
+        if go_ok or tap_ok or passed_matches:
+            passed_cnt = max(len(go_ok), len(tap_ok), len(passed_matches))
 
     # Item 4: Never fabricate tests_total=1 when no real test output was parsed
     total_cnt = passed_cnt + failed_cnt
@@ -2822,9 +2838,13 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
 
 
 def cmd_gate(args: list, caller_dir: Path | None = None):
-    """FIX-09: CLI `orca-team gate [run] [--run <RUN_ID>] [--dispatch-id <DID>] [--profile contracts|default] [--json]`."""
+    """FIX-09 / C-FIX-07: CLI `orca-team gate [run|create] [--from-consensus <RUN>] [--run <RUN_ID>] [--dispatch-id <DID>] [--profile contracts|default] [--json]`."""
     work_dir = Path(caller_dir).resolve() if caller_dir else Path.cwd().resolve()
+    sub_action = "run"
     run_id = ""
+    from_consensus_run = ""
+    question_str = ""
+    options_str = ""
     dispatch_id = ""
     task_id = ""
     profile = "default"
@@ -2834,9 +2854,34 @@ def cmd_gate(args: list, caller_dir: Path | None = None):
     while idx < len(args):
         tok = str(args[idx])
         if tok in ("-h", "--help", "help"):
-            print("Sử dụng: orca-team gate [run] [--run <RUN_ID>] [--dispatch-id <DID>] [--profile contracts|default] [--json]")
+            print(
+                "Sử dụng:\n"
+                "  orca-team gate [run] [--run <RUN_ID>] [--dispatch-id <DID>] [--profile contracts|default] [--json]\n"
+                "  orca-team gate create [--from-consensus <RUN_ID>] [--run <RUN_ID>] [--question \"...\"] [--options '[\"A\",\"B\"]'] [--json]"
+            )
             return
-        elif tok == "run" and idx == 0:
+        elif tok in ("run", "create") and idx == 0:
+            sub_action = tok
+            idx += 1
+        elif tok == "--from-consensus" and idx + 1 < len(args):
+            sub_action = "create"
+            from_consensus_run = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--from-consensus="):
+            sub_action = "create"
+            from_consensus_run = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--question", "-q") and idx + 1 < len(args):
+            question_str = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--question="):
+            question_str = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok == "--options" and idx + 1 < len(args):
+            options_str = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--options="):
+            options_str = tok.split("=", 1)[1].strip()
             idx += 1
         elif tok in ("--run", "--run-id") and idx + 1 < len(args):
             run_id = str(args[idx + 1]).strip()
@@ -2867,6 +2912,134 @@ def cmd_gate(args: list, caller_dir: Path | None = None):
             idx += 1
         else:
             idx += 1
+
+    if sub_action == "create":
+        eff_run = from_consensus_run or run_id or "default"
+        info = resolve_run_upstream_branches(work_dir, run_id=eff_run)
+        main_root = Path(info.get("mainRoot") or work_dir)
+        run_dir = main_root / ".orca" / "runs" / eff_run
+        critic_dir = run_dir / "critic"
+
+        p_hash = ""
+        msg_ids: dict = {}
+        unresolved_objs: list[dict] = []
+
+        cons_p = run_dir / "consensus.json"
+        if cons_p.is_file():
+            try:
+                c_obj = json.loads(cons_p.read_text(encoding="utf-8", errors="ignore"))
+                if isinstance(c_obj, dict):
+                    p_hash = str(c_obj.get("planHash") or "")
+                    msg_ids = c_obj.get("messageIds") if isinstance(c_obj.get("messageIds"), dict) else {}
+            except Exception:
+                pass
+
+        if critic_dir.is_dir():
+            for rf in sorted(critic_dir.glob("review-*.json"), reverse=True):
+                try:
+                    r_obj = json.loads(rf.read_text(encoding="utf-8", errors="ignore"))
+                    if not isinstance(r_obj, dict):
+                        continue
+                    if not p_hash:
+                        p_hash = str(r_obj.get("planHash") or "")
+                    res_map = {
+                        str(r.get("objectionId")): str(r.get("status") or "").lower()
+                        for r in (r_obj.get("resolutions") or [])
+                        if isinstance(r, dict)
+                    }
+                    for obj in r_obj.get("objections") or []:
+                        if isinstance(obj, dict):
+                            oid = str(obj.get("id") or "")
+                            if res_map.get(oid, "unresolved") == "unresolved":
+                                unresolved_objs.append(obj)
+                    break
+                except Exception:
+                    continue
+
+        if not question_str:
+            if unresolved_objs:
+                o0 = unresolved_objs[0]
+                question_str = f"Critic bất đồng [{o0.get('item') or 'P1'}] ({o0.get('id') or 'O1'}): {o0.get('claim') or 'unresolved blocker'}. Chọn hướng?"
+            else:
+                question_str = f"Critic bất đồng trên Run {eff_run} (planHash={p_hash}). Chọn hướng?"
+
+        opts = ["A", "B", "human_review"]
+        if options_str:
+            try:
+                parsed_o = json.loads(options_str)
+                if isinstance(parsed_o, list) and parsed_o:
+                    opts = [str(x) for x in parsed_o]
+            except Exception:
+                opts = [x.strip() for x in options_str.split(",") if x.strip()] or opts
+
+        gate_id = f"gate_critic_{int(time.time())}"
+        gate_payload = {
+            "gateId": gate_id,
+            "runId": eff_run,
+            "planHash": p_hash,
+            "messageIds": msg_ids,
+            "unresolvedObjections": unresolved_objs,
+            "question": question_str,
+            "options": opts,
+            "status": "pending",
+            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        gates_dir = run_dir / "gates"
+        gates_dir.mkdir(parents=True, exist_ok=True)
+        (gates_dir / f"{gate_id}.json").write_text(json.dumps(gate_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        db_p = _find_orca_orchestration_db()
+        if db_p and db_p.is_file() and os.environ.get("ORCA_ORCHESTRATION_DB", "").strip():
+            try:
+                import sqlite3
+
+                conn = sqlite3.connect(str(db_p), timeout=2.0)
+                cols = [r[1] for r in conn.execute("PRAGMA table_info(decision_gates)").fetchall()]
+                if "payload" in cols:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO decision_gates (id, run_id, task_id, status, question, options, resolution, created_at, resolved_at, payload) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            gate_id,
+                            eff_run,
+                            task_id or "task_critic",
+                            "pending",
+                            question_str,
+                            json.dumps(opts, ensure_ascii=False),
+                            None,
+                            gate_payload["createdAt"],
+                            None,
+                            json.dumps(gate_payload, ensure_ascii=False),
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO decision_gates (id, run_id, task_id, status, question, options, resolution, created_at, resolved_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        (
+                            gate_id,
+                            eff_run,
+                            task_id or "task_critic",
+                            "pending",
+                            question_str,
+                            json.dumps(opts, ensure_ascii=False),
+                            None,
+                            gate_payload["createdAt"],
+                            None,
+                        ),
+                    )
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+        if as_json:
+            print(json.dumps(gate_payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"🚨 [HUMAN GATE CREATED] {gate_id} (Run {eff_run}, planHash={p_hash})")
+            print(f"   Câu hỏi: {question_str}")
+            print(f"   Lựa chọn: {json.dumps(opts, ensure_ascii=False)}")
+        return
 
     # Discover gate commands from orca-team.json or project manifest
     cfg = load_config(work_dir) or {}
@@ -2998,6 +3171,179 @@ def cmd_brief(args: list, caller_dir: Path | None = None):
         print(json.dumps({"ok": True, "retryOf": retry_of, "brief": brief_text, "approxTokens": round(len(brief_text) / 3.2)}, ensure_ascii=False, indent=2))
     else:
         print(brief_text)
+
+
+def _truncate_preserving_structured_json(
+    txt: str,
+    max_chars: int = 240,
+    keys: tuple[str, ...] = ("schema", "plan_item", "file_path", "error_code", "repro_cmd", "planHash", "CRITIC_VERDICT"),
+) -> str:
+    """C-FIX-04 / FIX-08: Never truncate inside a structured review JSON or bug report JSON block; only trim surrounding prose."""
+    if len(txt) <= max_chars:
+        return txt
+
+    # 1. Check fenced ```json ... ``` blocks first (handles nested objects like orca.critic.review/v1)
+    for m_fence in re.finditer(r"(```(?:json)?\s*\{[\s\S]*?\}\s*```)", txt, re.IGNORECASE):
+        f_block = m_fence.group(1)
+        if any(f'"{k}"' in f_block or k in f_block for k in keys):
+            prefix = txt[: m_fence.start()].strip()
+            budget_prose = max(0, max_chars - len(f_block) - 4)
+            if budget_prose > 10 and prefix:
+                return f"{prefix[:budget_prose].rstrip()}...\n{f_block}"
+            if prefix:
+                return f"{prefix[:120].rstrip()}...\n{f_block}"
+            return f_block
+
+    # 2. Check flat or nested JSON object containing any target key
+    key_alt = "|".join(re.escape(k) for k in keys)
+    m_j = re.search(rf"(\{{[^{{}}]*\"(?:{key_alt})\"[\s\S]*\}})", txt)
+    if m_j:
+        j_block = m_j.group(1)
+        prefix = txt[: m_j.start()].strip()
+        budget_prose = max(0, max_chars - len(j_block) - 4)
+        if budget_prose > 10 and prefix:
+            return f"{prefix[:budget_prose].rstrip()}... {j_block}"
+        return j_block
+    return txt[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+_truncate_preserving_bug_json = _truncate_preserving_structured_json
+
+
+def cmd_critic_brief(args: list, caller_dir: Path | None = None):
+    """C-FIX-09: CLI `orca-team critic brief --run <RUN_ID> [--json]` — Blind pack không chứa giải pháp/rationale của Leader."""
+    work_dir = Path(caller_dir).resolve() if caller_dir else Path.cwd().resolve()
+    run_id = ""
+    as_json = False
+    idx = 0
+    while idx < len(args):
+        tok = str(args[idx])
+        if tok in ("-h", "--help", "help"):
+            print("Sử dụng: orca-team critic brief [--run <RUN_ID>] [--json]")
+            return
+        elif tok in ("--run", "--run-id") and idx + 1 < len(args):
+            run_id = str(args[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--run=") or tok.startswith("--run-id="):
+            run_id = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok == "--json":
+            as_json = True
+            idx += 1
+        elif tok.startswith("run_") and not run_id:
+            run_id = tok.strip()
+            idx += 1
+        else:
+            idx += 1
+
+    info = resolve_run_upstream_branches(work_dir, run_id=run_id)
+    eff_run = info.get("runId") or run_id or "default"
+    main_root = Path(info.get("mainRoot") or work_dir)
+    objective = (info.get("runObjective") or "").strip()
+
+    # Load only [P1..Pn] id + short title & contracts (strip solution rationale)
+    run_dir = main_root / ".orca" / "runs" / eff_run
+    plan_txt = ""
+    for cand in (run_dir / "plan-draft.md", run_dir / "master-plan.md"):
+        if cand.is_file():
+            plan_txt = cand.read_text(encoding="utf-8", errors="ignore")
+            break
+
+    scripts_dir = Path(__file__).resolve().parent
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import orca_critic_gate as cg
+
+    items_raw = cg.extract_items(plan_txt) if plan_txt else []
+    blind_items = []
+    for it in items_raw:
+        desc_short = re.sub(r"\(\s*files\s*:[^)]+\)", "", str(it.get("description") or ""), flags=re.IGNORECASE).strip()
+        desc_short = desc_short.split("—")[0].split(":")[0].strip()[:80]
+        blind_items.append({"id": it["id"], "summary": desc_short})
+    contracts = cg.contract_lines(plan_txt) if plan_txt else []
+
+    # Machine-generated inventory: 2-level module tree, SQL tables, routes, deps, hotspots
+    ignore_dirs = {".git", ".orca", ".orca-cache", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", "worktrees"}
+    module_tree: list[str] = []
+    hotspots: list[str] = []
+    sql_tables: list[str] = []
+    routes: list[str] = []
+
+    try:
+        for p1 in sorted(main_root.iterdir()):
+            if p1.name in ignore_dirs or p1.name.startswith("."):
+                continue
+            if p1.is_dir():
+                sub_names = [p2.name for p2 in sorted(p1.iterdir()) if p2.name not in ignore_dirs and not p2.name.startswith(".")][:8]
+                module_tree.append(f"{p1.name}/ ({', '.join(sub_names)})" if sub_names else f"{p1.name}/")
+            elif p1.is_file():
+                module_tree.append(p1.name)
+    except Exception:
+        pass
+
+    for root_w, dirs_w, files_w in os.walk(main_root):
+        dirs_w[:] = [d for d in dirs_w if d not in ignore_dirs and not d.startswith(".")]
+        for fn in sorted(files_w):
+            fp = Path(root_w) / fn
+            try:
+                rel_p = str(fp.relative_to(main_root))
+            except Exception:
+                continue
+            if fn.endswith((".sql", ".ts", ".tsx", ".py", ".go", ".js", ".yml", ".yaml")):
+                try:
+                    lines_f = fp.read_text(encoding="utf-8", errors="ignore").splitlines()
+                except Exception:
+                    continue
+                if lines_f and len(hotspots) < 10:
+                    hotspots.append(f"{rel_p}:{min(len(lines_f), 10)}")
+                for lno, ln in enumerate(lines_f, 1):
+                    m_tbl = re.search(r"CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+([A-Za-z0-9_]+)", ln, re.IGNORECASE)
+                    if m_tbl and m_tbl.group(1) not in sql_tables:
+                        sql_tables.append(m_tbl.group(1))
+                    m_rt = re.search(r"\b(GET|POST|PUT|DELETE|PATCH)\s+(/api/[A-Za-z0-9_/\-:]+)", ln)
+                    if m_rt:
+                        r_str = f"{m_rt.group(1)} {m_rt.group(2)} ({rel_p}:{lno})"
+                        if r_str not in routes:
+                            routes.append(r_str)
+
+    deps: list[str] = []
+    pkg_json = main_root / "package.json"
+    if pkg_json.is_file():
+        try:
+            pj = json.loads(pkg_json.read_text(encoding="utf-8", errors="ignore"))
+            deps = sorted(list((pj.get("dependencies") or {}).keys()))[:15]
+        except Exception:
+            pass
+
+    payload = {
+        "runId": eff_run,
+        "objective": objective,
+        "items": blind_items,
+        "contracts": contracts,
+        "inventory": {
+            "modules": module_tree[:15],
+            "tables": sql_tables[:15],
+            "routes": routes[:15],
+            "dependencies": deps,
+        },
+        "hotspots": hotspots[:10],
+    }
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    out = [
+        f"[CRITIC BLIND PACK · run={eff_run}]",
+        f"OBJECTIVE: {objective or '(chưa có)'}",
+        "ITEMS: " + (" · ".join(f"[{x['id']}] {x['summary']}" for x in blind_items) if blind_items else "(chưa có)"),
+        "CONTRACTS: " + (" | ".join(contracts) if contracts else "(chưa có)"),
+        "MODULES: " + (", ".join(payload["inventory"]["modules"]) or "(root)"),
+        "TABLES: " + (", ".join(sql_tables[:10]) or "(none)"),
+        "ROUTES: " + (", ".join(routes[:10]) or "(none)"),
+        "HOTSPOTS: " + (", ".join(hotspots[:10]) or "(none)"),
+        f"NEXT: Tự khảo sát repo và ghi .orca/runs/{eff_run}/critic/hypothesis.md + hypothesis.json TRƯỚC khi gọi ask!",
+    ]
+    print("\n".join(out))
 
 
 def cmd_wait_events(args: list, caller_dir: Path | None = None):
@@ -3243,18 +3589,8 @@ def cmd_wait_events(args: list, caller_dir: Path | None = None):
             pass
 
     def _truncate_preserving_bug_json(txt: str, max_chars: int = 240) -> str:
-        """FIX-08: Never truncate inside a structured bug report JSON block; only trim surrounding prose."""
-        if len(txt) <= max_chars:
-            return txt
-        m_j = re.search(r"(\{[^{}]*\"(?:plan_item|file_path|error_code|repro_cmd)\"[^{}]*\})", txt, re.DOTALL)
-        if m_j:
-            j_block = m_j.group(1)
-            prefix = txt[: m_j.start()].strip()
-            budget_prose = max(0, max_chars - len(j_block) - 4)
-            if budget_prose > 10 and prefix:
-                return f"{prefix[:budget_prose].rstrip()}... {j_block}"
-            return j_block
-        return txt[: max(0, max_chars - 3)].rstrip() + "..."
+        """C-FIX-04 / FIX-08: Never truncate inside a structured review or bug report JSON block."""
+        return _truncate_preserving_structured_json(txt, max_chars=max_chars)
 
     def _append_accumulated(new_msgs: list[dict]) -> None:
         for nm in new_msgs:
@@ -4903,11 +5239,16 @@ def _print_run_plan_and_peers_summary(info: dict, show_all_tasks: bool = False):
 def cmd_plan(args: list, caller_dir: Path = None):
     """
     CLI:
-      orca-team plan pin [--run <RUN_ID>] [--title <TITLE>] [--file <PATH> | --content <TEXT> | <TEXT>...] [--json]
+      orca-team plan draft [--run <RUN_ID>] [--title <TITLE>] [--file <PATH> | --content <TEXT>] [--json]
+      orca-team plan consensus [--run <RUN_ID>] [--plan-hash <H>] [--json]
+      orca-team plan pin [--run <RUN_ID>] [--title <TITLE>] [--file <PATH> | --content <TEXT>] [--from-scratch] [--json]
       orca-team plan [show] [--run <RUN_ID>] [--task-id <TASK_ID>] [--dispatch-id <DISPATCH_ID>] [--json]
-    Ghim (pin) hoặc hiển thị (show) Bản Kế Hoạch Tổng Thể (Pinned Master Plan [P1..Pn]) và Danh bạ Peer-to-Peer của Run
-    để mọi Worker (Critic, Dev, DevOps, QA, Sec, Bench) cùng nhìn vào một nguồn sự thật duy nhất.
     """
+    scripts_dir = Path(__file__).resolve().parent
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import orca_critic_gate as cg
+
     target_dir = (caller_dir or Path.cwd()).resolve()
     raw_list = list(args or [])
     sub = ""
@@ -4918,6 +5259,8 @@ def cmd_plan(args: list, caller_dir: Path = None):
     terminal_handle = ""
     plan_title = ""
     file_path = ""
+    plan_hash_arg = ""
+    from_scratch = False
     content_parts: list[str] = []
     as_json = False
     after_double_dash = False
@@ -4936,12 +5279,24 @@ def cmd_plan(args: list, caller_dir: Path = None):
         if tok in ("-h", "--help", "help"):
             print(
                 "Sử dụng:\n"
-                "  orca-team plan pin [--run <RUN_ID>] [--title <TITLE>] [--file <PATH> | --content \"<PLAN_MD>\"] [--json]\n"
+                "  orca-team plan draft [--run <RUN_ID>] [--title <TITLE>] [--file <PATH> | --content \"<PLAN_MD>\"] [--json]\n"
+                "  orca-team plan consensus [--run <RUN_ID>] [--plan-hash <H>] [--json]\n"
+                "  orca-team plan pin [--run <RUN_ID>] [--title <TITLE>] [--file <PATH> | --content \"<PLAN_MD>\"] [--from-scratch] [--json]\n"
                 "  orca-team plan show [--run <RUN_ID>] [--task-id <TASK_ID>] [--dispatch-id <DISPATCH_ID>] [--json]"
             )
             return
-        if not sub and not tok.startswith("-") and tok.lower() in ("pin", "set", "save", "write", "show", "get", "view", "read", "status"):
-            sub = "pin" if tok.lower() in ("pin", "set", "save", "write") else "show"
+        if not sub and not tok.startswith("-") and tok.lower() in (
+            "draft", "consensus", "pin", "set", "save", "write", "show", "get", "view", "read", "status"
+        ):
+            t_low = tok.lower()
+            if t_low == "draft":
+                sub = "draft"
+            elif t_low == "consensus":
+                sub = "consensus"
+            elif t_low in ("pin", "set", "save", "write"):
+                sub = "pin"
+            else:
+                sub = "show"
             idx += 1
             continue
         if tok in ("--run", "--run-id") and idx + 1 < len(raw_list):
@@ -4949,6 +5304,15 @@ def cmd_plan(args: list, caller_dir: Path = None):
             idx += 2
         elif tok.startswith("--run=") or tok.startswith("--run-id="):
             run_id = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok in ("--plan-hash", "--hash") and idx + 1 < len(raw_list):
+            plan_hash_arg = str(raw_list[idx + 1]).strip()
+            idx += 2
+        elif tok.startswith("--plan-hash=") or tok.startswith("--hash="):
+            plan_hash_arg = tok.split("=", 1)[1].strip()
+            idx += 1
+        elif tok == "--from-scratch":
+            from_scratch = True
             idx += 1
         elif tok in ("--task", "--task-id") and idx + 1 < len(raw_list):
             task_id = str(raw_list[idx + 1]).strip()
@@ -5008,8 +5372,19 @@ def cmd_plan(args: list, caller_dir: Path = None):
     )
     resolved_run = info.get("runId") or run_id or "default"
     main_root = Path(info.get("mainRoot") or target_dir)
+    run_dir = main_root / ".orca" / "runs" / resolved_run
 
-    if sub == "pin":
+    def _append_critic_audit(entry: dict) -> None:
+        critic_d = run_dir / "critic"
+        critic_d.mkdir(parents=True, exist_ok=True)
+        audit_f = critic_d / "audit.jsonl"
+        row_e = dict(entry)
+        row_e.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        row_e.setdefault("runId", resolved_run)
+        with open(audit_f, "a", encoding="utf-8") as af:
+            af.write(json.dumps(row_e, ensure_ascii=False) + "\n")
+
+    if sub in ("draft", "pin"):
         raw_plan = ""
         if file_path:
             fp = Path(file_path).expanduser()
@@ -5022,8 +5397,10 @@ def cmd_plan(args: list, caller_dir: Path = None):
         elif not sys.stdin.isatty():
             raw_plan = sys.stdin.read().strip()
 
+        if not raw_plan and sub == "pin" and (run_dir / "plan-draft.md").is_file():
+            raw_plan = (run_dir / "plan-draft.md").read_text(encoding="utf-8", errors="ignore").strip()
+
         if not raw_plan:
-            # Nếu không truyền nội dung riêng, tự động tổng hợp từ Objective & các Task Specs của Run
             lines_auto = []
             if info.get("runObjective"):
                 lines_auto.append(f"## Mục tiêu Run ({resolved_run})\n{info.get('runObjective')}\n")
@@ -5034,18 +5411,96 @@ def cmd_plan(args: list, caller_dir: Path = None):
             raw_plan = "\n".join(lines_auto).strip()
 
         if not raw_plan:
-            print("❌ Thiếu nội dung Master Plan để ghim (dùng --content \"...\", --file <path>, hoặc truyền qua stdin).", file=sys.stderr)
+            print("❌ Thiếu nội dung Master Plan (dùng --content \"...\", --file <path>, hoặc truyền qua stdin).", file=sys.stderr)
             sys.exit(1)
 
         _ensure_orca_dir_git_excluded(main_root)
-        run_dir = main_root / ".orca" / "runs" / resolved_run
         run_dir.mkdir(parents=True, exist_ok=True)
-        plan_file = run_dir / "master-plan.md"
         header_title = plan_title or info.get("runObjective") or f"Master Plan — {resolved_run}"
         if not raw_plan.startswith("#"):
             formatted_plan = f"# 📌 Pinned Master Plan: {header_title}\n- **Run ID:** `{resolved_run}`\n\n{raw_plan}\n"
         else:
-            formatted_plan = raw_plan + "\n"
+            formatted_plan = raw_plan.rstrip("\n") + "\n"
+
+        items_extracted = cg.extract_items(formatted_plan)
+        if not items_extracted:
+            print("❌ [ORCA PLAN-ITEM GUARD] Kế hoạch thiếu danh sách hạng mục [P1..Pn]!", file=sys.stderr)
+            sys.exit(1)
+        for it in items_extracted:
+            if not it.get("files"):
+                print(
+                    f"❌ [ORCA PLAN-ITEM GUARD] [{it['id']}] thiếu (files: ...) — bắt buộc khai báo file sở hữu để kiểm tra Disjoint File Ownership!",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        contracts_list = cg.contract_lines(formatted_plan)
+        computed_hash = cg.plan_hash(formatted_plan)
+        computed_risk = cg.compute_risk(items_extracted, contracts_list)
+        items_v2 = [
+            {
+                "id": it["id"],
+                "description": it["description"],
+                "files": it["files"],
+                "axes": ["ownership", "dbApiCompat"],
+            }
+            for it in items_extracted
+        ]
+        contracts_payload = {
+            "runId": resolved_run,
+            "title": header_title,
+            "planHash": computed_hash,
+            "riskLevel": computed_risk,
+            "contracts": contracts_list,
+            "items": items_v2,
+        }
+
+        if sub == "draft":
+            draft_file = run_dir / "plan-draft.md"
+            draft_contracts_file = run_dir / "plan-draft.contracts.json"
+            draft_file.write_text(formatted_plan, encoding="utf-8")
+            draft_contracts_file.write_text(json.dumps(contracts_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            _sync_orca_runs_into_child_worktrees(main_root)
+            if as_json:
+                print(
+                    json.dumps(
+                        {
+                            "runId": resolved_run,
+                            "draftPlanPath": str(draft_file),
+                            "planHash": computed_hash,
+                            "riskLevel": computed_risk,
+                            "items": len(items_v2),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"PLAN_DRAFT_READY plan_hash={computed_hash} risk={computed_risk['level']} items={len(items_v2)}")
+            return
+
+        # sub == "pin"
+        draft_contracts_file = run_dir / "plan-draft.contracts.json"
+        if draft_contracts_file.is_file():
+            try:
+                dc_obj = json.loads(draft_contracts_file.read_text(encoding="utf-8", errors="ignore"))
+                draft_h = str((dc_obj or {}).get("planHash") or "").strip()
+            except Exception:
+                draft_h = ""
+            if draft_h and draft_h != computed_hash:
+                if not from_scratch:
+                    print(
+                        f"❌ [ORCA PLAN BINDING GUARD] Plan đã đổi sau khi duyệt: duyệt {draft_h}, hiện {computed_hash}. Chạy lại critic (hoặc dùng --from-scratch để xoá consensus cũ).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                cons_p = run_dir / "consensus.json"
+                if cons_p.is_file():
+                    cons_p.unlink()
+                draft_contracts_file.write_text(json.dumps(contracts_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                (run_dir / "plan-draft.md").write_text(formatted_plan, encoding="utf-8")
+
+        plan_file = run_dir / "master-plan.md"
         plan_file.write_text(formatted_plan, encoding="utf-8")
         latest_file = main_root / ".orca" / "runs" / "latest-master-plan.md"
         try:
@@ -5053,47 +5508,289 @@ def cmd_plan(args: list, caller_dir: Path = None):
         except Exception:
             pass
 
-        # FIX-07: Extract contracts & [P1..Pn] items into .orca/runs/<resolved_run>/contracts.json
-        try:
-            contracts_list: list[str] = []
-            items_list: list[dict] = []
-            in_contract_sec = False
-            for ln in formatted_plan.splitlines():
-                s_ln = ln.strip()
-                if s_ln.startswith("## "):
-                    in_contract_sec = ("hợp đồng" in s_ln.lower() or "contract" in s_ln.lower())
-                    continue
-                if in_contract_sec and s_ln.startswith("-"):
-                    contracts_list.append(s_ln.lstrip("- ").strip())
-                m_item = re.match(r"^(?:[-*]\s*)?(?:\*\*)?\[(P\d+)\](?:\*\*)?\s*(.+)$", s_ln)
-                if m_item:
-                    pk, desc = m_item.group(1), m_item.group(2).strip()
-                    m_files = re.search(r"\(files:\s*([^)]+)\)", desc, re.IGNORECASE)
-                    files_owned = [f.strip() for f in m_files.group(1).split(",") if f.strip()] if m_files else []
-                    items_list.append({"id": pk, "description": desc, "files": files_owned})
-            contracts_payload = {
-                "runId": resolved_run,
-                "title": header_title,
-                "contracts": contracts_list,
-                "items": items_list,
-            }
-            (run_dir / "contracts.json").write_text(
-                json.dumps(contracts_payload, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            if "--contracts" in raw_list:
-                docs_c_dir = main_root / "docs" / "orca-contracts"
-                docs_c_dir.mkdir(parents=True, exist_ok=True)
-                (docs_c_dir / f"{resolved_run}.md").write_text(formatted_plan, encoding="utf-8")
-        except Exception:
-            pass
+        hist_dir = run_dir / "plan-history"
+        hist_dir.mkdir(parents=True, exist_ok=True)
+        h_hex = computed_hash.split(":", 1)[-1]
+        (hist_dir / f"{h_hex}.md").write_text(formatted_plan, encoding="utf-8")
+
+        (run_dir / "contracts.json").write_text(
+            json.dumps(contracts_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        if "--contracts" in raw_list:
+            docs_c_dir = main_root / "docs" / "orca-contracts"
+            docs_c_dir.mkdir(parents=True, exist_ok=True)
+            (docs_c_dir / f"{resolved_run}.md").write_text(formatted_plan, encoding="utf-8")
 
         _sync_orca_runs_into_child_worktrees(main_root)
 
         if as_json:
-            print(json.dumps({"runId": resolved_run, "pinnedPlanPath": str(plan_file), "content": formatted_plan.strip()}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "runId": resolved_run,
+                        "pinnedPlanPath": str(plan_file),
+                        "planHash": computed_hash,
+                        "riskLevel": computed_risk,
+                        "content": formatted_plan.strip(),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
         else:
-            print(f"📌 [Run {resolved_run}] Đã ghim Pinned Master Plan cho toàn bộ đội ngũ tại: {plan_file}")
+            print(
+                f"📌 [Run {resolved_run}] Đã ghim Pinned Master Plan tại: {plan_file} "
+                f"(plan_hash={computed_hash}, risk={computed_risk['level']}, reasons={','.join(computed_risk['reasons'])})"
+            )
+        return
+
+    if sub == "consensus":
+        # C-FIX-03: Projection of Critic Consensus from SQLite messages log
+        import sqlite3
+
+        contracts_obj: dict = {}
+        for cp in (run_dir / "contracts.json", run_dir / "plan-draft.contracts.json"):
+            if cp.is_file():
+                try:
+                    contracts_obj = json.loads(cp.read_text(encoding="utf-8", errors="ignore"))
+                    break
+                except Exception:
+                    continue
+
+        plan_txt = ""
+        for pp in (run_dir / "master-plan.md", run_dir / "plan-draft.md"):
+            if pp.is_file():
+                plan_txt = pp.read_text(encoding="utf-8", errors="ignore")
+                break
+
+        if not plan_txt:
+            _append_critic_audit({"ok": False, "error": "missing_plan_file"})
+            print(json.dumps({"ok": False, "error": "missing_plan_file"}, ensure_ascii=False))
+            sys.exit(2)
+
+        actual_h = cg.plan_hash(plan_txt)
+        expected_h = plan_hash_arg or str(contracts_obj.get("planHash") or "").strip() or actual_h
+        if actual_h != expected_h:
+            _append_critic_audit({"ok": False, "error": "plan_hash_mismatch", "expected": expected_h, "actual": actual_h})
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "plan_hash_mismatch",
+                        "message": f"[ORCA PLAN BINDING GUARD] Plan đã đổi sau khi duyệt: duyệt {expected_h}, hiện {actual_h}. Chạy lại critic.",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            sys.exit(2)
+
+        db_path = _find_orca_orchestration_db()
+        if not db_path or not db_path.is_file():
+            _append_critic_audit({"ok": False, "error": "missing_db", "planHash": expected_h})
+            print(json.dumps({"ok": False, "error": "missing_db"}, ensure_ascii=False))
+            sys.exit(3)
+
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+            conn.row_factory = sqlite3.Row
+            dc_rows = conn.execute(
+                "SELECT dc.id AS did, dc.assignee_handle, wd.agent_terminal_handle, wd.worktree_id, t.spec "
+                "FROM dispatch_contexts dc "
+                "LEFT JOIN worker_dispatches wd ON wd.dispatch_id = dc.id "
+                "LEFT JOIN tasks t ON t.id = dc.task_id "
+                "WHERE dc.run_id = ? ORDER BY dc.created_at DESC",
+                (resolved_run,),
+            ).fetchall()
+            critic_dids: list[str] = []
+            critic_handles: set[str] = {"critic-worker"}
+            for r in dc_rows:
+                wt_id = str(r["worktree_id"] or "")
+                a_h = str(r["assignee_handle"] or "")
+                t_h = str(r["agent_terminal_handle"] or "")
+                sp = str(r["spec"] or "")
+                if (
+                    "critic-worker" in wt_id
+                    or "critic" in a_h
+                    or "critic" in t_h
+                    or "[ROLE: PRINCIPAL RESEARCH, ADVERSARIAL CRITIC" in sp
+                ):
+                    critic_dids.append(str(r["did"]))
+                    if a_h:
+                        critic_handles.add(a_h)
+                    if t_h:
+                        critic_handles.add(t_h)
+                    critic_handles.add(f"dispatch:{r['did']}")
+
+            msgs = conn.execute(
+                "SELECT rowid AS r_idx, * FROM messages WHERE run_id = ? ORDER BY created_at ASC, rowid ASC",
+                (resolved_run,),
+            ).fetchall()
+            qt_rows = []
+            try:
+                qt_rows = conn.execute(
+                    "SELECT * FROM question_threads WHERE run_id = ? ORDER BY created_at ASC",
+                    (resolved_run,),
+                ).fetchall()
+            except Exception:
+                qt_rows = []
+            conn.close()
+        except Exception as exc:
+            _append_critic_audit({"ok": False, "error": f"db_error:{exc}", "planHash": expected_h})
+            print(json.dumps({"ok": False, "error": f"db_error:{exc}"}, ensure_ascii=False))
+            sys.exit(3)
+
+        if not critic_dids:
+            _append_critic_audit({"ok": False, "error": "no_critic_dispatch", "planHash": expected_h})
+            print(json.dumps({"ok": False, "error": "no_critic_dispatch"}, ensure_ascii=False))
+            sys.exit(3)
+
+        challenges = [
+            m for m in msgs
+            if str(m["type"] or "").lower() == "question" and "CRITIC_CHALLENGE" in str(m["body"] or "")
+        ]
+        replies = [
+            m for m in msgs
+            if str(m["type"] or "").lower() in ("reply", "answer")
+            or "reply" in str(m["subject"] or "").lower()
+            or str(m["subject"] or "").lower().startswith("re:")
+        ]
+        finals = [
+            m for m in msgs
+            if str(m["from_handle"] or "") in critic_handles
+            and str(m["type"] or "").lower() in ("handoff", "worker_done")
+            and "CRITIC_VERDICT" in str(m["body"] or "")
+        ]
+
+        if not challenges or not replies or not finals:
+            _append_critic_audit(
+                {
+                    "ok": False,
+                    "error": "incomplete_message_chain",
+                    "planHash": expected_h,
+                    "challenges": len(challenges),
+                    "replies": len(replies),
+                    "finals": len(finals),
+                }
+            )
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "incomplete_message_chain",
+                        "challenges": len(challenges),
+                        "replies": len(replies),
+                        "finals": len(finals),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            sys.exit(3)
+
+        final_m = finals[-1]
+        final_ts = str(final_m["created_at"] or "")
+        final_body = str(final_m["body"] or "")
+
+        for ch in challenges:
+            ch_ts = str(ch["created_at"] or "")
+            if ch_ts > final_ts:
+                _append_critic_audit({"ok": False, "error": "challenge_after_final", "planHash": expected_h})
+                print(json.dumps({"ok": False, "error": "challenge_after_final"}, ensure_ascii=False))
+                sys.exit(3)
+            has_rep = any(ch_ts <= str(rp["created_at"] or "") <= final_ts for rp in replies)
+            if not has_rep:
+                _append_critic_audit({"ok": False, "error": f"unanswered_challenge:{ch['id']}", "planHash": expected_h})
+                print(json.dumps({"ok": False, "error": f"unanswered_challenge:{ch['id']}"}, ensure_ascii=False))
+                sys.exit(3)
+
+        if expected_h not in final_body:
+            _append_critic_audit({"ok": False, "error": "missing_plan_hash_in_final", "planHash": expected_h})
+            print(json.dumps({"ok": False, "error": "missing_plan_hash_in_final"}, ensure_ascii=False))
+            sys.exit(3)
+
+        last_reply_id = str(replies[-1]["id"])
+        qt_ans_ids = {str(q["answer_message_id"]) for q in qt_rows if q["answer_message_id"]} | {str(q["message_id"]) for q in qt_rows if str(q["status"] or "") == "answered"}
+        valid_reply_ids = {str(r["id"]) for r in replies} | qt_ans_ids
+        if not any(rid in final_body for rid in valid_reply_ids):
+            _append_critic_audit({"ok": False, "error": "missing_answer_message_id_in_final", "planHash": expected_h})
+            print(json.dumps({"ok": False, "error": "missing_answer_message_id_in_final", "expectedOneOf": sorted(valid_reply_ids)}, ensure_ascii=False))
+            sys.exit(3)
+
+        # Parse review JSON from final_body fenced block or file
+        review_obj = None
+        fenced_matches = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", final_body, re.IGNORECASE)
+        if fenced_matches:
+            try:
+                review_obj = json.loads(fenced_matches[-1])
+            except Exception:
+                review_obj = None
+        h_hex = expected_h.split(":", 1)[-1]
+        rev_file = run_dir / "critic" / f"review-{h_hex}.json"
+        if review_obj is None and rev_file.is_file():
+            try:
+                review_obj = json.loads(rev_file.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                review_obj = None
+
+        if not isinstance(review_obj, dict):
+            _append_critic_audit({"ok": False, "error": "missing_or_invalid_review_json", "planHash": expected_h})
+            print(json.dumps({"ok": False, "error": "missing_or_invalid_review_json"}, ensure_ascii=False))
+            sys.exit(3)
+
+        hyp_obj = None
+        hyp_file = run_dir / "critic" / "hypothesis.json"
+        if hyp_file.is_file():
+            try:
+                hyp_obj = json.loads(hyp_file.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                hyp_obj = None
+
+        items_ext = cg.extract_items(plan_txt)
+        contracts_ext = cg.contract_lines(plan_txt)
+        risk_obj = contracts_obj.get("riskLevel") or cg.compute_risk(items_ext, contracts_ext)
+
+        viols = cg.validate_review(review_obj, plan_txt, risk_obj, valid_reply_ids=valid_reply_ids)
+        viols.extend(cg.validate_independence(review_obj, plan_txt, hyp_obj, risk_obj))
+        if viols:
+            _append_critic_audit({"ok": False, "error": "review_validation_failed", "planHash": expected_h, "violations": viols})
+            print(json.dumps({"ok": False, "error": "review_validation_failed", "violations": viols}, ensure_ascii=False, indent=2))
+            sys.exit(3)
+
+        (run_dir / "critic").mkdir(parents=True, exist_ok=True)
+        rev_file.write_text(json.dumps(review_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        verdict_val = str(review_obj.get("verdict") or "CONSENSUS_REACHED")
+        msg_ids_obj = {
+            "challenges": [str(c["id"]) for c in challenges],
+            "replies": [str(r["id"]) for r in replies],
+            "final": str(final_m["id"]),
+        }
+        consensus_payload = {
+            "schema": cg.CONSENSUS_SCHEMA,
+            "runId": resolved_run,
+            "planHash": expected_h,
+            "verdict": verdict_val,
+            "criticDispatchId": critic_dids[0],
+            "messageIds": msg_ids_obj,
+            "reviewFile": f".orca/runs/{resolved_run}/critic/review-{h_hex}.json",
+            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        (run_dir / "consensus.json").write_text(json.dumps(consensus_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        _append_critic_audit(
+            {
+                "ok": True,
+                "planHash": expected_h,
+                "verdict": verdict_val,
+                "deadlock": verdict_val == "DEADLOCK",
+                "messageIds": msg_ids_obj,
+            }
+        )
+        _sync_orca_runs_into_child_worktrees(main_root)
+
+        if as_json:
+            print(json.dumps(consensus_payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"✅ [CRITIC CONSENSUS PROJECTED] Run={resolved_run} planHash={expected_h} verdict={verdict_val}")
         return
 
     # sub == "show"
@@ -6383,13 +7080,13 @@ def sync_gemini_directive(root: Path, config: dict):
     qa_w_args = _fmt_worker_args_py(q_agent, q_model, qa.get("effort"))
 
     step1_full = (
-        "### BƯỚC 1: PLAN PIN & TÁCH TASKS (`orca-team card leader --step 1`)\n"
-        "- Ghim `[P1..Pn]` + `## Hợp đồng` bằng `orca-team plan pin` (`contracts.json`), tách Task theo **Disjoint File Ownership**:\n"
+        "### BƯỚC 1: PLAN DRAFT, CONSENSUS & PIN (`orca-team card leader --step 1`)\n"
+        "- Ghi `plan draft` ➔ `critic-worker` ➔ `plan consensus` ➔ `plan pin` (`contracts.json`), tách Task theo **Disjoint File Ownership**:\n"
         "  ```bash\n"
         "  orca orchestration run-create --objective \"[Mô tả]\"\n"
-        "  orca-team plan pin --run <RUN_ID> --content \"## Hợp đồng\\n- POST /api/...\\n## Hạng mục\\n[P1] Module A (files: ...)\"\n"
-        "  orca orchestration task-create --spec \"$(orca-team spec dev '[P1] Phạm vi file & unit test')\"\n"
-        "  orca orchestration task-create --spec \"$(orca-team spec qa 'Kiểm toán [P1..Pn] qua orca-team verify')\"\n"
+        "  orca-team plan draft --run <RUN_ID> --content \"## Hợp đồng\\n- POST /api/...\\n## Hạng mục\\n[P1] Module A (files: ...)\"\n"
+        "  orca-team plan consensus --run <RUN_ID> && orca-team plan pin --run <RUN_ID>\n"
+        "  orca orchestration task-create --spec \"$(orca-team spec dev '[P1] Module A')\"\n"
         "  ```\n\n"
     )
     content = re.sub(
@@ -11418,6 +12115,14 @@ def main():
     prog_name = Path(sys.argv[0]).name
     if prog_name != "orca-monitor" and args:
         cmd0 = args[0].lower()
+        if cmd0 == "critic" and len(args) > 1 and args[1].lower() in ("brief", "blind-pack", "pack"):
+            caller_dir = explicit_root if explicit_root is not None else Path.cwd().resolve()
+            cmd_critic_brief(args[2:], caller_dir=caller_dir)
+            return
+        if cmd0 in ("critic-brief", "blind-pack"):
+            caller_dir = explicit_root if explicit_root is not None else Path.cwd().resolve()
+            cmd_critic_brief(args[1:], caller_dir=caller_dir)
+            return
         if cmd0 in ("spec", "role-spec", "prompt"):
             cmd_spec(args[1:], explicit_root=explicit_root)
             return
