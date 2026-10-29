@@ -696,11 +696,15 @@ def canonical_cmd_hash(cmd_tokens: list[str]) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
 
-def validate_runner_allowlist(cmd_tokens: list[str], kind: str = "test") -> tuple[bool, str]:
+def validate_runner_allowlist(
+    cmd_tokens: list[str],
+    kind: str = "test",
+    worktree_dir: Path | str | None = None,
+) -> tuple[bool, str]:
     """
-    C-FIX-13 & C-FIX-19: Strict allowlist validation for `orca-team verify` and Guard.
+    C-FIX-13, C-FIX-19 & C-FIX-28: Strict allowlist + full-argv path confinement for `orca-team verify` and Guard.
     Rejects shell wrappers (bash/sh/zsh), inline flags (-c, -e), relative scripts (./x.sh),
-    and arbitrary scripts (`python3 fake.py`). Only permits canonical test/build/lint runners.
+    arbitrary scripts (`python3 fake.py`), absolute paths outside `worktree_dir`, and `..` path traversal.
     """
     if not isinstance(cmd_tokens, list) or not cmd_tokens:
         return False, "[ORCA VERIFY RUNNER ALLOWLIST] Lệnh kiểm thử rỗng!"
@@ -733,13 +737,77 @@ def validate_runner_allowlist(cmd_tokens: list[str], kind: str = "test") -> tupl
             "Allowlist hợp lệ: pytest, python3 -m unittest|pytest, npm/pnpm/yarn/bun test, npx jest|vitest|playwright, go test, cargo test, dotnet test, mvn/gradle test, ctest, make test.",
         )
 
-    for tok in tokens[1:]:
-        if tok in ("-c", "-e", "--eval", "--command") or (tok.startswith("-c") and exe != "pytest"):
+    wt_real = os.path.realpath(str(worktree_dir)) if worktree_dir else ""
+    dir_flags = {
+        "-s", "--start-directory",
+        "-t", "--top-level-directory",
+        "-C", "--directory",
+        "--prefix",
+        "--rootdir", "--confcutdir",
+        "-f", "--file", "--makefile",
+        "--config", "--manifest-path",
+        "--project", "--cwd",
+        "--test-dir",
+    }
+
+    idx = 1
+    while idx < len(tokens):
+        tok = tokens[idx]
+        if tok in ("-c", "-e", "--eval", "--command") or (tok.startswith("-c") and exe != "pytest" and not tok.startswith("--")):
             return (
                 False,
                 f"[ORCA VERIFY RUNNER ALLOWLIST] CẤM dùng cờ thực thi mã inline ('{tok}') trong '{cmd_str}'! "
                 "Mọi bài test phải nằm trong cây thư mục test chuẩn của dự án và chạy qua test runner allowlist.",
             )
+
+        # C-FIX-28: Check flag=value or flag <value> path arguments and standalone path tokens
+        cand_paths: list[str] = []
+        if "=" in tok and tok.startswith("-"):
+            f_k, f_v = tok.split("=", 1)
+            if f_k in dir_flags or f_v.startswith("/") or ".." in f_v.split("/"):
+                cand_paths.append(f_v)
+        elif tok in dir_flags:
+            if idx + 1 >= len(tokens):
+                return False, f"[ORCA VERIFY RUNNER ALLOWLIST] Cờ '{tok}' thiếu giá trị đường dẫn hợp lệ trong '{cmd_str}'!"
+            cand_paths.append(tokens[idx + 1])
+            idx += 1
+        elif not tok.startswith("-"):
+            if tok.startswith("/") or tok.startswith("~") or ".." in tok.replace("\\", "/").split("/"):
+                cand_paths.append(tok)
+
+        for cp in cand_paths:
+            cp_clean = cp.strip().strip("'\"")
+            if not cp_clean:
+                continue
+            norm_parts = [p for p in cp_clean.replace("\\", "/").split("/") if p]
+            if ".." in norm_parts or cp_clean.startswith("~"):
+                return (
+                    False,
+                    f"[ORCA VERIFY RUNNER ALLOWLIST] CẤM dùng đường dẫn vượt biên ('{cp_clean}') trong lệnh '{cmd_str}'! "
+                    "Mọi đường dẫn kiểm thử bắt buộc nằm bên trong worktree dự án.",
+                )
+            if os.path.isabs(cp_clean):
+                if not wt_real:
+                    return (
+                        False,
+                        f"[ORCA VERIFY RUNNER ALLOWLIST] CẤM truyền đường dẫn tuyệt đối ('{cp_clean}') trong lệnh '{cmd_str}'! "
+                        "Chỉ được phép truyền đường dẫn tương đối bên trong worktree dự án.",
+                    )
+                rp = os.path.realpath(cp_clean)
+                if rp != wt_real and not rp.startswith(wt_real + os.sep):
+                    return (
+                        False,
+                        f"[ORCA VERIFY RUNNER ALLOWLIST] Đường dẫn tuyệt đối '{cp_clean}' (realpath='{rp}') nằm NGOÀI worktree '{wt_real}'! "
+                        "CẤM trỏ trình chạy kiểm thử ra thư mục ngoài repo.",
+                    )
+            elif wt_real:
+                rp = os.path.realpath(os.path.join(wt_real, cp_clean))
+                if rp != wt_real and not rp.startswith(wt_real + os.sep):
+                    return (
+                        False,
+                        f"[ORCA VERIFY RUNNER ALLOWLIST] Đường dẫn '{cp_clean}' (realpath='{rp}') trỏ ra NGOÀI worktree '{wt_real}'!",
+                    )
+        idx += 1
 
     eff_kind = (kind or "test").strip().lower()
     if eff_kind == "test":
@@ -820,7 +888,7 @@ def validate_runner_allowlist(cmd_tokens: list[str], kind: str = "test") -> tupl
 
 
 def is_test_file_path(rel_path: str) -> bool:
-    """Return True if a relative POSIX file path is a test file or test runner configuration."""
+    """Return True if a relative POSIX file path is a test file or test runner configuration (C-FIX-29)."""
     p = str(rel_path or "").strip().replace("\\", "/").lstrip("./")
     if not p:
         return False
@@ -843,9 +911,132 @@ def is_test_file_path(rel_path: str) -> bool:
         "pyproject.toml",
         "tox.ini",
         "tsconfig.spec.json",
-    ) or re.match(r"^(?:jest|vitest|playwright)\.config\..+$", base, re.IGNORECASE):
+        "package.json",
+        "makefile",
+        "gnumakefile",
+        "go.mod",
+        "cargo.toml",
+        "conftest.py",
+        "setup.cfg",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+    ) or re.match(r"^(?:jest|vitest|playwright|cypress|mocha)\.config\..+$", base, re.IGNORECASE):
         return True
     return False
+
+
+def is_valid_item_test_pattern(pat: str, item_id: str = "") -> tuple[bool, str]:
+    """
+    C-FIX-30: Reject weak/catch-all test patterns (e.g. '.', '.*', '^', '$', '\\w+', 'test')
+    that match arbitrary output without binding to the plan item ID (e.g. P1 -> p1) or a concrete test identifier.
+    """
+    s = str(pat or "").strip()
+    if not s:
+        return False, "[ORCA PLAN-COVERAGE GUARD] test_pattern rỗng!"
+    stripped = re.sub(r"^\(\?[a-zA-Z]+\)", "", s).strip()
+    alnum = re.findall(r"[A-Za-z0-9_]+", stripped)
+    joined_alnum = "".join(alnum).lower()
+    if (
+        stripped in (".", ".*", ".+", "^", "$", "^.*$", "^.+$", r"\w+", r"\S+", r"\d+")
+        or len(joined_alnum) < 4
+        or joined_alnum in ("test", "tests", "pass", "passed", "ok", "ran", "suite")
+    ):
+        return (
+            False,
+            f"[ORCA PLAN-COVERAGE GUARD] test_pattern '{s}' quá yếu / khớp rỗng (catch-all)! "
+            f"CẤM đổi test_pattern thành '{s}' để qua mặt kiểm tra độ phủ [{item_id or 'Pn'}].",
+        )
+    if item_id:
+        pk_low = item_id.strip().lower()
+        if pk_low not in s.lower():
+            return (
+                False,
+                f"[ORCA PLAN-COVERAGE GUARD] test_pattern '{s}' của hạng mục [{item_id}] không chứa định danh '{pk_low}'! "
+                f"Mỗi hạng mục [{item_id}] bắt buộc ánh xạ tới tên test chứa '{pk_low}' (ví dụ: test_{pk_low}).",
+            )
+    return True, ""
+
+
+def compute_policy_anchor_hmac(anchor: dict[str, Any], secret: bytes) -> str:
+    """C-FIX-27: Compute HMAC-SHA256 for a pinned policy anchor."""
+    clean = {k: v for k, v in anchor.items() if k != "anchor_hmac"}
+    canon = json.dumps(clean, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hmac.new(secret, canon, hashlib.sha256).hexdigest()
+
+
+def verify_policy_anchor_hmac(anchor: dict[str, Any], secret: bytes) -> bool:
+    """C-FIX-27: Verify HMAC-SHA256 on a pinned policy anchor."""
+    sig = str(anchor.get("anchor_hmac") or "").strip()
+    if not sig or not re.fullmatch(r"[0-9a-f]{64}", sig):
+        return False
+    expected = compute_policy_anchor_hmac(anchor, secret)
+    return hmac.compare_digest(sig, expected)
+
+
+def write_pinned_policy_anchor(
+    ev_base_dir: Path | str,
+    run_id: str,
+    plan_hash_val: str,
+    canonical_cmds: list[tuple[str, list[str]]],
+    item_test_patterns: dict[str, str],
+    test_allowlist: list[str] | None = None,
+) -> tuple[Path | None, str]:
+    """
+    C-FIX-27: Write 0600 HMAC-signed policy anchor outside the worktree at `<ev_base_dir>/<run_id>/.policy_anchor.json`
+    so agent edits to `contracts.json` or `orca-team.json` cannot alter the canonical test command or test patterns.
+    """
+    secret, err = get_or_create_hmac_secret(ev_base_dir, create_if_missing=True)
+    if err or not secret:
+        return None, err or "Cannot create HMAC secret"
+    run_ev_dir = Path(ev_base_dir) / (run_id or "default")
+    run_ev_dir.mkdir(parents=True, exist_ok=True)
+    anchor_path = run_ev_dir / ".policy_anchor.json"
+    cmds_norm = [
+        {
+            "kind": k,
+            "cmd": normalize_cmd_tokens(toks),
+            "cmd_hash": canonical_cmd_hash(toks),
+        }
+        for k, toks in canonical_cmds
+    ]
+    anchor_obj: dict[str, Any] = {
+        "schema": "orca.policy.anchor/v1",
+        "runId": run_id,
+        "planHash": plan_hash_val,
+        "canonicalCommands": cmds_norm,
+        "itemTestPatterns": dict(sorted((item_test_patterns or {}).items())),
+        "testAllowlist": sorted(set(test_allowlist or [])),
+    }
+    anchor_obj["anchor_hmac"] = compute_policy_anchor_hmac(anchor_obj, secret)
+    fd = os.open(str(anchor_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as af:
+        af.write(json.dumps(anchor_obj, ensure_ascii=False, indent=2) + "\n")
+    os.chmod(str(anchor_path), 0o600)
+    return anchor_path, ""
+
+
+def load_pinned_policy_anchor(ev_base_dir: Path | str, run_id: str) -> tuple[dict[str, Any] | None, str]:
+    """
+    C-FIX-27: Load and verify `<ev_base_dir>/<run_id>/.policy_anchor.json` if present.
+    Returns (anchor_dict, error_str). If file does not exist, returns (None, "").
+    """
+    anchor_path = Path(ev_base_dir) / (run_id or "default") / ".policy_anchor.json"
+    if not anchor_path.exists():
+        return None, ""
+    try:
+        st = os.lstat(str(anchor_path))
+        if stat.S_ISLNK(st.st_mode) or st.st_uid != os.getuid() or (st.st_mode & 0o777) != 0o600:
+            return None, f"[ORCA POLICY-ANCHOR GUARD] File neo chính sách '{anchor_path}' có quyền hoặc chủ sở hữu không hợp lệ!"
+        secret, err = get_or_create_hmac_secret(ev_base_dir, create_if_missing=False)
+        if err or not secret:
+            return None, err or "[ORCA POLICY-ANCHOR GUARD] Thiếu khóa HMAC để xác thực policy anchor!"
+        obj = json.loads(anchor_path.read_text(encoding="utf-8"))
+        if not isinstance(obj, dict) or not verify_policy_anchor_hmac(obj, secret):
+            return None, f"[ORCA POLICY-ANCHOR GUARD] Chữ ký HMAC của '{anchor_path}' không hợp lệ hoặc đã bị giả mạo!"
+        return obj, ""
+    except Exception as exc:
+        return None, f"[ORCA POLICY-ANCHOR GUARD] Không thể đọc '{anchor_path}' ({exc})!"
 
 
 def compute_test_tree_hash(repo_dir: Path | str) -> tuple[str, list[str]]:
@@ -956,7 +1147,7 @@ def resolve_canonical_gate_commands(
         clean_t = [str(x).strip() for x in toks if str(x).strip()]
         if not clean_t:
             return
-        ok, _ = validate_runner_allowlist(clean_t, k)
+        ok, _ = validate_runner_allowlist(clean_t, k, worktree_dir=wt)
         if not ok:
             return
         norm_key = (k, " ".join(normalize_cmd_tokens(clean_t)))

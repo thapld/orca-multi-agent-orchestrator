@@ -2746,7 +2746,26 @@ def _find_orca_orchestration_db_path() -> str:
 
 
 def _extract_cli_flag_value(cmd_text: str, flag_names: tuple[str, ...]) -> str:
-    """Extract the unquoted value of the first matching `--flag` in `cmd_text`."""
+    """
+    C-FIX-31: Extract the unquoted value of the first matching `--flag` in `cmd_text`.
+    First attempts `shlex.split` so mixed quoting from `shlex.quote` (e.g. `'...'"'"'...'` when JSON contains apostrophes)
+    is reconstructed accurately before falling back to regex.
+    """
+    import shlex
+
+    flag_set = {f"--{f}" for f in flag_names}
+    try:
+        toks = shlex.split(cmd_text, posix=True)
+        for idx, tk in enumerate(toks):
+            if tk in flag_set and idx + 1 < len(toks):
+                return toks[idx + 1]
+            if "=" in tk:
+                k_part, v_part = tk.split("=", 1)
+                if k_part in flag_set:
+                    return v_part
+    except Exception:
+        pass
+
     alt = "|".join(re.escape(f) for f in flag_names)
     m = re.search(
         rf"(?:^|\s)--(?:{alt})(?:\s+|=)(?:\"((?:\\.|[^\"])*)\"|'([^']*)'|([^\s;|&\"']+))",
@@ -2860,9 +2879,56 @@ def _resolve_critic_run_dir(real_cwd: str, payload: dict, args: dict, run_id: st
     return proj_root, (os.path.join(proj_root, ".orca", "runs", eff_run or "default") if proj_root else "")
 
 
+def _mask_shell_quoted_spans(s: str) -> tuple[str, str]:
+    """
+    C-FIX-31: Linear single-pass POSIX shell quote scanner.
+    Returns `(no_sq, no_quotes)`:
+      - `no_sq`: all single-quoted spans (`'...'` and `$'...'`) replaced with `'__SQ__'`
+      - `no_quotes`: both single-quoted and double-quoted spans replaced with `'__SQ__'` / `"__DQ__"`.
+    Correctly handles adjacent/hybrid quotes produced by `shlex.quote` (e.g. `'don'"'"'t'`)
+    and multi-line JSON containing apostrophes, double quotes, backticks, and `${}` without splitting inside quotes.
+    """
+    out_no_sq: list[str] = []
+    out_no_q: list[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "\\":
+            pair = s[i : i + 2]
+            out_no_sq.append(pair)
+            out_no_q.append(pair)
+            i += 2
+            continue
+        if ch == "'":
+            end_sq = _find_single_quote_end(s, i)
+            if end_sq == -1:
+                out_no_sq.append("'")
+                out_no_q.append("'")
+                break
+            out_no_sq.append("'__SQ__'")
+            out_no_q.append("'__SQ__'")
+            i = end_sq + 1
+            continue
+        if ch == '"':
+            end_dq = _find_double_quote_end(s, i)
+            if end_dq == -1:
+                out_no_sq.append('"')
+                out_no_q.append('"')
+                break
+            out_no_sq.append(s[i : end_dq + 1])
+            out_no_q.append('"__DQ__"')
+            i = end_dq + 1
+            continue
+        out_no_sq.append(ch)
+        out_no_q.append(ch)
+        i += 1
+    return "".join(out_no_sq), "".join(out_no_q)
+
+
 def _check_critic_bash_readonly_guard(cmd: str, no_heredoc: str, cwd_slot: str) -> str:
     """
-    C-FIX-08 & C-FIX-25: Enforce strict read-only command allowlist for critic-worker in Bash commands.
+    C-FIX-08, C-FIX-25 & C-FIX-31: Enforce strict read-only command allowlist for critic-worker in Bash commands.
     Only read-only inspection utilities, read-only git subcommands, `orca orchestration ask|send|inbox|status`,
     and `orca-team critic brief|write` / `state` / `card` / `kb` are permitted.
     Any redirection (`>`, `>>`) or `tee` must target `.orca/runs/<run>/critic/` without `..`.
@@ -2874,10 +2940,7 @@ def _check_critic_bash_readonly_guard(cmd: str, no_heredoc: str, cwd_slot: str) 
 
     import shlex
 
-    # Strip single-quoted strings ('...') before checking command substitutions ($() / `...`),
-    # because Bash never evaluates command substitutions or redirections inside single quotes.
-    no_sq = re.sub(r"'[^']*'", "'__SQ__'", no_heredoc)
-    no_quotes = re.sub(r'"(?:[^"\\]|\\.)*"', '"__DQ__"', no_sq)
+    no_sq, no_quotes = _mask_shell_quoted_spans(no_heredoc)
 
     # 1. Block any redirection or tee targeting outside .orca/runs/<run>/critic/ (outside quotes)
     for m_red in re.finditer(r"(?:>|>>|\btee\s+(?:-a\s+)?)\s*['\"]?([^\s'\";|&]+)", no_sq):
@@ -3314,21 +3377,11 @@ def _check_critic_two_way_debate_and_question_guards(
                                 cmd,
                             )
 
-                        fenced_blocks = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", expanded_send, re.IGNORECASE)
-                        review_obj = None
-                        if fenced_blocks:
-                            try:
-                                review_obj = json.loads(fenced_blocks[-1])
-                            except Exception:
-                                review_obj = None
-                        if review_obj is None:
-                            # Also try raw JSON object containing "schema": "orca.critic.review/v1"
-                            m_raw_j = re.search(r"(\{[\s\S]*?\"orca\.critic\.review/v1\"[\s\S]*\})", expanded_send)
-                            if m_raw_j:
-                                try:
-                                    review_obj = json.loads(m_raw_j.group(1))
-                                except Exception:
-                                    review_obj = None
+                        body_unquoted = _extract_cli_flag_value(expanded_send, ("body", "content", "message"))
+                        search_text_c = body_unquoted if body_unquoted else expanded_send
+                        review_obj = cg_mod.extract_review_json_from_body(search_text_c)
+                        if review_obj is None and search_text_c != expanded_send:
+                            review_obj = cg_mod.extract_review_json_from_body(expanded_send)
                         if not isinstance(review_obj, dict):
                             return _handle_critic_gate_violation(
                                 "[ORCA CRITIC SCHEMA GUARD] Critic handoff bắt buộc phải chứa khối ```json ... ``` chuẩn schema 'orca.critic.review/v1'!",
@@ -4570,8 +4623,9 @@ def _verify_qa_evidence_ledger_and_ancestry(
     if cg is None:
         return "[ORCA LEDGER-INTEGRITY GUARD] Không thể tải mô-đun orca_critic_gate. Thực thi Fail-Closed!"
 
-    # Load expected [P1..Pn], test_allowlist, and item test_patterns from master-plan.md & contracts.json (C-FIX-13..15)
+    # Load expected [P1..Pn], test_allowlist, and item test_patterns from master-plan.md & contracts.json (C-FIX-13..15, C-FIX-27..30)
     c_obj: dict = {}
+    draft_c_obj: dict = {}
     cfg_obj: dict = {}
     if project_root:
         cfg_p = os.path.join(project_root, "orca-team.json")
@@ -4585,6 +4639,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
     item_test_patterns: dict[str, str] = {}
     test_allowlist: set[str] = set()
     contract_cmd_hashes: set[str] = set()
+    pinned_test_cmds_from_draft: list[tuple[str, list[str]]] = []
     if run_id and project_root:
         plan_md_p = os.path.join(project_root, ".orca", "runs", run_id, "master-plan.md")
         if os.path.isfile(plan_md_p):
@@ -4592,6 +4647,17 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 plan_txt = open(plan_md_p, "r", encoding="utf-8", errors="ignore").read()
                 for pk in re.findall(r"\[(P\d+)\]", plan_txt):
                     expected_plan_items.add(pk)
+            except Exception:
+                pass
+        draft_contracts_p = os.path.join(project_root, ".orca", "runs", run_id, "plan-draft.contracts.json")
+        if os.path.isfile(draft_contracts_p):
+            try:
+                loaded_dc = json.loads(open(draft_contracts_p, "r", encoding="utf-8", errors="ignore").read())
+                if isinstance(loaded_dc, dict):
+                    draft_c_obj = loaded_dc
+                    dv = draft_c_obj.get("verify_cmd")
+                    if isinstance(dv, list) and dv:
+                        pinned_test_cmds_from_draft.append(("test", [str(x) for x in dv]))
             except Exception:
                 pass
         contracts_p = os.path.join(project_root, ".orca", "runs", run_id, "contracts.json")
@@ -4618,6 +4684,9 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                 if not pat:
                                     pat = str(item.get("test_pattern") or "").strip()
                                 if pat:
+                                    pat_ok, pat_err = cg.is_valid_item_test_pattern(pat, ipk)
+                                    if not pat_ok:
+                                        return pat_err
                                     item_test_patterns[ipk] = pat
                             ihash = str(item.get("cmd_hash") or "").strip()
                             if ihash:
@@ -4759,7 +4828,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 f"[ORCA QA EVIDENCE LEDGER GUARD] Lệnh ghi trong ledger ('{cmd_str}') chứa toán tử shell che giấu lỗi!"
             )
         r_kind = str(r.get("kind") or "test").strip().lower()
-        allowed_ok, allowed_err = cg.validate_runner_allowlist(cmd_tokens_r, r_kind)
+        allowed_ok, allowed_err = cg.validate_runner_allowlist(cmd_tokens_r, r_kind, worktree_dir=real_cwd)
         if not allowed_ok:
             return allowed_err
         expected_hash = cg.canonical_cmd_hash(cmd_tokens_r)
@@ -4928,7 +4997,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
         except Exception:
             pass
 
-    # C-FIX-13: Resolve canonical gate commands ONLY from contracts.json / orca-team.json / repo manifests (NEVER from ledger!)
+    # C-FIX-13 & C-FIX-27: Resolve canonical gate commands and verify against pinned policy anchor / plan-draft.contracts.json
     if contract_cmd_hashes:
         missing_hashes = contract_cmd_hashes - verified_cmd_hashes
         if missing_hashes:
@@ -4936,9 +5005,41 @@ def _verify_qa_evidence_ledger_and_ancestry(
                 f"[ORCA CONTRACT-HASH GUARD] Evidence Ledger thiếu cmd_hash bắt buộc trong contracts.json ({', '.join(sorted(missing_hashes))})!"
             )
 
-    canonical_cmds = cg.resolve_canonical_gate_commands(
-        real_cwd, project_root or real_cwd, contracts_obj=c_obj, cfg_obj=cfg_obj
-    )
+    policy_anchor, anchor_err = cg.load_pinned_policy_anchor(ev_base_dir, run_id or "default")
+    if anchor_err:
+        return anchor_err
+
+    if isinstance(policy_anchor, dict):
+        anchor_cmds = policy_anchor.get("canonicalCommands") or []
+        canonical_cmds = [
+            (str(ac.get("kind") or "test"), [str(x) for x in (ac.get("cmd") or [])])
+            for ac in anchor_cmds
+            if isinstance(ac, dict) and ac.get("cmd")
+        ]
+        anchor_pats = policy_anchor.get("itemTestPatterns")
+        if isinstance(anchor_pats, dict):
+            for pk, pat_v in anchor_pats.items():
+                if isinstance(pat_v, str) and pat_v.strip():
+                    item_test_patterns[str(pk)] = pat_v.strip()
+    else:
+        canonical_cmds = cg.resolve_canonical_gate_commands(
+            real_cwd, project_root or real_cwd, contracts_obj=c_obj, cfg_obj=cfg_obj
+        )
+        # C-FIX-27: If plan-draft.contracts.json pinned a verify_cmd, block if contracts.json removed/changed it to run something else
+        if pinned_test_cmds_from_draft:
+            draft_hashes = {cg.canonical_cmd_hash(toks) for _, toks in pinned_test_cmds_from_draft}
+            cur_hashes = {cg.canonical_cmd_hash(toks) for k, toks in canonical_cmds if k == "test"}
+            if draft_hashes and cur_hashes != draft_hashes:
+                return (
+                    f"[ORCA POLICY-ANCHOR GUARD] Lệnh kiểm thử trong contracts.json / orca-team.json (hash={sorted(cur_hashes)}) "
+                    f"không khớp với lệnh kiểm thử đã duyệt lúc đầu trong plan-draft.contracts.json (hash={sorted(draft_hashes)})! "
+                    "CẤM xóa/sửa verify_cmd trong contracts.json để đổi sang script/runner khác."
+                )
+
+    for g_k, g_t in canonical_cmds:
+        ok_al, err_al = cg.validate_runner_allowlist(g_t, g_k, worktree_dir=real_cwd)
+        if not ok_al:
+            return err_al
     if not canonical_cmds:
         return (
             "[ORCA CANONICAL-TEST GUARD] Không thể xác định lệnh kiểm thử chuẩn (canonical test command)! "

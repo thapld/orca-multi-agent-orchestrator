@@ -2694,8 +2694,8 @@ def cmd_verify(args: list, caller_dir: Path | None = None):
         else:
             kind = "test"
 
-    # C-FIX-13 & C-FIX-19: Strict Runner Allowlist (replaces denylist)
-    allowed_ok, allow_err = cg.validate_runner_allowlist(cmd_tokens, kind)
+    # C-FIX-13, C-FIX-19 & C-FIX-28: Strict Runner Allowlist + full-argv worktree confinement
+    allowed_ok, allow_err = cg.validate_runner_allowlist(cmd_tokens, kind, worktree_dir=work_dir)
     if not allowed_ok:
         print(f"❌ {allow_err}", file=sys.stderr)
         sys.exit(2)
@@ -5614,6 +5614,24 @@ def cmd_plan(args: list, caller_dir: Path = None):
             json.dumps(contracts_payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        # C-FIX-27: Write 0600 HMAC-signed policy anchor outside the worktree at plan pin
+        try:
+            ev_base_pin = Path(os.environ.get("ORCA_EVIDENCE_DIR", "").strip() or str(Path.home() / ".orca" / "evidence"))
+            pin_patterns = {
+                str(it["id"]): str(it["verify"]["test_pattern"])
+                for it in items_v2
+                if isinstance(it, dict) and it.get("id") and isinstance(it.get("verify"), dict)
+            }
+            cg.write_pinned_policy_anchor(
+                ev_base_pin,
+                resolved_run,
+                computed_hash,
+                resolved_gates or [("test", canon_test_toks)],
+                pin_patterns,
+                contracts_payload.get("test_allowlist") or [],
+            )
+        except Exception:
+            pass
         if "--contracts" in raw_list:
             docs_c_dir = main_root / "docs" / "orca-contracts"
             docs_c_dir.mkdir(parents=True, exist_ok=True)
@@ -12200,8 +12218,41 @@ KNOWN_SUBCOMMANDS = {
     "merge-upstream", "merge-run", "run-branches",
     "wait-events", "wait", "check-wait",
     "verify", "gate", "state", "card", "brief",
+    "version", "--version", "-V",
     "-h", "--help", "help",
 }
+
+
+def _check_self_repo_version_and_drift(enforce_check: bool = False) -> dict[str, Any]:
+    """C-FIX-32: Inspect git commit SHA and working-tree cleanliness of the orca-team installation."""
+    repo_dir = Path(__file__).resolve().parent.parent
+    sha = "unknown"
+    dirty_files: list[str] = []
+    try:
+        p_sha = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2)
+        if p_sha.returncode == 0 and (p_sha.stdout or "").strip():
+            sha = (p_sha.stdout or "").strip()
+        p_st = subprocess.run(["git", "-C", str(repo_dir), "status", "--porcelain"], capture_output=True, text=True, timeout=2)
+        if p_st.returncode == 0 and (p_st.stdout or "").strip():
+            dirty_files = [ln.strip() for ln in (p_st.stdout or "").splitlines() if ln.strip()]
+    except Exception:
+        pass
+    info = {
+        "repoPath": str(repo_dir),
+        "commitSha": sha,
+        "shortSha": sha[:7] if sha != "unknown" else "unknown",
+        "dirty": bool(dirty_files),
+        "dirtyFiles": dirty_files,
+        "status": "uncommitted" if dirty_files else "clean",
+    }
+    if enforce_check and dirty_files:
+        if os.environ.get("ORCA_REJECT_DIRTY_INSTALL", "0").strip() == "1":
+            print(
+                f"❌ [ORCA INSTALL-DRIFT GUARD] Bản cài đặt orca-team tại '{repo_dir}' (commit {info['shortSha']}) đang có file chưa commit (uncommitted): {dirty_files}!",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    return info
 
 
 def main():
@@ -12326,6 +12377,14 @@ def main():
             print("🐋 Các Agent chính thức được Orca ADE hỗ trợ:")
             for ag in KNOWN_AGENTS:
                 print(f"  • {ag}")
+            return
+        if cmd0 in ("version", "--version", "-v"):
+            v_info = _check_self_repo_version_and_drift(enforce_check=("--enforce" in args))
+            if "--json" in args:
+                print(json.dumps(v_info, ensure_ascii=False, indent=2))
+            else:
+                st_lbl = f"UNCOMMITTED ({len(v_info['dirtyFiles'])} files)" if v_info["dirty"] else "CLEAN"
+                print(f"orca-team commit={v_info['commitSha']} status={st_lbl} path={v_info['repoPath']}")
             return
         if cmd0 in ("-h", "--help", "help"):
             print(__doc__)
