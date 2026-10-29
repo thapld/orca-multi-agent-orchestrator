@@ -3105,21 +3105,21 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
     )
     # C-FIX-38: Detect base64 encoded strings in cmd decoding to sqlite3 or DB tables
     import base64
-    for m_b64 in re.finditer(r"\b([A-Za-z0-9+/]{4,}={0,2})\b", cmd):
+    for m_b64 in re.finditer(r"(?:^|[^A-Za-z0-9+/])([A-Za-z0-9+/]{4,}={0,2})(?=[^A-Za-z0-9+/]|$)", cmd):
         b64_cand = m_b64.group(1)
-        if len(b64_cand) % 4 == 0:
-            try:
-                dec_b = base64.b64decode(b64_cand)
-                if re.search(rb"sqlite3|orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages", dec_b, re.IGNORECASE):
-                    return (
-                        "[ORCA DB-INTEGRITY GUARD] CẤM giải mã base64 chứa chuỗi sqlite3/cơ sở dữ liệu điều phối trong lệnh Bash!"
-                    )
-            except Exception:
-                pass
+        pad_cand = b64_cand + "=" * (-len(b64_cand) % 4)
+        try:
+            dec_b = base64.b64decode(pad_cand)
+            if re.search(rb"sqlite3|orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages", dec_b, re.IGNORECASE):
+                return (
+                    "[ORCA DB-INTEGRITY GUARD] CẤM giải mã base64 chứa chuỗi sqlite3/cơ sở dữ liệu điều phối trong lệnh Bash!"
+                )
+        except Exception:
+            pass
 
-    if re.search(r"\bsqlite3\b", no_heredoc, re.IGNORECASE):
+    if re.search(r"\bsqlite3\b|\b\.read\s+['\"]?[/\w.\-~]+", no_heredoc, re.IGNORECASE):
         return (
-            "[ORCA DB-INTEGRITY GUARD] CẤM gọi trực tiếp sqlite3 CLI hoặc thư viện sqlite3 qua Bash "
+            "[ORCA DB-INTEGRITY GUARD] CẤM gọi trực tiếp sqlite3 CLI, lệnh '.read' hoặc thư viện sqlite3 qua Bash "
             "(kể cả '.read', DML hoặc truy vấn trực tiếp)! Mọi thao tác với cơ sở dữ liệu điều phối phải đi qua CLI chính thức của Orca."
         )
     if re.search(r"\b(?:cp|mv|rm|dd|install|rsync|ln)\b", no_heredoc) and (
