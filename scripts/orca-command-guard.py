@@ -3110,8 +3110,8 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
             return False
         base = os.path.basename(norm)
 
-        # C-FIX-40: Strict path validation. Never trust scripts merely by basename or in arbitrary subdirs.
-        # 1. Official Orchestrator repo CLI scripts must strictly reside at <repo_root>/scripts/<script_name>
+        # C-FIX-40..C-FIX-41: Strict path validation. Never trust scripts merely by basename or in arbitrary subdirs.
+        # 1. Official Orchestrator repo CLI scripts must strictly reside at <repo_root>/scripts/<script_name> AND have 0 uncommitted diffs
         repo_roots = (
             os.path.realpath(os.path.expanduser("~/.orca/orca-multi-agent-orchestrator")),
             os.path.realpath("/Users/macbook/work/tools/orca-multi-agent-orchestrator"),
@@ -3126,7 +3126,14 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
                         timeout=2,
                     )
                     if chk.returncode == 0:
-                        return True
+                        # C-FIX-41: Ensure official script has no uncommitted modifications against git HEAD
+                        diff_chk = subprocess.run(
+                            ["git", "-C", rr, "diff", "--quiet", "HEAD", "--", os.path.join("scripts", base)],
+                            capture_output=True,
+                            timeout=2,
+                        )
+                        if diff_chk.returncode == 0:
+                            return True
                 except Exception:
                     pass
 
@@ -3169,9 +3176,9 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         except Exception:
             pass
 
-    # C-FIX-40: Fold string concatenations in cmd and no_heredoc to defeat split-string obfuscation
-    folded_cmd = re.sub(r"['\"]\s*\+\s*['\"]", "", no_heredoc)
-    folded_raw = re.sub(r"['\"]\s*\+\s*['\"]", "", cmd)
+    # C-FIX-40..C-FIX-41: Fold string concatenations (both '+' and implicit adjacent literal concatenation) in cmd and no_heredoc
+    folded_cmd = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", no_heredoc)
+    folded_raw = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", cmd)
 
     # C-FIX-40: Decode any fromhex(...) calls with concatenated or segmented hex expressions
     for m_fh in re.finditer(r"fromhex\s*\(\s*([^)]+)\)", no_heredoc):
@@ -3217,15 +3224,43 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             "[ORCA DB-INTEGRITY GUARD] CẤM truyền trực tiếp đường dẫn orchestration.db / ORCA_ORCHESTRATION_DB "
             "vào trình thông dịch script ngoài CLI chính thức của Orca!"
         )
-    # C-FIX-40: Scan inline python -c commands for dynamic imports, DB connection, or DML mutations
+    # C-FIX-40..C-FIX-41: Scan inline python -c commands for dynamic imports, DB connection, or DML mutations
     if re.search(r"\bpython3?\s+-c\b", no_heredoc):
         if (
             re.search(r"sqlite3?|orchestration\.db", folded_cmd, re.IGNORECASE)
-            or re.search(r"__import__\s*\(\s*['\"][^'\"]*sq|getattr\s*\([^)]*['\"]co", folded_cmd, re.IGNORECASE)
+            or re.search(r"__import__\s*\(\s*['\"][^'\"]*sq|importlib\.import_module|getattr\s*\([^)]*['\"]co", folded_cmd, re.IGNORECASE)
             or (re.search(r"\bexecute(?:many|script)?\b", folded_cmd) and sql_dml_re.search(folded_cmd))
+            or (re.search(r"\bconnect\b", folded_cmd) and sql_dml_re.search(folded_cmd))
             or orch_tbl_re.search(folded_cmd)
         ):
             return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
+
+        # Direct AST inspection of inline python -c code
+        m_pyc = re.search(r"\bpython3?\s+(?:-[a-zA-Z]*\s+)*-c\s+(['\"])(.*?)\1", cmd, re.DOTALL)
+        if m_pyc:
+            py_code = m_pyc.group(2)
+            try:
+                import ast as _ast_c
+                tree_c = _ast_c.parse(py_code)
+                for node_c in _ast_c.walk(tree_c):
+                    if isinstance(node_c, (_ast_c.Constant, _ast_c.Str)):
+                        s_val = str(getattr(node_c, "value", getattr(node_c, "s", "")))
+                        if re.search(r"sqlite3?|orchestration\.db", s_val, re.IGNORECASE) or orch_tbl_re.search(s_val):
+                            return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
+                    if isinstance(node_c, _ast_c.Call):
+                        fn_name = ""
+                        if isinstance(node_c.func, _ast_c.Name):
+                            fn_name = node_c.func.id
+                        elif isinstance(node_c.func, _ast_c.Attribute):
+                            fn_name = node_c.func.attr
+                        if fn_name in ("execute", "executemany", "executescript", "connect"):
+                            for arg in node_c.args:
+                                if isinstance(arg, (_ast_c.Constant, _ast_c.Str)):
+                                    arg_s = str(getattr(arg, "value", getattr(arg, "s", "")))
+                                    if sql_dml_re.search(arg_s) or orch_tbl_re.search(arg_s):
+                                        return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
+            except Exception:
+                pass
 
     if re.search(r"\b(?:python3?|node|ruby|perl|php|sh|bash|zsh)\b", no_heredoc):
         for m_tok in re.finditer(r"['\"]?([/\w.\-~]+(?:\.[a-zA-Z0-9_]+)?)['\"]?", no_heredoc):
@@ -5400,8 +5435,8 @@ def _verify_qa_evidence_ledger_and_ancestry(
                         if ast.dump(old_ast, include_attributes=False) == ast.dump(new_ast, include_attributes=False):
                             return False
 
-                        # C-FIX-40: Functional progression requires changes to logic, functions, classes, or control flow
-                        # Filter out docstrings, bare string/constant expressions, and unused variable assignments in all scopes
+                        # C-FIX-40..C-FIX-41: Functional progression requires changes to logic, functions, classes, or control flow
+                        # Filter out docstrings, bare constants, dead code (if False), and unused assignments (Assign, AnnAssign) in all scopes
                         def _normalize_functional_ast(tree: ast.AST) -> ast.AST:
                             class _FunctionalCleaner(ast.NodeTransformer):
                                 def _clean_stmts(self, stmts, scope_node):
@@ -5411,14 +5446,33 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     }
                                     cleaned = []
                                     for stmt in stmts:
-                                        # Strip docstrings & bare constant expressions
+                                        # 1. Strip docstrings & bare constant expressions
                                         if isinstance(stmt, ast.Expr) and isinstance(stmt.value, (ast.Constant, ast.Str, ast.Num)):
                                             continue
-                                        # Strip unused variable assignments
+                                        # 2. Strip pass statements
+                                        if isinstance(stmt, ast.Pass):
+                                            continue
+                                        # 3. Strip unused variable assignments (Assign)
                                         if isinstance(stmt, ast.Assign):
                                             targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
                                             if targets and all(t not in loaded_names for t in targets):
                                                 continue
+                                        # 4. Strip unused annotated assignments (AnnAssign, e.g. UNUSED: int = 123)
+                                        if isinstance(stmt, ast.AnnAssign):
+                                            if isinstance(stmt.target, ast.Name) and stmt.target.id not in loaded_names:
+                                                continue
+                                        # 5. Statically dead If statements (if False: / if 0:)
+                                        if isinstance(stmt, ast.If) and isinstance(stmt.test, ast.Constant):
+                                            if not bool(stmt.test.value):
+                                                if stmt.orelse:
+                                                    cleaned.extend(self._clean_stmts(stmt.orelse, scope_node))
+                                                continue
+                                            else:
+                                                cleaned.extend(self._clean_stmts(stmt.body, scope_node))
+                                                continue
+                                        # 6. Statically dead While statements (while False: / while 0:)
+                                        if isinstance(stmt, ast.While) and isinstance(stmt.test, ast.Constant) and not bool(stmt.test.value):
+                                            continue
                                         cleaned.append(stmt)
                                     return cleaned
 
@@ -5440,6 +5494,31 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                 def visit_ClassDef(self, node):
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
+                                    return node
+
+                                def visit_If(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    node.orelse = self._clean_stmts(node.orelse, node)
+                                    return node
+
+                                def visit_While(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    node.orelse = self._clean_stmts(node.orelse, node)
+                                    return node
+
+                                def visit_For(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    node.orelse = self._clean_stmts(node.orelse, node)
+                                    return node
+
+                                def visit_Try(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    node.orelse = self._clean_stmts(node.orelse, node)
+                                    node.finalbody = self._clean_stmts(node.finalbody, node)
                                     return node
 
                             cleaned_tree = _FunctionalCleaner().visit(tree)
