@@ -21,6 +21,7 @@ with zero impact on normal workflows:
 from __future__ import annotations
 
 import codecs
+import hashlib
 import json
 import os
 import re
@@ -3072,12 +3073,8 @@ def _check_critic_bash_readonly_guard(cmd: str, no_heredoc: str, cwd_slot: str) 
 
 OFFICIAL_ORCA_SCRIPTS = {
     "orca-team",
-    "orca-command-guard.py",
     "orca_critic_gate.py",
-    "orca-dispatch",
     "orca-project-init",
-    "orca-hotfix",
-    "orca-review",
     "orca-dispatch-task.sh",
     "orca-issue-hotfix.sh",
     "orca-pr-review.sh",
@@ -3108,12 +3105,35 @@ OFFICIAL_SIM_TEST_FILES = {
     "probe_db_guard_edfe31b.py",
     "probe_db_guard_34837ac.py",
     "probe_cfix39.py",
+    "probe_cfix42.py",
+}
+
+OFFICIAL_SIM_TEST_HASHES = {
+    "test_guard_bypass.py": "837f89e26b6cccfb27691b1724eabd5ec3d6d20693664a23259f6d94d6b392f7",
+    "test_guard_adversarial.py": "938d0eecdb1c37e2abddc3987a3750bea9cb8b126f4a3154ee5b7ef7d9327122",
+    "test_critic_gate_unit.py": "fe0bf88c55dad04e0b3bf0e200b1828efa029f750faf3702cad913714b6321b0",
+    "test_critic_gate.py": "e89014ef6e5811c3c16bfd576c196a4b13eff6a5521c233cd9083cad942924b7",
+    "test_guard_adversarial_v2.py": "ee8eb79d82ff822dfc64d354b467c75d88b33e31019fa40e78bb7e94b6b121e8",
+    "test_critic_gate_adversarial.py": "e58791aa0cbdb4998ee6054387a295ddf5313b142a1b298560c3b136d2dc84bb",
+    "test_guard_e2e_adversarial.py": "d9ece6dff536fab03ca9a9e7af16909562388a83ec4f9db8eb1c6a1c7b9807f2",
+    "test_guard_policy_anchor_adversarial.py": "371b402194a941843bb61bd5746d27c0967261085c437cc970d2604b8110e0b4",
+    "test_critic_identity_adversarial.py": "60f7ac585e5ce7cb08202f5fdc34703a60da6f9fd575b433cc3952d3de055df0",
+    "test_guard_root_hijack_adversarial.py": "7762b42424ca29b90143b4abd3b978f182ef200eca711f4a2e68fe276d4d850d",
+    "test_state_recovery.py": "b9c208372e086fd5ff63d2304df0d0f862e1042ef0196550529339b7c52f8fb4",
+    "probe_db_guard_995711b.py": "876708b568c2f641f1fb06ad89ad9b08a2f1726cd5003d17411c8711b3fa14e9",
+    "probe_db_guard_edfe31b.py": "07da14c899796ebc7d0a5ac8aba33c283cea783186ceacd66df8bd17c2c38ec3",
+    "probe_db_guard_34837ac.py": "6cd117aa0de931e67d92d61d55c1a2633b3dc6cf5dcf2e6b7f770052c0572ac2",
+    "probe_cfix39.py": "0320e6e0f18cf8627d93fed2fc2d4536500530dbfbd202f48e6f5aad6df5bc79",
+    "probe_cfix42.py": "8476c2a85d30158d7a297d5cb1a2df6a222dec352c9017920307ff030d73b1bd",
 }
 
 
 def _is_official_orca_trusted_path(cand_p: str) -> bool:
     try:
         norm = os.path.realpath(cand_p)
+        # Self-reference: the running guard file itself
+        if norm == os.path.realpath(__file__):
+            return True
         # Never exempt any path under /tmp, /var, /private
         if norm.startswith(("/tmp/", "/var/", "/private/var/", "/private/tmp/")):
             return False
@@ -3122,7 +3142,7 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
             return False
         base = os.path.basename(norm)
 
-        # C-FIX-40..C-FIX-42: Strict path and cryptographic hash validation. Never trust scripts merely by basename, unverified diff, or in arbitrary subdirs.
+        # C-FIX-40..C-FIX-43: Strict path and cryptographic hash validation. Never trust scripts merely by basename, unverified diff, or in arbitrary subdirs.
         # 1. Official Orchestrator repo CLI scripts must strictly reside at <repo_root>/scripts/<script_name>, match embedded release SHA-256 hash, and have 0 uncommitted diffs
         repo_roots = (
             os.path.realpath(os.path.expanduser("~/.orca/orca-multi-agent-orchestrator")),
@@ -3130,15 +3150,16 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
         )
         for rr in repo_roots:
             if base in OFFICIAL_ORCA_SCRIPTS and norm == os.path.join(rr, "scripts", base):
-                # C-FIX-42: Cryptographic hash verification against embedded release hashes
-                if base in OFFICIAL_ORCA_SCRIPT_HASHES:
-                    try:
-                        with open(norm, "rb") as f_scr:
-                            h = hashlib.sha256(f_scr.read()).hexdigest()
-                        if h != OFFICIAL_ORCA_SCRIPT_HASHES[base]:
-                            return False
-                    except Exception:
+                # C-FIX-43: Fail-closed: official script must have an embedded hash
+                if base not in OFFICIAL_ORCA_SCRIPT_HASHES:
+                    return False
+                try:
+                    with open(norm, "rb") as f_scr:
+                        h = hashlib.sha256(f_scr.read()).hexdigest()
+                    if h != OFFICIAL_ORCA_SCRIPT_HASHES[base]:
                         return False
+                except Exception:
+                    return False
                 try:
                     chk = subprocess.run(
                         ["git", "-C", rr, "ls-files", "--error-unmatch", os.path.join("scripts", base)],
@@ -3158,14 +3179,21 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
                 except Exception:
                     pass
 
-        # 2. Simulation Harness files must strictly reside in their dedicated canonical locations
+        # 2. Simulation Harness files must strictly reside in their dedicated canonical locations and match release hashes
         sim_root = os.path.realpath("/Users/macbook/work/tools/orca-sim")
         if norm == os.path.join(sim_root, "run-tests.sh"):
             return True
         if norm == os.path.join(sim_root, "bin", "orca_sim.py"):
             return True
         if base in OFFICIAL_SIM_TEST_FILES and norm == os.path.join(sim_root, "tests", base):
-            return True
+            if base in OFFICIAL_SIM_TEST_HASHES:
+                try:
+                    with open(norm, "rb") as f_sim:
+                        if hashlib.sha256(f_sim.read()).hexdigest() == OFFICIAL_SIM_TEST_HASHES[base]:
+                            return True
+                except Exception:
+                    pass
+            return False
 
         return False
     except Exception:
@@ -3174,7 +3202,7 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
 
 def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> str:
     """
-    C-FIX-35..C-FIX-42: Best-effort Bash-hook defense blocking direct SQLite CLI / script mutations
+    C-FIX-35..C-FIX-43: Best-effort Bash-hook defense blocking direct SQLite CLI / script mutations
     against orchestration databases (`orchestration.db`, `messages`, `question_threads`, `orca_policy_anchors`).
     Note: Same-UID lexical/hook filtering is best-effort and cannot replace an out-of-process / separate-UID DB daemon.
     """
@@ -3184,17 +3212,22 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         re.IGNORECASE,
     )
 
-    # C-FIX-42: Unescape \xNN and \uNNNN escape sequences in cmd and no_heredoc to defeat escape obfuscation
-    def _unescape_hex_oct(s: str) -> str:
+    # C-FIX-42..C-FIX-43: Unescape \xNN, \uNNNN, fold chr(...) calls and string concatenations to defeat obfuscation
+    def _fold_chr_and_escapes(s: str) -> str:
         try:
+            # 1. Decode chr(NNN) calls
+            s = re.sub(r"\bchr\s*\(\s*(\d{1,6})\s*\)", lambda m: repr(chr(int(m.group(1)))), s)
+            # 2. Decode \xNN and \uNNNN
             s = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), s)
             s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
+            # 3. Fold adjacent quotes and '+' string concatenations
+            s = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", s)
         except Exception:
             pass
         return s
 
-    unesc_cmd = _unescape_hex_oct(cmd)
-    unesc_heredoc = _unescape_hex_oct(no_heredoc)
+    unesc_cmd = _fold_chr_and_escapes(cmd)
+    unesc_heredoc = _fold_chr_and_escapes(no_heredoc)
 
     # C-FIX-38..C-FIX-39: Detect base64 encoded strings in cmd decoding to sqlite3 or DB tables
     import base64
@@ -3210,7 +3243,7 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         except Exception:
             pass
 
-    # C-FIX-40..C-FIX-42: Fold string concatenations (both '+' and implicit adjacent literal concatenation) in cmd and no_heredoc
+    # C-FIX-40..C-FIX-43: Fold string concatenations (both '+' and implicit adjacent literal concatenation) in cmd and no_heredoc
     folded_cmd = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", unesc_heredoc)
     folded_raw = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", unesc_cmd)
 
@@ -3258,8 +3291,8 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             "[ORCA DB-INTEGRITY GUARD] CẤM truyền trực tiếp đường dẫn orchestration.db / ORCA_ORCHESTRATION_DB "
             "vào trình thông dịch script ngoài CLI chính thức của Orca!"
         )
-    # C-FIX-40..C-FIX-42: Scan inline python -c commands for dynamic imports, DB connection, or DML mutations
-    if re.search(r"\bpython3?\s+-c\b", unesc_heredoc):
+    # C-FIX-40..C-FIX-43: Scan inline python -c and heredoc commands for dynamic imports, DB connection, or DML mutations
+    if re.search(r"\bpython3?\b", unesc_heredoc) or re.search(r"<<", cmd):
         if (
             re.search(r"sqlite3?|orchestration\.db", folded_cmd, re.IGNORECASE)
             or re.search(r"__import__\s*\(\s*['\"][^'\"]*sq|importlib\.import_module|getattr\s*\([^)]*['\"]co", folded_cmd, re.IGNORECASE)
@@ -3267,14 +3300,14 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             or (re.search(r"\bconnect\b", folded_cmd) and sql_dml_re.search(folded_cmd))
             or orch_tbl_re.search(folded_cmd)
         ):
-            return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
+            return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python chứa mã can thiệp cơ sở dữ liệu điều phối!"
 
         # Extract shell variable assignments in cmd to resolve variables passed to python -c (e.g. C='...'; python3 -c "$C")
         shell_vars = {}
         for m_v in re.finditer(r"\b([a-zA-Z_][a-zA-Z0-9_]*)=(['\"])(.*?)\2", unesc_cmd, re.DOTALL):
             shell_vars[m_v.group(1)] = m_v.group(3)
 
-        # Direct AST inspection of inline python -c code
+        # Direct AST inspection of inline python -c and heredoc code
         py_codes = []
         for m_pyc in re.finditer(r"\bpython3?\s+(?:-[a-zA-Z]*\s+)*-c\s+(['\"])(.*?)\1", unesc_cmd, re.DOTALL):
             raw_c = m_pyc.group(2)
@@ -3290,10 +3323,21 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             else:
                 return "[ORCA DB-INTEGRITY GUARD] CẤM truyền biến shell không xác định vào python -c để thực thi gián tiếp!"
 
+        # C-FIX-43: Extract heredoc bodies (e.g. python3 - "$P" <<'PY' ... PY)
+        for m_hd in re.finditer(r"<<\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*\n(.*?)\n\s*\1\b", cmd, re.DOTALL):
+            py_codes.append(m_hd.group(2))
+
         for py_code in py_codes:
-            py_code = _unescape_hex_oct(py_code)
-            if orch_tbl_re.search(py_code) and (sql_dml_re.search(py_code) or re.search(r"connect|execute", py_code)):
-                return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
+            py_code = _fold_chr_and_escapes(py_code)
+            if (
+                orch_tbl_re.search(py_code)
+                and (
+                    sql_dml_re.search(py_code)
+                    or re.search(r"connect|execute", py_code)
+                    or re.search(r"sqlite3?", py_code, re.IGNORECASE)
+                )
+            ):
+                return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python chứa mã can thiệp cơ sở dữ liệu điều phối!"
             try:
                 import ast as _ast_c
                 tree_c = _ast_c.parse(py_code)
@@ -3301,7 +3345,7 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
                     if isinstance(node_c, (_ast_c.Constant, _ast_c.Str)):
                         s_val = str(getattr(node_c, "value", getattr(node_c, "s", "")))
                         if re.search(r"sqlite3?|orchestration\.db", s_val, re.IGNORECASE) or orch_tbl_re.search(s_val):
-                            return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
+                            return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python chứa mã can thiệp cơ sở dữ liệu điều phối!"
                     if isinstance(node_c, _ast_c.Call):
                         fn_name = ""
                         if isinstance(node_c.func, _ast_c.Name):
@@ -3313,7 +3357,7 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
                                 if isinstance(arg, (_ast_c.Constant, _ast_c.Str)):
                                     arg_s = str(getattr(arg, "value", getattr(arg, "s", "")))
                                     if sql_dml_re.search(arg_s) or orch_tbl_re.search(arg_s):
-                                        return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
+                                        return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python chứa mã can thiệp cơ sở dữ liệu điều phối!"
             except Exception:
                 pass
 
@@ -5509,6 +5553,9 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     return bool(val)
                                 except Exception:
                                     pass
+                                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "len" and len(node.args) == 1:
+                                    if _is_static_empty(node.args[0]):
+                                        return False
                                 if isinstance(node, ast.Compare):
                                     try:
                                         left = ast.literal_eval(node.left)
@@ -5572,6 +5619,10 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         n.id for n in ast.walk(scope_node)
                                         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                                     }
+                                    aug_targets = {
+                                        s.target.id for s in stmts
+                                        if isinstance(s, ast.AugAssign) and isinstance(s.target, ast.Name)
+                                    }
                                     cleaned = []
                                     for stmt in stmts:
                                         # 1. Strip docstrings & bare constant expressions
@@ -5580,16 +5631,38 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         # 2. Strip pass statements
                                         if isinstance(stmt, ast.Pass):
                                             continue
-                                        # 3. Strip unused variable assignments (Assign)
+                                        # 3. Strip asserts with statically true conditions (F22)
+                                        if isinstance(stmt, ast.Assert):
+                                            if _eval_static_bool(stmt.test) is True:
+                                                continue
+                                        # 4. Strip unused imports (F21)
+                                        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                                            imported = [a.asname or a.name.split(".")[0] for a in stmt.names]
+                                            if all(name not in loaded_names for name in imported):
+                                                continue
+                                        # 5. Strip unused private helper functions (F23)
+                                        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                            if stmt.name.startswith("_") and stmt.name not in loaded_names:
+                                                continue
+                                        # 6. Strip unused variable assignments (Assign)
                                         if isinstance(stmt, ast.Assign):
                                             targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
-                                            if targets and all(t not in loaded_names for t in targets):
-                                                continue
-                                        # 4. Strip unused annotated assignments (AnnAssign, e.g. UNUSED: int = 123)
+                                            if targets:
+                                                only_aug = all(t not in loaded_names or (t in aug_targets and t not in (loaded_names - aug_targets)) for t in targets)
+                                                if only_aug:
+                                                    continue
+                                        # 7. Strip unused annotated assignments (AnnAssign, e.g. UNUSED: int = 123)
                                         if isinstance(stmt, ast.AnnAssign):
                                             if isinstance(stmt.target, ast.Name) and stmt.target.id not in loaded_names:
                                                 continue
-                                        # 5. Statically dead If statements (if False: / if 0: / if 0 == 1:)
+                                        # 8. Strip unused AugAssign (e.g. _FAKE += 1 in F24)
+                                        if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
+                                            tname = stmt.target.id
+                                            load_count = sum(1 for n in ast.walk(scope_node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id == tname)
+                                            num_augs = sum(1 for s in stmts if isinstance(s, ast.AugAssign) and isinstance(s.target, ast.Name) and s.target.id == tname)
+                                            if load_count <= num_augs:
+                                                continue
+                                        # 9. Statically dead If statements (if False: / if 0: / if 0 == 1: / if len([]): in F25)
                                         if isinstance(stmt, ast.If):
                                             sb = _eval_static_bool(stmt.test)
                                             if sb is False:
@@ -5599,12 +5672,12 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                             elif sb is True:
                                                 cleaned.extend(self._clean_stmts(stmt.body, scope_node))
                                                 continue
-                                        # 6. Statically dead While statements (while False: / while 0: / while 0 == 1:)
+                                        # 10. Statically dead While statements (while False: / while 0: / while 0 == 1:)
                                         if isinstance(stmt, ast.While):
                                             sb = _eval_static_bool(stmt.test)
                                             if sb is False:
                                                 continue
-                                        # 7. Statically dead For loops (for _ in []: / for _ in ():)
+                                        # 11. Statically dead For loops (for _ in []: / for _ in ():)
                                         if isinstance(stmt, ast.For):
                                             if _is_static_empty(stmt.iter):
                                                 continue
