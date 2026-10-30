@@ -435,6 +435,7 @@ def _strip_quoted_heredocs(cmd: str) -> str:
         if not m:
             break
         raw_delim = m.group(2)
+        raw_delim = re.sub(r"^\$+(?=['\"])", "", raw_delim)
         is_quoted = bool(re.search(r"['\"\\]", raw_delim))
         delim = re.sub(r"['\"\\]", "", raw_delim)
         if not delim:
@@ -3102,7 +3103,7 @@ OFFICIAL_ORCA_SCRIPT_HASHES = {
 }
 
 OFFICIAL_SIM_CORE_HASHES = {
-    "run-tests.sh": "0539f821c78ec243beb436927e724806d8af5bd488e718a47842802a24cbc479",
+    "run-tests.sh": "aa9f55b0f761ce7e78a120336cce84c115daf7c6a304683954b6f5aab0dc3f58",
     "bin/orca_sim.py": "4ed0558c65c44d4e271f2e2693cef63a1e360e4611478b35289deeea34575b65",
 }
 
@@ -3125,6 +3126,7 @@ OFFICIAL_SIM_TEST_FILES = {
     "probe_cfix42.py",
     "probe_cfix43.py",
     "probe_cfix44.py",
+    "probe_cfix45.py",
 }
 
 OFFICIAL_SIM_TEST_HASHES = {
@@ -3146,6 +3148,7 @@ OFFICIAL_SIM_TEST_HASHES = {
     "probe_cfix42.py": "5433c3c1addb9d8bfcff704c180d57239e0c3c8f1f3c8669463ba68aa0572bbb",
     "probe_cfix43.py": "cf7ccf07765e6b5cc53731da2ec114b13d9528c9983d02c27c48eb5339062a52",
     "probe_cfix44.py": "22b3a764113a2a6309e4cb3efcf83ce2a3e1a7e8e332d3d2e34ba93aa88ef40b",
+    "probe_cfix45.py": "377b08cbaba3aa366e8a7e535064ca1cc5173ff13985eae261e859c501643a6a",
 }
 
 
@@ -3246,38 +3249,106 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         re.IGNORECASE,
     )
 
-    # C-FIX-42..C-FIX-45: Unescape \xNN, \uNNNN, fold chr(...) calls, bytes([...]).decode(), and string concatenations
+    # C-FIX-42..C-FIX-46: Unescape \xNN, \uNNNN, fold chr(...) calls, bytes(...).decode(), and string concatenations
     def _fold_chr_and_escapes(s: str) -> str:
         try:
-            # 1. Decode chr(...) calls with integer literals or arithmetic expressions (D16, D18, D21)
-            def _eval_chr(m: re.Match) -> str:
+            def _match_paren(text: str, start: int) -> int:
+                depth = 0
+                for i in range(start, len(text)):
+                    if text[i] == '(':
+                        depth += 1
+                    elif text[i] == ')':
+                        depth -= 1
+                        if depth == 0:
+                            return i
+                return -1
+
+            # 1. Fold chr(...) calls taking any balanced integer expression (D16, D18, D21, D24)
+            idx = 0
+            while True:
+                m = re.search(r"\bchr\s*\(", s[idx:])
+                if not m:
+                    break
+                start_paren = idx + m.end() - 1
+                end_paren = _match_paren(s, start_paren)
+                if end_paren == -1:
+                    idx += m.end()
+                    continue
+                inner = s[start_paren + 1 : end_paren].strip()
                 try:
-                    expr = m.group(1).replace("_", "")
-                    val = int(eval(expr, {"__builtins__": {}}, {}))
+                    val = int(eval(inner.replace("_", ""), {"__builtins__": {}}, {}))
                     if 0 <= val <= 0x10FFFF:
-                        return repr(chr(val))
+                        rep = repr(chr(val))
+                        s = s[: idx + m.start()] + rep + s[end_paren + 1 :]
+                        idx = idx + m.start() + len(rep)
+                        continue
                 except Exception:
                     pass
-                return m.group(0)
+                idx = end_paren + 1
 
-            s = re.sub(r"\bchr\s*\(\s*([^()]+?)\s*\)", _eval_chr, s)
+            # 2. Fold bytes(...) / bytearray(...) .decode(...) (D19, D22, D23)
+            idx = 0
+            while True:
+                m = re.search(r"\b(?:bytes|bytearray)\s*\(", s[idx:])
+                if not m:
+                    break
+                start_paren = idx + m.end() - 1
+                end_paren = _match_paren(s, start_paren)
+                if end_paren == -1:
+                    idx += m.end()
+                    continue
+                rest = s[end_paren + 1 :]
+                m_dec = re.match(r"^\.decode\s*\(", rest)
+                if m_dec:
+                    dec_start = end_paren + 1 + m_dec.end() - 1
+                    dec_end = _match_paren(s, dec_start)
+                    if dec_end != -1:
+                        inner = s[start_paren + 1 : end_paren].strip()
+                        try:
+                            val = eval(inner.replace("_", ""), {"__builtins__": {}}, {})
+                            if isinstance(val, (list, tuple, set, bytes, bytearray, range, int)):
+                                b_val = bytes(val) if not isinstance(val, int) else bytes([val])
+                                rep = repr(b_val.decode(errors="ignore"))
+                                s = s[: idx + m.start()] + rep + s[dec_end + 1 :]
+                                idx = idx + m.start() + len(rep)
+                                continue
+                        except Exception:
+                            pass
+                idx = end_paren + 1
 
-            # 2. Decode bytes([..]).decode() and bytearray([..]).decode() (D19)
-            def _eval_bytes_decode(m: re.Match) -> str:
-                try:
-                    nums = [int(x.strip().replace("_", ""), 0) for x in m.group(1).split(",") if x.strip()]
-                    return repr(bytes(nums).decode(errors="ignore"))
-                except Exception:
-                    pass
-                return m.group(0)
+            # 3. Fold bytes.fromhex(...).decode(...)
+            idx = 0
+            while True:
+                m = re.search(r"\bbytes\.fromhex\s*\(", s[idx:])
+                if not m:
+                    break
+                start_paren = idx + m.end() - 1
+                end_paren = _match_paren(s, start_paren)
+                if end_paren == -1:
+                    idx += m.end()
+                    continue
+                rest = s[end_paren + 1 :]
+                m_dec = re.match(r"^\.decode\s*\(", rest)
+                if m_dec:
+                    dec_start = end_paren + 1 + m_dec.end() - 1
+                    dec_end = _match_paren(s, dec_start)
+                    if dec_end != -1:
+                        inner = s[start_paren + 1 : end_paren].strip()
+                        try:
+                            val = eval(inner, {"__builtins__": {}}, {})
+                            rep = repr(bytes.fromhex(val).decode(errors="ignore"))
+                            s = s[: idx + m.start()] + rep + s[dec_end + 1 :]
+                            idx = idx + m.start() + len(rep)
+                            continue
+                        except Exception:
+                            pass
+                idx = end_paren + 1
 
-            s = re.sub(r"\b(?:bytes|bytearray)\s*\(\s*\[([0-9a-fA-FxXoObB_,\s]+)\]\s*\)\.decode\s*\([^)]*\)", _eval_bytes_decode, s)
-
-            # 3. Decode \xNN and \uNNNN
+            # 4. Decode \xNN and \uNNNN
             s = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), s)
             s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
 
-            # 4. Repeatedly fold adjacent quotes and '+' string concatenations until convergence
+            # 5. Repeatedly fold adjacent quotes and '+' string concatenations until convergence
             while True:
                 nxt = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", s)
                 if nxt == s:
@@ -3392,6 +3463,7 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             if not m_h:
                 break
             raw_delim = m_h.group(2)
+            raw_delim = re.sub(r"^\$+(?=['\"])", "", raw_delim)
             delim = re.sub(r"['\"\\]", "", raw_delim)
             if not delim:
                 hd_pos = m_h.end()
@@ -5638,6 +5710,10 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         if f_p.returncode == 0:
                                             try:
                                                 t_tree = ast.parse(f_p.stdout)
+                                                loaded_in_test = {
+                                                    n.id for n in ast.walk(t_tree)
+                                                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                                                }
                                                 mod_aliases = set()
                                                 for n in ast.walk(t_tree):
                                                     if isinstance(n, ast.Import):
@@ -5648,10 +5724,12 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                                     elif isinstance(n, ast.ImportFrom):
                                                         if n.module and (n.module == mod_name or n.module.endswith("." + mod_name)):
                                                             for alias in n.names:
-                                                                if alias.name == "*":
-                                                                    external_names.add("*")
+                                                                if alias.name != "*":
+                                                                    bound = alias.asname or alias.name
+                                                                    if bound in loaded_in_test:
+                                                                        external_names.add(alias.name)
                                                                 else:
-                                                                    external_names.add(alias.name)
+                                                                    external_names.update(loaded_in_test)
                                                 if mod_aliases:
                                                     for n in ast.walk(t_tree):
                                                         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mod_aliases:
@@ -5683,17 +5761,57 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     if all(k is not None for k in keys) and all(v is not None for v in vals):
                                         return dict(zip(keys, vals))
                                     return None
+                                if isinstance(subnode, ast.BinOp):
+                                    left = _eval_static_val(subnode.left)
+                                    right = _eval_static_val(subnode.right)
+                                    if left is not None and right is not None:
+                                        try:
+                                            if isinstance(subnode.op, ast.Add): return left + right
+                                            elif isinstance(subnode.op, ast.Sub): return left - right
+                                            elif isinstance(subnode.op, ast.Mult): return left * right
+                                            elif isinstance(subnode.op, ast.FloorDiv): return left // right
+                                            elif isinstance(subnode.op, ast.Div): return left / right
+                                            elif isinstance(subnode.op, ast.Mod): return left % right
+                                            elif isinstance(subnode.op, ast.Pow): return left ** right
+                                            elif isinstance(subnode.op, ast.BitAnd): return left & right
+                                            elif isinstance(subnode.op, ast.BitOr): return left | right
+                                            elif isinstance(subnode.op, ast.BitXor): return left ^ right
+                                            elif isinstance(subnode.op, ast.LShift): return left << right
+                                            elif isinstance(subnode.op, ast.RShift): return left >> right
+                                        except Exception:
+                                            return None
+                                if isinstance(subnode, ast.UnaryOp):
+                                    operand = _eval_static_val(subnode.operand)
+                                    if operand is not None:
+                                        try:
+                                            if isinstance(subnode.op, ast.UAdd): return +operand
+                                            elif isinstance(subnode.op, ast.USub): return -operand
+                                            elif isinstance(subnode.op, ast.Invert): return ~operand
+                                            elif isinstance(subnode.op, ast.Not): return not operand
+                                        except Exception:
+                                            return None
                                 if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Name):
-                                    if subnode.func.id == "len" and len(subnode.args) == 1:
-                                        inner = _eval_static_val(subnode.args[0])
-                                        if inner is not None and hasattr(inner, "__len__"):
-                                            return len(inner)
-                                    elif subnode.func.id == "bool":
-                                        if not subnode.args:
-                                            return False
-                                        inner = _eval_static_val(subnode.args[0])
-                                        if inner is not None:
-                                            return bool(inner)
+                                    fn = subnode.func.id
+                                    if fn in ("len", "bool", "int", "float", "str", "list", "tuple", "set", "dict", "bytes", "abs", "sum", "min", "max"):
+                                        args = [_eval_static_val(a) for a in subnode.args]
+                                        if all(a is not None for a in args):
+                                            try:
+                                                b_map = {
+                                                    "len": len, "bool": bool, "int": int, "float": float,
+                                                    "str": str, "list": list, "tuple": tuple, "set": set,
+                                                    "dict": dict, "bytes": bytes, "abs": abs, "sum": sum,
+                                                    "min": min, "max": max,
+                                                }
+                                                return b_map[fn](*args)
+                                            except Exception:
+                                                return None
+                                if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Attribute):
+                                    if subnode.func.attr == "join":
+                                        caller_val = _eval_static_val(subnode.func.value)
+                                        if isinstance(caller_val, str) and subnode.args:
+                                            arg_val = _eval_static_val(subnode.args[0])
+                                            if isinstance(arg_val, (list, tuple, set)) and all(isinstance(x, str) for x in arg_val):
+                                                return caller_val.join(arg_val)
                                 try:
                                     return ast.literal_eval(subnode)
                                 except Exception:
@@ -5777,6 +5895,43 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         return None
                                     return node
 
+                                def visit_AsyncFor(self, node):
+                                    self.generic_visit(node)
+                                    if _is_static_empty(node.iter):
+                                        return None
+                                    return node
+
+                                def visit_With(self, node):
+                                    self.generic_visit(node)
+                                    if not node.body:
+                                        return None
+                                    return node
+
+                                def visit_AsyncWith(self, node):
+                                    self.generic_visit(node)
+                                    if not node.body:
+                                        return None
+                                    return node
+
+                                def visit_Try(self, node):
+                                    self.generic_visit(node)
+                                    if not node.body:
+                                        return node.finalbody if node.finalbody else None
+                                    return node
+
+                                def visit_TryStar(self, node):
+                                    self.generic_visit(node)
+                                    if not node.body:
+                                        return node.finalbody if node.finalbody else None
+                                    return node
+
+                                def visit_Match(self, node):
+                                    self.generic_visit(node)
+                                    node.cases = [c for c in node.cases if c.body]
+                                    if not node.cases:
+                                        return None
+                                    return node
+
                             # Pass 2: Clean unused statements and definitions
                             class _FunctionalCleaner(ast.NodeTransformer):
                                 def _get_export_names(self, scope_node):
@@ -5799,7 +5954,6 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                                     }
                                     exports = self._get_export_names(scope_node)
-                                    has_wildcard = ("*" in external_names)
                                     effective_uses = loaded_names | exports | external_names
 
                                     aug_targets = {
@@ -5814,44 +5968,44 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         # 2. Strip pass statements
                                         if isinstance(stmt, ast.Pass):
                                             continue
-                                        # 3. Strip asserts with statically true conditions (F22, F27, F30, F35)
+                                        # 3. Strip asserts with statically true conditions (F22, F27, F30, F35, F38)
                                         if isinstance(stmt, ast.Assert):
                                             if _eval_static_bool(stmt.test) is True:
                                                 continue
                                         # 4. Strip unused imports (F21, F26, F31)
                                         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
                                             imported = [a.asname or a.name.split(".")[0] for a in stmt.names]
-                                            if not has_wildcard and all(name not in effective_uses for name in imported):
+                                            if all(name not in effective_uses for name in imported):
                                                 continue
-                                        # 5. Strip unused functions (F23, F28, F32, F32b)
+                                        # 5. Strip unused functions (F23, F28, F32, F32b, F36, F37)
                                         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                                             if not isinstance(scope_node, ast.ClassDef):
-                                                if not has_wildcard and stmt.name not in effective_uses:
+                                                if stmt.name not in effective_uses:
                                                     continue
                                             else:
                                                 if stmt.name.startswith("_") and not stmt.name.startswith("__") and stmt.name not in effective_uses:
                                                     continue
                                         # 6. Strip unused classes (F29)
                                         if isinstance(stmt, ast.ClassDef):
-                                            if not has_wildcard and stmt.name not in effective_uses:
+                                            if stmt.name not in effective_uses:
                                                 continue
                                         # 7. Strip unused variable assignments (Assign)
                                         if isinstance(stmt, ast.Assign):
                                             targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
                                             if targets:
                                                 only_aug = all(t not in effective_uses or (t in aug_targets and t not in (effective_uses - aug_targets)) for t in targets)
-                                                if not has_wildcard and only_aug:
+                                                if only_aug:
                                                     continue
                                         # 8. Strip unused annotated assignments (AnnAssign, e.g. UNUSED: int = 123)
                                         if isinstance(stmt, ast.AnnAssign):
-                                            if not has_wildcard and isinstance(stmt.target, ast.Name) and stmt.target.id not in effective_uses:
+                                            if isinstance(stmt.target, ast.Name) and stmt.target.id not in effective_uses:
                                                 continue
                                         # 9. Strip unused AugAssign (e.g. _FAKE += 1 in F24)
                                         if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
                                             tname = stmt.target.id
                                             load_count = sum(1 for n in ast.walk(scope_node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id == tname)
                                             num_augs = sum(1 for s in stmts if isinstance(s, ast.AugAssign) and isinstance(s.target, ast.Name) and s.target.id == tname)
-                                            if not has_wildcard and load_count <= num_augs and tname not in (external_names | exports):
+                                            if load_count <= num_augs and tname not in (external_names | exports):
                                                 continue
                                         cleaned.append(stmt)
                                     return cleaned
@@ -5894,7 +6048,26 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     node.orelse = self._clean_stmts(node.orelse, node)
                                     return node
 
+                                def visit_AsyncFor(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    node.orelse = self._clean_stmts(node.orelse, node)
+                                    return node
+
                                 def visit_Try(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    for h in node.handlers:
+                                        h.body = self._clean_stmts(h.body, h)
+                                    node.orelse = self._clean_stmts(node.orelse, node)
+                                    node.finalbody = self._clean_stmts(node.finalbody, node)
+                                    if not node.body:
+                                        if node.finalbody:
+                                            return node.finalbody
+                                        return None
+                                    return node
+
+                                def visit_TryStar(self, node):
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
                                     for h in node.handlers:
@@ -5918,6 +6091,15 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
                                     if not node.body:
+                                        return None
+                                    return node
+
+                                def visit_Match(self, node):
+                                    self.generic_visit(node)
+                                    for c in node.cases:
+                                        c.body = self._clean_stmts(c.body, node)
+                                    node.cases = [c for c in node.cases if c.body]
+                                    if not node.cases:
                                         return None
                                     return node
 
