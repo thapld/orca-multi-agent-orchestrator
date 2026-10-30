@@ -3078,6 +3078,18 @@ OFFICIAL_ORCA_SCRIPTS = {
     "orca-project-init",
     "orca-hotfix",
     "orca-review",
+    "orca-dispatch-task.sh",
+    "orca-issue-hotfix.sh",
+    "orca-pr-review.sh",
+}
+
+OFFICIAL_ORCA_SCRIPT_HASHES = {
+    "orca-team": "f57083a0a68a12257dcbb01a05d0eab1cbb3469533d220d0aad4601b81f4a3f5",
+    "orca_critic_gate.py": "d3f1b18d2a70582a2b81c8333ffe91422812f10ea5f54c33da2c21ba1585e45a",
+    "orca-project-init": "057ce16696e2ade5389160c6dc564269fe712da6c535c4a5146e41b650433102",
+    "orca-dispatch-task.sh": "5042f6956a93ae5bfad1518bdf480914693a182700512e2473c6e960f9d3d503",
+    "orca-issue-hotfix.sh": "a92b51c2d5741a23fa141156a5ee0bb1fc9e1d5a52ed7114b807676508b61111",
+    "orca-pr-review.sh": "6e2ce06d3c4fbd1b9a2820aff1aa1d7e5d24a29a8e11103bf91689f7c76b9f9e",
 }
 
 OFFICIAL_SIM_TEST_FILES = {
@@ -3110,14 +3122,23 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
             return False
         base = os.path.basename(norm)
 
-        # C-FIX-40..C-FIX-41: Strict path validation. Never trust scripts merely by basename or in arbitrary subdirs.
-        # 1. Official Orchestrator repo CLI scripts must strictly reside at <repo_root>/scripts/<script_name> AND have 0 uncommitted diffs
+        # C-FIX-40..C-FIX-42: Strict path and cryptographic hash validation. Never trust scripts merely by basename, unverified diff, or in arbitrary subdirs.
+        # 1. Official Orchestrator repo CLI scripts must strictly reside at <repo_root>/scripts/<script_name>, match embedded release SHA-256 hash, and have 0 uncommitted diffs
         repo_roots = (
             os.path.realpath(os.path.expanduser("~/.orca/orca-multi-agent-orchestrator")),
             os.path.realpath("/Users/macbook/work/tools/orca-multi-agent-orchestrator"),
         )
         for rr in repo_roots:
             if base in OFFICIAL_ORCA_SCRIPTS and norm == os.path.join(rr, "scripts", base):
+                # C-FIX-42: Cryptographic hash verification against embedded release hashes
+                if base in OFFICIAL_ORCA_SCRIPT_HASHES:
+                    try:
+                        with open(norm, "rb") as f_scr:
+                            h = hashlib.sha256(f_scr.read()).hexdigest()
+                        if h != OFFICIAL_ORCA_SCRIPT_HASHES[base]:
+                            return False
+                    except Exception:
+                        return False
                 try:
                     chk = subprocess.run(
                         ["git", "-C", rr, "ls-files", "--error-unmatch", os.path.join("scripts", base)],
@@ -3153,7 +3174,7 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
 
 def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> str:
     """
-    C-FIX-35..C-FIX-39: Best-effort Bash-hook defense blocking direct SQLite CLI / script mutations
+    C-FIX-35..C-FIX-42: Best-effort Bash-hook defense blocking direct SQLite CLI / script mutations
     against orchestration databases (`orchestration.db`, `messages`, `question_threads`, `orca_policy_anchors`).
     Note: Same-UID lexical/hook filtering is best-effort and cannot replace an out-of-process / separate-UID DB daemon.
     """
@@ -3162,6 +3183,19 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         r"\b(?:orchestration\.db|ORCA_ORCHESTRATION_DB|question_threads|dispatch_contexts|worker_dispatches|orca_policy_anchors|messages)\b",
         re.IGNORECASE,
     )
+
+    # C-FIX-42: Unescape \xNN and \uNNNN escape sequences in cmd and no_heredoc to defeat escape obfuscation
+    def _unescape_hex_oct(s: str) -> str:
+        try:
+            s = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), s)
+            s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
+        except Exception:
+            pass
+        return s
+
+    unesc_cmd = _unescape_hex_oct(cmd)
+    unesc_heredoc = _unescape_hex_oct(no_heredoc)
+
     # C-FIX-38..C-FIX-39: Detect base64 encoded strings in cmd decoding to sqlite3 or DB tables
     import base64
     for m_b64 in re.finditer(r"(?:^|[^A-Za-z0-9+/])([A-Za-z0-9+/]{4,}={0,2})(?=[^A-Za-z0-9+/]|$)", cmd):
@@ -3176,12 +3210,12 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         except Exception:
             pass
 
-    # C-FIX-40..C-FIX-41: Fold string concatenations (both '+' and implicit adjacent literal concatenation) in cmd and no_heredoc
-    folded_cmd = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", no_heredoc)
-    folded_raw = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", cmd)
+    # C-FIX-40..C-FIX-42: Fold string concatenations (both '+' and implicit adjacent literal concatenation) in cmd and no_heredoc
+    folded_cmd = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", unesc_heredoc)
+    folded_raw = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", unesc_cmd)
 
     # C-FIX-40: Decode any fromhex(...) calls with concatenated or segmented hex expressions
-    for m_fh in re.finditer(r"fromhex\s*\(\s*([^)]+)\)", no_heredoc):
+    for m_fh in re.finditer(r"fromhex\s*\(\s*([^)]+)\)", unesc_heredoc):
         raw_fh = re.sub(r"['\"\s+]", "", m_fh.group(1))
         if len(raw_fh) >= 4 and len(raw_fh) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", raw_fh):
             try:
@@ -3208,24 +3242,24 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             "[ORCA DB-INTEGRITY GUARD] CẤM gọi trực tiếp sqlite3 CLI, lệnh '.read' hoặc thư viện sqlite3 qua Bash "
             "(kể cả '.read', DML hoặc truy vấn trực tiếp)! Mọi thao tác với cơ sở dữ liệu điều phối phải đi qua CLI chính thức của Orca."
         )
-    if re.search(r"\b(?:cp|mv|rm|dd|install|rsync|ln)\b", no_heredoc) and (
-        re.search(r"\*\.db\b|orchestration\.db\b|Application\s+Support/orca", cmd, re.IGNORECASE)
+    if re.search(r"\b(?:cp|mv|rm|dd|install|rsync|ln)\b", unesc_heredoc) and (
+        re.search(r"\*\.db\b|orchestration\.db\b|Application\s+Support/orca", unesc_cmd, re.IGNORECASE)
     ):
         return "[ORCA DB-INTEGRITY GUARD] CẤM sao chép, ghi đè hoặc xóa file cơ sở dữ liệu (*.db) của Orca qua Bash!"
-    if re.search(r"\bsqlite3\b", cmd, re.IGNORECASE) or re.search(r"\b(?:exec|eval)\s*\(\s*open\s*\(", cmd, re.IGNORECASE):
+    if re.search(r"\bsqlite3\b", unesc_cmd, re.IGNORECASE) or re.search(r"\b(?:exec|eval)\s*\(\s*open\s*\(", unesc_cmd, re.IGNORECASE):
         return (
             "[ORCA DB-INTEGRITY GUARD] CẤM ghi trực tiếp hoặc nạp mã thực thi can thiệp cơ sở dữ liệu điều phối "
             "(orchestration.db / sqlite3 / exec(open(...))) qua Bash!"
         )
-    if re.search(r"\b(?:python3?|node|ruby|perl|php)\b", no_heredoc) and re.search(
-        r"orchestration\.db|ORCA_ORCHESTRATION_DB", no_heredoc, re.IGNORECASE
+    if re.search(r"\b(?:python3?|node|ruby|perl|php)\b", unesc_heredoc) and re.search(
+        r"orchestration\.db|ORCA_ORCHESTRATION_DB", unesc_heredoc, re.IGNORECASE
     ):
         return (
             "[ORCA DB-INTEGRITY GUARD] CẤM truyền trực tiếp đường dẫn orchestration.db / ORCA_ORCHESTRATION_DB "
             "vào trình thông dịch script ngoài CLI chính thức của Orca!"
         )
-    # C-FIX-40..C-FIX-41: Scan inline python -c commands for dynamic imports, DB connection, or DML mutations
-    if re.search(r"\bpython3?\s+-c\b", no_heredoc):
+    # C-FIX-40..C-FIX-42: Scan inline python -c commands for dynamic imports, DB connection, or DML mutations
+    if re.search(r"\bpython3?\s+-c\b", unesc_heredoc):
         if (
             re.search(r"sqlite3?|orchestration\.db", folded_cmd, re.IGNORECASE)
             or re.search(r"__import__\s*\(\s*['\"][^'\"]*sq|importlib\.import_module|getattr\s*\([^)]*['\"]co", folded_cmd, re.IGNORECASE)
@@ -3235,10 +3269,31 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         ):
             return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
 
+        # Extract shell variable assignments in cmd to resolve variables passed to python -c (e.g. C='...'; python3 -c "$C")
+        shell_vars = {}
+        for m_v in re.finditer(r"\b([a-zA-Z_][a-zA-Z0-9_]*)=(['\"])(.*?)\2", unesc_cmd, re.DOTALL):
+            shell_vars[m_v.group(1)] = m_v.group(3)
+
         # Direct AST inspection of inline python -c code
-        m_pyc = re.search(r"\bpython3?\s+(?:-[a-zA-Z]*\s+)*-c\s+(['\"])(.*?)\1", cmd, re.DOTALL)
-        if m_pyc:
-            py_code = m_pyc.group(2)
+        py_codes = []
+        for m_pyc in re.finditer(r"\bpython3?\s+(?:-[a-zA-Z]*\s+)*-c\s+(['\"])(.*?)\1", unesc_cmd, re.DOTALL):
+            raw_c = m_pyc.group(2)
+            m_vref = re.match(r"^\$?\{?([a-zA-Z_][a-zA-Z0-9_]*)\}?$", raw_c.strip())
+            if m_vref and m_vref.group(1) in shell_vars:
+                py_codes.append(shell_vars[m_vref.group(1)])
+            else:
+                py_codes.append(raw_c)
+        for m_pyv in re.finditer(r"\bpython3?\s+(?:-[a-zA-Z]*\s+)*-c\s+['\"]?\$([a-zA-Z_][a-zA-Z0-9_]*)", unesc_cmd):
+            vname = m_pyv.group(1)
+            if vname in shell_vars:
+                py_codes.append(shell_vars[vname])
+            else:
+                return "[ORCA DB-INTEGRITY GUARD] CẤM truyền biến shell không xác định vào python -c để thực thi gián tiếp!"
+
+        for py_code in py_codes:
+            py_code = _unescape_hex_oct(py_code)
+            if orch_tbl_re.search(py_code) and (sql_dml_re.search(py_code) or re.search(r"connect|execute", py_code)):
+                return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python -c chứa mã can thiệp cơ sở dữ liệu điều phối!"
             try:
                 import ast as _ast_c
                 tree_c = _ast_c.parse(py_code)
@@ -5435,9 +5490,82 @@ def _verify_qa_evidence_ledger_and_ancestry(
                         if ast.dump(old_ast, include_attributes=False) == ast.dump(new_ast, include_attributes=False):
                             return False
 
-                        # C-FIX-40..C-FIX-41: Functional progression requires changes to logic, functions, classes, or control flow
-                        # Filter out docstrings, bare constants, dead code (if False), and unused assignments (Assign, AnnAssign) in all scopes
+                        # C-FIX-40..C-FIX-42: Functional progression requires changes to logic, functions, classes, or control flow
+                        # Filter out docstrings, bare constants, dead code (if False, if 0 == 1, for _ in []), and unused assignments (Assign, AnnAssign) in all scopes
                         def _normalize_functional_ast(tree: ast.AST) -> ast.AST:
+                            def _eval_static_bool(node):
+                                if isinstance(node, (ast.Constant, ast.Str, ast.Num)):
+                                    val = getattr(node, "value", getattr(node, "s", getattr(node, "n", None)))
+                                    return bool(val)
+                                if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+                                    elts = getattr(node, "elts", None)
+                                    if elts is not None:
+                                        return bool(elts)
+                                    keys = getattr(node, "keys", None)
+                                    if keys is not None:
+                                        return bool(keys)
+                                try:
+                                    val = ast.literal_eval(node)
+                                    return bool(val)
+                                except Exception:
+                                    pass
+                                if isinstance(node, ast.Compare):
+                                    try:
+                                        left = ast.literal_eval(node.left)
+                                        res = True
+                                        curr = left
+                                        for op, comp in zip(node.ops, node.comparators):
+                                            right = ast.literal_eval(comp)
+                                            if isinstance(op, ast.Eq): ok = (curr == right)
+                                            elif isinstance(op, ast.NotEq): ok = (curr != right)
+                                            elif isinstance(op, ast.Lt): ok = (curr < right)
+                                            elif isinstance(op, ast.LtE): ok = (curr <= right)
+                                            elif isinstance(op, ast.Gt): ok = (curr > right)
+                                            elif isinstance(op, ast.GtE): ok = (curr >= right)
+                                            elif isinstance(op, ast.Is): ok = (curr is right)
+                                            elif isinstance(op, ast.IsNot): ok = (curr is not right)
+                                            elif isinstance(op, ast.In): ok = (curr in right)
+                                            elif isinstance(op, ast.NotIn): ok = (curr not in right)
+                                            else: return None
+                                            if not ok:
+                                                res = False
+                                                break
+                                            curr = right
+                                        return res
+                                    except Exception:
+                                        return None
+                                if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+                                    sub = _eval_static_bool(node.operand)
+                                    if sub is not None:
+                                        return not sub
+                                if isinstance(node, ast.BoolOp):
+                                    if isinstance(node.op, ast.And):
+                                        for v in node.values:
+                                            b = _eval_static_bool(v)
+                                            if b is False: return False
+                                            if b is None: return None
+                                        return True
+                                    elif isinstance(node.op, ast.Or):
+                                        for v in node.values:
+                                            b = _eval_static_bool(v)
+                                            if b is True: return True
+                                            if b is None: return None
+                                        return False
+                                return None
+
+                            def _is_static_empty(node):
+                                if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+                                    return len(node.elts) == 0
+                                if isinstance(node, ast.Dict):
+                                    return len(node.keys) == 0
+                                try:
+                                    val = ast.literal_eval(node)
+                                    if hasattr(val, "__len__"):
+                                        return len(val) == 0
+                                except Exception:
+                                    pass
+                                return False
+
                             class _FunctionalCleaner(ast.NodeTransformer):
                                 def _clean_stmts(self, stmts, scope_node):
                                     loaded_names = {
@@ -5461,18 +5589,25 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         if isinstance(stmt, ast.AnnAssign):
                                             if isinstance(stmt.target, ast.Name) and stmt.target.id not in loaded_names:
                                                 continue
-                                        # 5. Statically dead If statements (if False: / if 0:)
-                                        if isinstance(stmt, ast.If) and isinstance(stmt.test, ast.Constant):
-                                            if not bool(stmt.test.value):
+                                        # 5. Statically dead If statements (if False: / if 0: / if 0 == 1:)
+                                        if isinstance(stmt, ast.If):
+                                            sb = _eval_static_bool(stmt.test)
+                                            if sb is False:
                                                 if stmt.orelse:
                                                     cleaned.extend(self._clean_stmts(stmt.orelse, scope_node))
                                                 continue
-                                            else:
+                                            elif sb is True:
                                                 cleaned.extend(self._clean_stmts(stmt.body, scope_node))
                                                 continue
-                                        # 6. Statically dead While statements (while False: / while 0:)
-                                        if isinstance(stmt, ast.While) and isinstance(stmt.test, ast.Constant) and not bool(stmt.test.value):
-                                            continue
+                                        # 6. Statically dead While statements (while False: / while 0: / while 0 == 1:)
+                                        if isinstance(stmt, ast.While):
+                                            sb = _eval_static_bool(stmt.test)
+                                            if sb is False:
+                                                continue
+                                        # 7. Statically dead For loops (for _ in []: / for _ in ():)
+                                        if isinstance(stmt, ast.For):
+                                            if _is_static_empty(stmt.iter):
+                                                continue
                                         cleaned.append(stmt)
                                     return cleaned
 
@@ -5500,18 +5635,24 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
                                     node.orelse = self._clean_stmts(node.orelse, node)
+                                    if not node.body and not node.orelse:
+                                        return None
                                     return node
 
                                 def visit_While(self, node):
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
                                     node.orelse = self._clean_stmts(node.orelse, node)
+                                    if not node.body:
+                                        return None
                                     return node
 
                                 def visit_For(self, node):
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
                                     node.orelse = self._clean_stmts(node.orelse, node)
+                                    if not node.body:
+                                        return None
                                     return node
 
                                 def visit_Try(self, node):
@@ -5519,6 +5660,8 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     node.body = self._clean_stmts(node.body, node)
                                     node.orelse = self._clean_stmts(node.orelse, node)
                                     node.finalbody = self._clean_stmts(node.finalbody, node)
+                                    if not node.body and not node.finalbody:
+                                        return None
                                     return node
 
                             cleaned_tree = _FunctionalCleaner().visit(tree)
