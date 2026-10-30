@@ -425,23 +425,35 @@ def _find_double_quote_end(s: str, quote_idx: int) -> int:
 
 
 def _strip_quoted_heredocs(cmd: str) -> str:
-    """Strip quoted heredoc bodies: << 'EOF' ... EOF, << "EOF" ... EOF, or << \\EOF ... EOF."""
-    def _heredoc_repl(m: re.Match) -> str:
-        return m.group(1) + "\n" + m.group(3)
-
-    out = re.sub(
-        r"(<<-?\s*['\"]([A-Za-z_][A-Za-z0-9_-]*)['\"][^\n]*)\n(?:.*?\n)?([ \t]*\2[ \t]*(?=\n|$))",
-        _heredoc_repl,
-        cmd,
-        flags=re.DOTALL,
-    )
-    out = re.sub(
-        r"(<<-?\s*\\([A-Za-z_][A-Za-z0-9_-]*)[^\n]*)\n(?:.*?\n)?([ \t]*\2[ \t]*(?=\n|$))",
-        _heredoc_repl,
-        out,
-        flags=re.DOTALL,
-    )
-    return out
+    """Strip quoted heredoc bodies: << 'EOF' ... EOF, << "EOF" ... EOF, << \\EOF ... EOF, << 'P''Y' ... PY (C-FIX-45)."""
+    pattern = re.compile(r"<<(-?)[ \t]*((?:['\"][^'\"]*['\"]|\\[^\s]|[^ \t\n;&|><'\"])+)[^\n]*\n", re.MULTILINE)
+    pos = 0
+    pieces = []
+    last_end = 0
+    while True:
+        m = pattern.search(cmd, pos)
+        if not m:
+            break
+        raw_delim = m.group(2)
+        is_quoted = bool(re.search(r"['\"\\]", raw_delim))
+        delim = re.sub(r"['\"\\]", "", raw_delim)
+        if not delim:
+            pos = m.end()
+            continue
+        body_start = m.end()
+        close_pat = re.compile(r"^[ \t]*" + re.escape(delim) + r"[ \t]*(?:\n|$)", re.MULTILINE)
+        m_close = close_pat.search(cmd, body_start)
+        if m_close:
+            if is_quoted:
+                pieces.append(cmd[last_end:body_start])
+                pieces.append(m_close.group(0))
+                last_end = m_close.end()
+            pos = m_close.end()
+        else:
+            pos = m.end()
+    if last_end < len(cmd):
+        pieces.append(cmd[last_end:])
+    return "".join(pieces) if pieces else cmd
 
 
 def _blank_single_quotes(cmd: str) -> str:
@@ -3090,7 +3102,7 @@ OFFICIAL_ORCA_SCRIPT_HASHES = {
 }
 
 OFFICIAL_SIM_CORE_HASHES = {
-    "run-tests.sh": "8f720612e6167cfa6d39f404485f15d3bc0ee7f2d64d542ccab585fb5f8fb03a",
+    "run-tests.sh": "0539f821c78ec243beb436927e724806d8af5bd488e718a47842802a24cbc479",
     "bin/orca_sim.py": "4ed0558c65c44d4e271f2e2693cef63a1e360e4611478b35289deeea34575b65",
 }
 
@@ -3112,6 +3124,7 @@ OFFICIAL_SIM_TEST_FILES = {
     "probe_cfix39.py",
     "probe_cfix42.py",
     "probe_cfix43.py",
+    "probe_cfix44.py",
 }
 
 OFFICIAL_SIM_TEST_HASHES = {
@@ -3132,6 +3145,7 @@ OFFICIAL_SIM_TEST_HASHES = {
     "probe_cfix39.py": "0320e6e0f18cf8627d93fed2fc2d4536500530dbfbd202f48e6f5aad6df5bc79",
     "probe_cfix42.py": "5433c3c1addb9d8bfcff704c180d57239e0c3c8f1f3c8669463ba68aa0572bbb",
     "probe_cfix43.py": "cf7ccf07765e6b5cc53731da2ec114b13d9528c9983d02c27c48eb5339062a52",
+    "probe_cfix44.py": "22b3a764113a2a6309e4cb3efcf83ce2a3e1a7e8e332d3d2e34ba93aa88ef40b",
 }
 
 
@@ -3232,25 +3246,38 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         re.IGNORECASE,
     )
 
-    # C-FIX-42..C-FIX-44: Unescape \xNN, \uNNNN, fold chr(...) calls and string concatenations to defeat obfuscation
+    # C-FIX-42..C-FIX-45: Unescape \xNN, \uNNNN, fold chr(...) calls, bytes([...]).decode(), and string concatenations
     def _fold_chr_and_escapes(s: str) -> str:
         try:
-            # 1. Decode chr(...) calls with integer literals in dec, hex, oct, bin, or with underscores (D16, D18)
+            # 1. Decode chr(...) calls with integer literals or arithmetic expressions (D16, D18, D21)
             def _eval_chr(m: re.Match) -> str:
                 try:
-                    raw = m.group(1).replace("_", "")
-                    val = int(raw, 0)
+                    expr = m.group(1).replace("_", "")
+                    val = int(eval(expr, {"__builtins__": {}}, {}))
                     if 0 <= val <= 0x10FFFF:
                         return repr(chr(val))
                 except Exception:
                     pass
                 return m.group(0)
 
-            s = re.sub(r"\bchr\s*\(\s*(0[xXoObB][0-9a-fA-F_]+|[0-9_]+)\s*\)", _eval_chr, s)
-            # 2. Decode \xNN and \uNNNN
+            s = re.sub(r"\bchr\s*\(\s*([^()]+?)\s*\)", _eval_chr, s)
+
+            # 2. Decode bytes([..]).decode() and bytearray([..]).decode() (D19)
+            def _eval_bytes_decode(m: re.Match) -> str:
+                try:
+                    nums = [int(x.strip().replace("_", ""), 0) for x in m.group(1).split(",") if x.strip()]
+                    return repr(bytes(nums).decode(errors="ignore"))
+                except Exception:
+                    pass
+                return m.group(0)
+
+            s = re.sub(r"\b(?:bytes|bytearray)\s*\(\s*\[([0-9a-fA-FxXoObB_,\s]+)\]\s*\)\.decode\s*\([^)]*\)", _eval_bytes_decode, s)
+
+            # 3. Decode \xNN and \uNNNN
             s = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), s)
             s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
-            # 3. Repeatedly fold adjacent quotes and '+' string concatenations until convergence
+
+            # 4. Repeatedly fold adjacent quotes and '+' string concatenations until convergence
             while True:
                 nxt = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", s)
                 if nxt == s:
@@ -3357,9 +3384,26 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             else:
                 return "[ORCA DB-INTEGRITY GUARD] CẤM truyền biến shell không xác định vào python -c để thực thi gián tiếp!"
 
-        # C-FIX-43..C-FIX-44: Extract heredoc bodies (e.g. python3 - "$P" <<'PY' ... PY or <<-'PY' ... PY, D17)
-        for m_hd in re.finditer(r"<<-?\s*(?:['\"]|\\)?([A-Za-z_][A-Za-z0-9_-]*)(?:['\"])?[^\n]*\n(.*?)\n[ \t]*\1\b", cmd, re.DOTALL):
-            py_codes.append(m_hd.group(2))
+        # C-FIX-43..C-FIX-45: Extract all heredoc bodies (e.g. <<'EOF', <<-'PY', <<'P''Y' in D20)
+        hd_pat = re.compile(r"<<(-?)[ \t]*((?:['\"][^'\"]*['\"]|\\[^\s]|[^ \t\n;&|><'\"])+)[^\n]*\n", re.MULTILINE)
+        hd_pos = 0
+        while True:
+            m_h = hd_pat.search(cmd, hd_pos)
+            if not m_h:
+                break
+            raw_delim = m_h.group(2)
+            delim = re.sub(r"['\"\\]", "", raw_delim)
+            if not delim:
+                hd_pos = m_h.end()
+                continue
+            b_start = m_h.end()
+            c_pat = re.compile(r"^[ \t]*" + re.escape(delim) + r"[ \t]*(?:\n|$)", re.MULTILINE)
+            m_c = c_pat.search(cmd, b_start)
+            if m_c:
+                py_codes.append(cmd[b_start : m_c.start()])
+                hd_pos = m_c.end()
+            else:
+                hd_pos = m_h.end()
 
         for py_code in py_codes:
             py_code = _fold_chr_and_escapes(py_code)
@@ -5570,8 +5614,9 @@ def _verify_qa_evidence_ledger_and_ancestry(
                         if ast.dump(old_ast, include_attributes=False) == ast.dump(new_ast, include_attributes=False):
                             return False
 
-                        # C-FIX-40..C-FIX-44: Functional progression requires changes to logic, functions, classes, or control flow
-                        # Filter out docstrings, bare constants, dead code (if False, while False, for _ in []), and unused definitions (Assign, AnnAssign, AugAssign, Import, FunctionDef, ClassDef)
+                        # C-FIX-40..C-FIX-45: Functional progression requires changes to logic, functions, classes, or control flow
+                        # Filter out docstrings, bare constants, dead code (if False, while False, for _ in []), and unused definitions (Assign, AnnAssign, AugAssign, Import, FunctionDef, ClassDef, empty Try, empty With)
+                        mod_name = os.path.splitext(os.path.basename(p_clean))[0]
                         external_names = set()
                         try:
                             ls_p = subprocess.run(
@@ -5593,70 +5638,93 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         if f_p.returncode == 0:
                                             try:
                                                 t_tree = ast.parse(f_p.stdout)
+                                                mod_aliases = set()
                                                 for n in ast.walk(t_tree):
-                                                    if isinstance(n, ast.Name):
-                                                        external_names.add(n.id)
-                                                    elif isinstance(n, ast.Attribute):
-                                                        external_names.add(n.attr)
-                                                    elif isinstance(n, ast.alias):
-                                                        external_names.add(n.name.split(".")[0])
-                                                        if n.asname:
-                                                            external_names.add(n.asname)
+                                                    if isinstance(n, ast.Import):
+                                                        for alias in n.names:
+                                                            parts = alias.name.split(".")
+                                                            if parts[-1] == mod_name:
+                                                                mod_aliases.add(alias.asname or parts[-1])
+                                                    elif isinstance(n, ast.ImportFrom):
+                                                        if n.module and (n.module == mod_name or n.module.endswith("." + mod_name)):
+                                                            for alias in n.names:
+                                                                if alias.name == "*":
+                                                                    external_names.add("*")
+                                                                else:
+                                                                    external_names.add(alias.name)
+                                                if mod_aliases:
+                                                    for n in ast.walk(t_tree):
+                                                        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mod_aliases:
+                                                            external_names.add(n.attr)
                                             except Exception:
                                                 pass
                         except Exception:
                             pass
 
                         def _normalize_functional_ast(tree: ast.AST) -> ast.AST:
-                            def _eval_static_bool(node):
-                                if isinstance(node, (ast.Constant, ast.Str, ast.Num)):
-                                    val = getattr(node, "value", getattr(node, "s", getattr(node, "n", None)))
-                                    return bool(val)
-                                if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
-                                    elts = getattr(node, "elts", None)
-                                    if elts is not None:
-                                        return bool(elts)
-                                    keys = getattr(node, "keys", None)
-                                    if keys is not None:
-                                        return bool(keys)
+                            def _eval_static_val(subnode):
+                                if isinstance(subnode, (ast.Constant, ast.Str, ast.Num)):
+                                    return getattr(subnode, "value", getattr(subnode, "s", getattr(subnode, "n", None)))
+                                if isinstance(subnode, ast.List):
+                                    elts = [_eval_static_val(x) for x in subnode.elts]
+                                    if all(e is not None for e in elts): return elts
+                                    return None
+                                if isinstance(subnode, ast.Tuple):
+                                    elts = [_eval_static_val(x) for x in subnode.elts]
+                                    if all(e is not None for e in elts): return tuple(elts)
+                                    return None
+                                if isinstance(subnode, ast.Set):
+                                    elts = [_eval_static_val(x) for x in subnode.elts]
+                                    if all(e is not None for e in elts): return set(elts)
+                                    return None
+                                if isinstance(subnode, ast.Dict):
+                                    keys = [_eval_static_val(k) for k in subnode.keys]
+                                    vals = [_eval_static_val(v) for v in subnode.values]
+                                    if all(k is not None for k in keys) and all(v is not None for v in vals):
+                                        return dict(zip(keys, vals))
+                                    return None
+                                if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Name):
+                                    if subnode.func.id == "len" and len(subnode.args) == 1:
+                                        inner = _eval_static_val(subnode.args[0])
+                                        if inner is not None and hasattr(inner, "__len__"):
+                                            return len(inner)
+                                    elif subnode.func.id == "bool":
+                                        if not subnode.args:
+                                            return False
+                                        inner = _eval_static_val(subnode.args[0])
+                                        if inner is not None:
+                                            return bool(inner)
                                 try:
-                                    val = ast.literal_eval(node)
-                                    return bool(val)
+                                    return ast.literal_eval(subnode)
                                 except Exception:
                                     pass
-                                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                                    if node.func.id == "len" and len(node.args) == 1:
-                                        if _is_static_empty(node.args[0]):
-                                            return False
-                                    elif node.func.id == "bool":
-                                        if not node.args:
-                                            return False
-                                        return _eval_static_bool(node.args[0])
+                                return None
+
+                            def _eval_static_bool(node):
                                 if isinstance(node, ast.Compare):
-                                    try:
-                                        left = ast.literal_eval(node.left)
-                                        res = True
-                                        curr = left
-                                        for op, comp in zip(node.ops, node.comparators):
-                                            right = ast.literal_eval(comp)
-                                            if isinstance(op, ast.Eq): ok = (curr == right)
-                                            elif isinstance(op, ast.NotEq): ok = (curr != right)
-                                            elif isinstance(op, ast.Lt): ok = (curr < right)
-                                            elif isinstance(op, ast.LtE): ok = (curr <= right)
-                                            elif isinstance(op, ast.Gt): ok = (curr > right)
-                                            elif isinstance(op, ast.GtE): ok = (curr >= right)
-                                            elif isinstance(op, ast.Is): ok = (curr is right)
-                                            elif isinstance(op, ast.IsNot): ok = (curr is not right)
-                                            elif isinstance(op, ast.In): ok = (curr in right)
-                                            elif isinstance(op, ast.NotIn): ok = (curr not in right)
-                                            else: return None
-                                            if not ok:
-                                                res = False
-                                                break
-                                            curr = right
-                                        return res
-                                    except Exception:
+                                    left = _eval_static_val(node.left)
+                                    if left is None:
                                         return None
+                                    curr = left
+                                    for op, comp in zip(node.ops, node.comparators):
+                                        right = _eval_static_val(comp)
+                                        if right is None:
+                                            return None
+                                        if isinstance(op, ast.Eq): ok = (curr == right)
+                                        elif isinstance(op, ast.NotEq): ok = (curr != right)
+                                        elif isinstance(op, ast.Lt): ok = (curr < right)
+                                        elif isinstance(op, ast.LtE): ok = (curr <= right)
+                                        elif isinstance(op, ast.Gt): ok = (curr > right)
+                                        elif isinstance(op, ast.GtE): ok = (curr >= right)
+                                        elif isinstance(op, ast.Is): ok = (curr is right)
+                                        elif isinstance(op, ast.IsNot): ok = (curr is not right)
+                                        elif isinstance(op, ast.In): ok = (curr in right)
+                                        elif isinstance(op, ast.NotIn): ok = (curr not in right)
+                                        else: return None
+                                        if not ok:
+                                            return False
+                                        curr = right
+                                    return True
                                 if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
                                     sub = _eval_static_bool(node.operand)
                                     if sub is not None:
@@ -5674,19 +5742,15 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                             if b is True: return True
                                             if b is None: return None
                                         return False
+                                val = _eval_static_val(node)
+                                if val is not None:
+                                    return bool(val)
                                 return None
 
                             def _is_static_empty(node):
-                                if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-                                    return len(node.elts) == 0
-                                if isinstance(node, ast.Dict):
-                                    return len(node.keys) == 0
-                                try:
-                                    val = ast.literal_eval(node)
-                                    if hasattr(val, "__len__"):
-                                        return len(val) == 0
-                                except Exception:
-                                    pass
+                                val = _eval_static_val(node)
+                                if val is not None and hasattr(val, "__len__"):
+                                    return len(val) == 0
                                 return False
 
                             # Pass 1: Prune statically dead control flow branches
@@ -5735,6 +5799,7 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                                     }
                                     exports = self._get_export_names(scope_node)
+                                    has_wildcard = ("*" in external_names)
                                     effective_uses = loaded_names | exports | external_names
 
                                     aug_targets = {
@@ -5749,44 +5814,44 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         # 2. Strip pass statements
                                         if isinstance(stmt, ast.Pass):
                                             continue
-                                        # 3. Strip asserts with statically true conditions (F22, F27, F30)
+                                        # 3. Strip asserts with statically true conditions (F22, F27, F30, F35)
                                         if isinstance(stmt, ast.Assert):
                                             if _eval_static_bool(stmt.test) is True:
                                                 continue
                                         # 4. Strip unused imports (F21, F26, F31)
                                         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
                                             imported = [a.asname or a.name.split(".")[0] for a in stmt.names]
-                                            if all(name not in effective_uses for name in imported):
+                                            if not has_wildcard and all(name not in effective_uses for name in imported):
                                                 continue
-                                        # 5. Strip unused functions (F23, F28)
+                                        # 5. Strip unused functions (F23, F28, F32, F32b)
                                         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                                             if not isinstance(scope_node, ast.ClassDef):
-                                                if stmt.name not in effective_uses:
+                                                if not has_wildcard and stmt.name not in effective_uses:
                                                     continue
                                             else:
                                                 if stmt.name.startswith("_") and not stmt.name.startswith("__") and stmt.name not in effective_uses:
                                                     continue
                                         # 6. Strip unused classes (F29)
                                         if isinstance(stmt, ast.ClassDef):
-                                            if stmt.name not in effective_uses:
+                                            if not has_wildcard and stmt.name not in effective_uses:
                                                 continue
                                         # 7. Strip unused variable assignments (Assign)
                                         if isinstance(stmt, ast.Assign):
                                             targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
                                             if targets:
                                                 only_aug = all(t not in effective_uses or (t in aug_targets and t not in (effective_uses - aug_targets)) for t in targets)
-                                                if only_aug:
+                                                if not has_wildcard and only_aug:
                                                     continue
                                         # 8. Strip unused annotated assignments (AnnAssign, e.g. UNUSED: int = 123)
                                         if isinstance(stmt, ast.AnnAssign):
-                                            if isinstance(stmt.target, ast.Name) and stmt.target.id not in effective_uses:
+                                            if not has_wildcard and isinstance(stmt.target, ast.Name) and stmt.target.id not in effective_uses:
                                                 continue
                                         # 9. Strip unused AugAssign (e.g. _FAKE += 1 in F24)
                                         if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
                                             tname = stmt.target.id
                                             load_count = sum(1 for n in ast.walk(scope_node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id == tname)
                                             num_augs = sum(1 for s in stmts if isinstance(s, ast.AugAssign) and isinstance(s.target, ast.Name) and s.target.id == tname)
-                                            if load_count <= num_augs and tname not in (external_names | exports):
+                                            if not has_wildcard and load_count <= num_augs and tname not in (external_names | exports):
                                                 continue
                                         cleaned.append(stmt)
                                     return cleaned
@@ -5832,8 +5897,28 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                 def visit_Try(self, node):
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
+                                    for h in node.handlers:
+                                        h.body = self._clean_stmts(h.body, h)
                                     node.orelse = self._clean_stmts(node.orelse, node)
                                     node.finalbody = self._clean_stmts(node.finalbody, node)
+                                    if not node.body:
+                                        if node.finalbody:
+                                            return node.finalbody
+                                        return None
+                                    return node
+
+                                def visit_With(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    if not node.body:
+                                        return None
+                                    return node
+
+                                def visit_AsyncWith(self, node):
+                                    self.generic_visit(node)
+                                    node.body = self._clean_stmts(node.body, node)
+                                    if not node.body:
+                                        return None
                                     return node
 
                             for _ in range(3):
