@@ -3089,6 +3089,11 @@ OFFICIAL_ORCA_SCRIPT_HASHES = {
     "orca-pr-review.sh": "6e2ce06d3c4fbd1b9a2820aff1aa1d7e5d24a29a8e11103bf91689f7c76b9f9e",
 }
 
+OFFICIAL_SIM_CORE_HASHES = {
+    "run-tests.sh": "8f720612e6167cfa6d39f404485f15d3bc0ee7f2d64d542ccab585fb5f8fb03a",
+    "bin/orca_sim.py": "4ed0558c65c44d4e271f2e2693cef63a1e360e4611478b35289deeea34575b65",
+}
+
 OFFICIAL_SIM_TEST_FILES = {
     "test_guard_bypass.py",
     "test_guard_adversarial.py",
@@ -3106,6 +3111,7 @@ OFFICIAL_SIM_TEST_FILES = {
     "probe_db_guard_34837ac.py",
     "probe_cfix39.py",
     "probe_cfix42.py",
+    "probe_cfix43.py",
 }
 
 OFFICIAL_SIM_TEST_HASHES = {
@@ -3124,7 +3130,8 @@ OFFICIAL_SIM_TEST_HASHES = {
     "probe_db_guard_edfe31b.py": "07da14c899796ebc7d0a5ac8aba33c283cea783186ceacd66df8bd17c2c38ec3",
     "probe_db_guard_34837ac.py": "6cd117aa0de931e67d92d61d55c1a2633b3dc6cf5dcf2e6b7f770052c0572ac2",
     "probe_cfix39.py": "0320e6e0f18cf8627d93fed2fc2d4536500530dbfbd202f48e6f5aad6df5bc79",
-    "probe_cfix42.py": "8476c2a85d30158d7a297d5cb1a2df6a222dec352c9017920307ff030d73b1bd",
+    "probe_cfix42.py": "5433c3c1addb9d8bfcff704c180d57239e0c3c8f1f3c8669463ba68aa0572bbb",
+    "probe_cfix43.py": "cf7ccf07765e6b5cc53731da2ec114b13d9528c9983d02c27c48eb5339062a52",
 }
 
 
@@ -3142,7 +3149,7 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
             return False
         base = os.path.basename(norm)
 
-        # C-FIX-40..C-FIX-43: Strict path and cryptographic hash validation. Never trust scripts merely by basename, unverified diff, or in arbitrary subdirs.
+        # C-FIX-40..C-FIX-44: Strict path and cryptographic hash validation. Never trust scripts merely by basename, unverified diff, or in arbitrary subdirs.
         # 1. Official Orchestrator repo CLI scripts must strictly reside at <repo_root>/scripts/<script_name>, match embedded release SHA-256 hash, and have 0 uncommitted diffs
         repo_roots = (
             os.path.realpath(os.path.expanduser("~/.orca/orca-multi-agent-orchestrator")),
@@ -3181,10 +3188,23 @@ def _is_official_orca_trusted_path(cand_p: str) -> bool:
 
         # 2. Simulation Harness files must strictly reside in their dedicated canonical locations and match release hashes
         sim_root = os.path.realpath("/Users/macbook/work/tools/orca-sim")
+        # C-FIX-44: Verify exact SHA-256 for run-tests.sh and bin/orca_sim.py (D15)
         if norm == os.path.join(sim_root, "run-tests.sh"):
-            return True
+            try:
+                with open(norm, "rb") as f_sim:
+                    if hashlib.sha256(f_sim.read()).hexdigest() == OFFICIAL_SIM_CORE_HASHES.get("run-tests.sh"):
+                        return True
+            except Exception:
+                pass
+            return False
         if norm == os.path.join(sim_root, "bin", "orca_sim.py"):
-            return True
+            try:
+                with open(norm, "rb") as f_sim:
+                    if hashlib.sha256(f_sim.read()).hexdigest() == OFFICIAL_SIM_CORE_HASHES.get("bin/orca_sim.py"):
+                        return True
+            except Exception:
+                pass
+            return False
         if base in OFFICIAL_SIM_TEST_FILES and norm == os.path.join(sim_root, "tests", base):
             if base in OFFICIAL_SIM_TEST_HASHES:
                 try:
@@ -3212,16 +3232,30 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
         re.IGNORECASE,
     )
 
-    # C-FIX-42..C-FIX-43: Unescape \xNN, \uNNNN, fold chr(...) calls and string concatenations to defeat obfuscation
+    # C-FIX-42..C-FIX-44: Unescape \xNN, \uNNNN, fold chr(...) calls and string concatenations to defeat obfuscation
     def _fold_chr_and_escapes(s: str) -> str:
         try:
-            # 1. Decode chr(NNN) calls
-            s = re.sub(r"\bchr\s*\(\s*(\d{1,6})\s*\)", lambda m: repr(chr(int(m.group(1)))), s)
+            # 1. Decode chr(...) calls with integer literals in dec, hex, oct, bin, or with underscores (D16, D18)
+            def _eval_chr(m: re.Match) -> str:
+                try:
+                    raw = m.group(1).replace("_", "")
+                    val = int(raw, 0)
+                    if 0 <= val <= 0x10FFFF:
+                        return repr(chr(val))
+                except Exception:
+                    pass
+                return m.group(0)
+
+            s = re.sub(r"\bchr\s*\(\s*(0[xXoObB][0-9a-fA-F_]+|[0-9_]+)\s*\)", _eval_chr, s)
             # 2. Decode \xNN and \uNNNN
             s = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), s)
             s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
-            # 3. Fold adjacent quotes and '+' string concatenations
-            s = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", s)
+            # 3. Repeatedly fold adjacent quotes and '+' string concatenations until convergence
+            while True:
+                nxt = re.sub(r"(['\"])\s*(?:\+\s*)?['\"]", "", s)
+                if nxt == s:
+                    break
+                s = nxt
         except Exception:
             pass
         return s
@@ -3323,19 +3357,21 @@ def _check_db_integrity_bash_guard(cmd: str, no_heredoc: str, real_cwd: str) -> 
             else:
                 return "[ORCA DB-INTEGRITY GUARD] CẤM truyền biến shell không xác định vào python -c để thực thi gián tiếp!"
 
-        # C-FIX-43: Extract heredoc bodies (e.g. python3 - "$P" <<'PY' ... PY)
-        for m_hd in re.finditer(r"<<\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*\n(.*?)\n\s*\1\b", cmd, re.DOTALL):
+        # C-FIX-43..C-FIX-44: Extract heredoc bodies (e.g. python3 - "$P" <<'PY' ... PY or <<-'PY' ... PY, D17)
+        for m_hd in re.finditer(r"<<-?\s*(?:['\"]|\\)?([A-Za-z_][A-Za-z0-9_-]*)(?:['\"])?[^\n]*\n(.*?)\n[ \t]*\1\b", cmd, re.DOTALL):
             py_codes.append(m_hd.group(2))
 
         for py_code in py_codes:
             py_code = _fold_chr_and_escapes(py_code)
             if (
                 orch_tbl_re.search(py_code)
-                and (
-                    sql_dml_re.search(py_code)
-                    or re.search(r"connect|execute", py_code)
-                    or re.search(r"sqlite3?", py_code, re.IGNORECASE)
-                )
+                or re.search(r"sqlite3?|orchestration\.db", py_code, re.IGNORECASE)
+                or re.search(r"__import__\s*\(\s*['\"][^'\"]*sq|importlib\.import_module|getattr\s*\([^)]*['\"]co", py_code, re.IGNORECASE)
+            ) and (
+                sql_dml_re.search(py_code)
+                or re.search(r"connect|execute", py_code)
+                or re.search(r"sqlite3?", py_code, re.IGNORECASE)
+                or orch_tbl_re.search(py_code)
             ):
                 return "[ORCA DB-INTEGRITY GUARD] CẤM chạy python chứa mã can thiệp cơ sở dữ liệu điều phối!"
             try:
@@ -5534,8 +5570,43 @@ def _verify_qa_evidence_ledger_and_ancestry(
                         if ast.dump(old_ast, include_attributes=False) == ast.dump(new_ast, include_attributes=False):
                             return False
 
-                        # C-FIX-40..C-FIX-42: Functional progression requires changes to logic, functions, classes, or control flow
-                        # Filter out docstrings, bare constants, dead code (if False, if 0 == 1, for _ in []), and unused assignments (Assign, AnnAssign) in all scopes
+                        # C-FIX-40..C-FIX-44: Functional progression requires changes to logic, functions, classes, or control flow
+                        # Filter out docstrings, bare constants, dead code (if False, while False, for _ in []), and unused definitions (Assign, AnnAssign, AugAssign, Import, FunctionDef, ClassDef)
+                        external_names = set()
+                        try:
+                            ls_p = subprocess.run(
+                                ["git", "-C", real_cwd, "ls-tree", "-r", "--name-only", g_sha],
+                                capture_output=True,
+                                text=True,
+                                timeout=3,
+                            )
+                            if ls_p.returncode == 0:
+                                for t_p in ls_p.stdout.splitlines():
+                                    t_p = t_p.strip()
+                                    if t_p != p_clean and t_p.endswith(".py"):
+                                        f_p = subprocess.run(
+                                            ["git", "-C", real_cwd, "show", f"{g_sha}:{t_p}"],
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=2,
+                                        )
+                                        if f_p.returncode == 0:
+                                            try:
+                                                t_tree = ast.parse(f_p.stdout)
+                                                for n in ast.walk(t_tree):
+                                                    if isinstance(n, ast.Name):
+                                                        external_names.add(n.id)
+                                                    elif isinstance(n, ast.Attribute):
+                                                        external_names.add(n.attr)
+                                                    elif isinstance(n, ast.alias):
+                                                        external_names.add(n.name.split(".")[0])
+                                                        if n.asname:
+                                                            external_names.add(n.asname)
+                                            except Exception:
+                                                pass
+                        except Exception:
+                            pass
+
                         def _normalize_functional_ast(tree: ast.AST) -> ast.AST:
                             def _eval_static_bool(node):
                                 if isinstance(node, (ast.Constant, ast.Str, ast.Num)):
@@ -5553,9 +5624,14 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     return bool(val)
                                 except Exception:
                                     pass
-                                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "len" and len(node.args) == 1:
-                                    if _is_static_empty(node.args[0]):
-                                        return False
+                                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                                    if node.func.id == "len" and len(node.args) == 1:
+                                        if _is_static_empty(node.args[0]):
+                                            return False
+                                    elif node.func.id == "bool":
+                                        if not node.args:
+                                            return False
+                                        return _eval_static_bool(node.args[0])
                                 if isinstance(node, ast.Compare):
                                     try:
                                         left = ast.literal_eval(node.left)
@@ -5613,12 +5689,54 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     pass
                                 return False
 
+                            # Pass 1: Prune statically dead control flow branches
+                            class _DeadBranchPruner(ast.NodeTransformer):
+                                def visit_If(self, node):
+                                    self.generic_visit(node)
+                                    sb = _eval_static_bool(node.test)
+                                    if sb is False:
+                                        return node.orelse
+                                    elif sb is True:
+                                        return node.body
+                                    return node
+
+                                def visit_While(self, node):
+                                    self.generic_visit(node)
+                                    sb = _eval_static_bool(node.test)
+                                    if sb is False:
+                                        return None
+                                    return node
+
+                                def visit_For(self, node):
+                                    self.generic_visit(node)
+                                    if _is_static_empty(node.iter):
+                                        return None
+                                    return node
+
+                            # Pass 2: Clean unused statements and definitions
                             class _FunctionalCleaner(ast.NodeTransformer):
+                                def _get_export_names(self, scope_node):
+                                    exports = set()
+                                    for stmt in getattr(scope_node, "body", []):
+                                        if isinstance(stmt, ast.Assign):
+                                            for t in stmt.targets:
+                                                if isinstance(t, ast.Name) and t.id == "__all__":
+                                                    try:
+                                                        elts = ast.literal_eval(stmt.value)
+                                                        if isinstance(elts, (list, tuple, set)):
+                                                            exports.update(str(x) for x in elts)
+                                                    except Exception:
+                                                        pass
+                                    return exports
+
                                 def _clean_stmts(self, stmts, scope_node):
                                     loaded_names = {
                                         n.id for n in ast.walk(scope_node)
                                         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                                     }
+                                    exports = self._get_export_names(scope_node)
+                                    effective_uses = loaded_names | exports | external_names
+
                                     aug_targets = {
                                         s.target.id for s in stmts
                                         if isinstance(s, ast.AugAssign) and isinstance(s.target, ast.Name)
@@ -5631,55 +5749,44 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                         # 2. Strip pass statements
                                         if isinstance(stmt, ast.Pass):
                                             continue
-                                        # 3. Strip asserts with statically true conditions (F22)
+                                        # 3. Strip asserts with statically true conditions (F22, F27, F30)
                                         if isinstance(stmt, ast.Assert):
                                             if _eval_static_bool(stmt.test) is True:
                                                 continue
-                                        # 4. Strip unused imports (F21)
+                                        # 4. Strip unused imports (F21, F26, F31)
                                         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
                                             imported = [a.asname or a.name.split(".")[0] for a in stmt.names]
-                                            if all(name not in loaded_names for name in imported):
+                                            if all(name not in effective_uses for name in imported):
                                                 continue
-                                        # 5. Strip unused private helper functions (F23)
+                                        # 5. Strip unused functions (F23, F28)
                                         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                                            if stmt.name.startswith("_") and stmt.name not in loaded_names:
+                                            if not isinstance(scope_node, ast.ClassDef):
+                                                if stmt.name not in effective_uses:
+                                                    continue
+                                            else:
+                                                if stmt.name.startswith("_") and not stmt.name.startswith("__") and stmt.name not in effective_uses:
+                                                    continue
+                                        # 6. Strip unused classes (F29)
+                                        if isinstance(stmt, ast.ClassDef):
+                                            if stmt.name not in effective_uses:
                                                 continue
-                                        # 6. Strip unused variable assignments (Assign)
+                                        # 7. Strip unused variable assignments (Assign)
                                         if isinstance(stmt, ast.Assign):
                                             targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
                                             if targets:
-                                                only_aug = all(t not in loaded_names or (t in aug_targets and t not in (loaded_names - aug_targets)) for t in targets)
+                                                only_aug = all(t not in effective_uses or (t in aug_targets and t not in (effective_uses - aug_targets)) for t in targets)
                                                 if only_aug:
                                                     continue
-                                        # 7. Strip unused annotated assignments (AnnAssign, e.g. UNUSED: int = 123)
+                                        # 8. Strip unused annotated assignments (AnnAssign, e.g. UNUSED: int = 123)
                                         if isinstance(stmt, ast.AnnAssign):
-                                            if isinstance(stmt.target, ast.Name) and stmt.target.id not in loaded_names:
+                                            if isinstance(stmt.target, ast.Name) and stmt.target.id not in effective_uses:
                                                 continue
-                                        # 8. Strip unused AugAssign (e.g. _FAKE += 1 in F24)
+                                        # 9. Strip unused AugAssign (e.g. _FAKE += 1 in F24)
                                         if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
                                             tname = stmt.target.id
                                             load_count = sum(1 for n in ast.walk(scope_node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id == tname)
                                             num_augs = sum(1 for s in stmts if isinstance(s, ast.AugAssign) and isinstance(s.target, ast.Name) and s.target.id == tname)
-                                            if load_count <= num_augs:
-                                                continue
-                                        # 9. Statically dead If statements (if False: / if 0: / if 0 == 1: / if len([]): in F25)
-                                        if isinstance(stmt, ast.If):
-                                            sb = _eval_static_bool(stmt.test)
-                                            if sb is False:
-                                                if stmt.orelse:
-                                                    cleaned.extend(self._clean_stmts(stmt.orelse, scope_node))
-                                                continue
-                                            elif sb is True:
-                                                cleaned.extend(self._clean_stmts(stmt.body, scope_node))
-                                                continue
-                                        # 10. Statically dead While statements (while False: / while 0: / while 0 == 1:)
-                                        if isinstance(stmt, ast.While):
-                                            sb = _eval_static_bool(stmt.test)
-                                            if sb is False:
-                                                continue
-                                        # 11. Statically dead For loops (for _ in []: / for _ in ():)
-                                        if isinstance(stmt, ast.For):
-                                            if _is_static_empty(stmt.iter):
+                                            if load_count <= num_augs and tname not in (external_names | exports):
                                                 continue
                                         cleaned.append(stmt)
                                     return cleaned
@@ -5708,24 +5815,18 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
                                     node.orelse = self._clean_stmts(node.orelse, node)
-                                    if not node.body and not node.orelse:
-                                        return None
                                     return node
 
                                 def visit_While(self, node):
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
                                     node.orelse = self._clean_stmts(node.orelse, node)
-                                    if not node.body:
-                                        return None
                                     return node
 
                                 def visit_For(self, node):
                                     self.generic_visit(node)
                                     node.body = self._clean_stmts(node.body, node)
                                     node.orelse = self._clean_stmts(node.orelse, node)
-                                    if not node.body:
-                                        return None
                                     return node
 
                                 def visit_Try(self, node):
@@ -5733,13 +5834,16 @@ def _verify_qa_evidence_ledger_and_ancestry(
                                     node.body = self._clean_stmts(node.body, node)
                                     node.orelse = self._clean_stmts(node.orelse, node)
                                     node.finalbody = self._clean_stmts(node.finalbody, node)
-                                    if not node.body and not node.finalbody:
-                                        return None
                                     return node
 
-                            cleaned_tree = _FunctionalCleaner().visit(tree)
-                            ast.fix_missing_locations(cleaned_tree)
-                            return cleaned_tree
+                            for _ in range(3):
+                                pruner = _DeadBranchPruner()
+                                tree = pruner.visit(tree)
+                                ast.fix_missing_locations(tree)
+                                cleaner = _FunctionalCleaner()
+                                tree = cleaner.visit(tree)
+                                ast.fix_missing_locations(tree)
+                            return tree
 
                         clean_old = _normalize_functional_ast(old_ast)
                         clean_new = _normalize_functional_ast(new_ast)
